@@ -21,12 +21,12 @@ extern crate rustc;
 extern crate rustc_plugin;
 
 use syntax::ast;
-use syntax::attr::AttrMetaMethods;
+use syntax::attr;
 use syntax::ext::base::{MultiDecorator, ExtCtxt, Annotatable};
 use syntax::ext::build::AstBuilder;
-use syntax::parse::token;
+use syntax::symbol::Symbol;
 use syntax::ptr::P;
-use syntax_ext::deriving::generic::{cs_fold, TraitDef, MethodDef, combine_substructure};
+use syntax_ext::deriving::generic::{TraitDef, MethodDef, combine_substructure};
 use syntax_ext::deriving::generic::{Substructure, Struct, EnumMatching};
 use syntax_ext::deriving::generic::ty::{Literal, LifetimeBounds, Path, borrowed_explicit_self};
 use syntax_pos::Span;
@@ -35,7 +35,7 @@ use rustc_plugin::Registry;
 #[plugin_registrar]
 pub fn plugin_registrar(reg: &mut Registry) {
     reg.register_syntax_extension(
-        token::intern("derive_TotalSum"),
+        Symbol::intern("derive_TotalSum"),
         MultiDecorator(box expand));
 }
 
@@ -47,11 +47,12 @@ fn expand(cx: &mut ExtCtxt,
     let trait_def = TraitDef {
         span: span,
         attributes: vec![],
-        path: Path::new(vec!["TotalSum"]),
+        path: Path::new_local("TotalSum"),
         additional_bounds: vec![],
         generics: LifetimeBounds::empty(),
         associated_types: vec![],
         is_unsafe: false,
+        supports_unions: false,
         methods: vec![
             MethodDef {
                 name: "total_sum",
@@ -75,12 +76,12 @@ fn expand(cx: &mut ExtCtxt,
 fn totalsum_substructure(cx: &mut ExtCtxt, trait_span: Span,
                          substr: &Substructure) -> P<ast::Expr> {
     let fields = match *substr.fields {
-        Struct(_, ref fs) | EnumMatching(_, _, ref fs) => fs,
+        Struct(_, ref fs) | EnumMatching(.., ref fs) => fs,
         _ => cx.span_bug(trait_span, "impossible substructure")
     };
 
     fields.iter().fold(cx.expr_isize(trait_span, 0), |acc, ref item| {
-        if item.attrs.iter().find(|a| a.check_name("ignore")).is_some() {
+        if attr::contains_name(&item.attrs, "ignore") {
             acc
         } else {
             cx.expr_binary(item.span, ast::BinOpKind::Add, acc,

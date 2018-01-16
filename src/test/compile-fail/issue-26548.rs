@@ -8,15 +8,16 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// error-pattern: overflow representing the type `S`
+// error-pattern: unsupported cyclic reference between types/traits detected
+// note-pattern: the cycle begins when computing layout of
+// note-pattern: ...which then requires computing layout of
+// note-pattern: ...which then again requires computing layout of
 
-#![feature(rustc_attrs)]
 
 trait Mirror { type It: ?Sized; }
 impl<T: ?Sized> Mirror for T { type It = Self; }
 struct S(Option<<S as Mirror>::It>);
 
-#[rustc_no_mir] // FIXME #27840 MIR tries to represent `std::option::Option<S>` first.
 fn main() {
     let _s = S(None);
 }

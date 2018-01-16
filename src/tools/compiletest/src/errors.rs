@@ -35,7 +35,7 @@ impl FromStr for ErrorKind {
             "ERROR" => Ok(ErrorKind::Error),
             "NOTE" => Ok(ErrorKind::Note),
             "SUGGESTION" => Ok(ErrorKind::Suggestion),
-            "WARN" => Ok(ErrorKind::Warning),
+            "WARN" |
             "WARNING" => Ok(ErrorKind::Warning),
             _ => Err(()),
         }
@@ -45,7 +45,7 @@ impl FromStr for ErrorKind {
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            ErrorKind::Help => write!(f, "help"),
+            ErrorKind::Help => write!(f, "help message"),
             ErrorKind::Error => write!(f, "error"),
             ErrorKind::Note => write!(f, "note"),
             ErrorKind::Suggestion => write!(f, "suggestion"),
@@ -64,7 +64,11 @@ pub struct Error {
 }
 
 #[derive(PartialEq, Debug)]
-enum WhichLine { ThisLine, FollowPrevious(usize), AdjustBackward(usize) }
+enum WhichLine {
+    ThisLine,
+    FollowPrevious(usize),
+    AdjustBackward(usize),
+}
 
 /// Looks for either "//~| KIND MESSAGE" or "//~^^... KIND MESSAGE"
 /// The former is a "follow" that inherits its target from the preceding line;
@@ -91,25 +95,22 @@ pub fn load_errors(testfile: &Path, cfg: Option<&str>) -> Vec<Error> {
 
     let tag = match cfg {
         Some(rev) => format!("//[{}]~", rev),
-        None => format!("//~")
+        None => "//~".to_string(),
     };
 
     rdr.lines()
-       .enumerate()
-       .filter_map(|(line_num, line)| {
-           parse_expected(last_nonfollow_error,
-                          line_num + 1,
-                          &line.unwrap(),
-                          &tag)
-               .map(|(which, error)| {
-                   match which {
-                       FollowPrevious(_) => {}
-                       _ => last_nonfollow_error = Some(error.line_num),
-                   }
-                   error
-               })
-       })
-       .collect()
+        .enumerate()
+        .filter_map(|(line_num, line)| {
+            parse_expected(last_nonfollow_error, line_num + 1, &line.unwrap(), &tag)
+                .map(|(which, error)| {
+                    match which {
+                        FollowPrevious(_) => {}
+                        _ => last_nonfollow_error = Some(error.line_num),
+                    }
+                    error
+                })
+        })
+        .collect()
 }
 
 fn parse_expected(last_nonfollow_error: Option<usize>,
@@ -117,7 +118,10 @@ fn parse_expected(last_nonfollow_error: Option<usize>,
                   line: &str,
                   tag: &str)
                   -> Option<(WhichLine, Error)> {
-    let start = match line.find(tag) { Some(i) => i, None => return None };
+    let start = match line.find(tag) {
+        Some(i) => i,
+        None => return None,
+    };
     let (follow, adjusts) = if line[start + tag.len()..].chars().next().unwrap() == '|' {
         (true, 0)
     } else {
@@ -125,45 +129,54 @@ fn parse_expected(last_nonfollow_error: Option<usize>,
     };
     let kind_start = start + tag.len() + adjusts + (follow as usize);
     let (kind, msg);
-    match
-        line[kind_start..].split_whitespace()
-                          .next()
-                          .expect("Encountered unexpected empty comment")
-                          .parse::<ErrorKind>()
-    {
+    match line[kind_start..]
+        .split_whitespace()
+        .next()
+        .expect("Encountered unexpected empty comment")
+        .parse::<ErrorKind>() {
         Ok(k) => {
             // If we find `//~ ERROR foo` or something like that:
             kind = Some(k);
             let letters = line[kind_start..].chars();
             msg = letters.skip_while(|c| c.is_whitespace())
-                         .skip_while(|c| !c.is_whitespace())
-                         .collect::<String>();
+                .skip_while(|c| !c.is_whitespace())
+                .collect::<String>();
         }
         Err(_) => {
             // Otherwise we found `//~ foo`:
             kind = None;
             let letters = line[kind_start..].chars();
             msg = letters.skip_while(|c| c.is_whitespace())
-                         .collect::<String>();
+                .collect::<String>();
         }
     }
     let msg = msg.trim().to_owned();
 
     let (which, line_num) = if follow {
-        assert!(adjusts == 0, "use either //~| or //~^, not both.");
+        assert_eq!(adjusts, 0, "use either //~| or //~^, not both.");
         let line_num = last_nonfollow_error.expect("encountered //~| without \
                                                     preceding //~^ line.");
         (FollowPrevious(line_num), line_num)
     } else {
-        let which =
-            if adjusts > 0 { AdjustBackward(adjusts) } else { ThisLine };
+        let which = if adjusts > 0 {
+            AdjustBackward(adjusts)
+        } else {
+            ThisLine
+        };
         let line_num = line_num - adjusts;
         (which, line_num)
     };
 
     debug!("line={} tag={:?} which={:?} kind={:?} msg={:?}",
-           line_num, tag, which, kind, msg);
-    Some((which, Error { line_num: line_num,
-                         kind: kind,
-                         msg: msg, }))
+           line_num,
+           tag,
+           which,
+           kind,
+           msg);
+    Some((which,
+          Error {
+        line_num,
+        kind,
+        msg,
+    }))
 }

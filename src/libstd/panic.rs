@@ -8,18 +8,18 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//! Panic support in the standard library
+//! Panic support in the standard library.
 
 #![stable(feature = "std_panic", since = "1.9.0")]
 
 use any::Any;
-use boxed::Box;
 use cell::UnsafeCell;
+use fmt;
 use ops::{Deref, DerefMut};
 use panicking;
 use ptr::{Unique, Shared};
 use rc::Rc;
-use sync::{Arc, Mutex, RwLock};
+use sync::{Arc, Mutex, RwLock, atomic};
 use thread::Result;
 
 #[stable(feature = "panic_hooks", since = "1.10.0")]
@@ -37,7 +37,7 @@ pub use panicking::{take_hook, set_hook, PanicInfo, Location};
 /// In Rust a function can "return" early if it either panics or calls a
 /// function which transitively panics. This sort of control flow is not always
 /// anticipated, and has the possibility of causing subtle bugs through a
-/// combination of two cricial components:
+/// combination of two critical components:
 ///
 /// 1. A data structure is in a temporarily invalid state when the thread
 ///    panics.
@@ -101,7 +101,7 @@ pub use panicking::{take_hook, set_hook, PanicInfo, Location};
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 #[rustc_on_unimplemented = "the type {Self} may not be safely transferred \
                             across an unwind boundary"]
-pub trait UnwindSafe {}
+pub auto trait UnwindSafe {}
 
 /// A marker trait representing types where a shared reference is considered
 /// unwind safe.
@@ -112,10 +112,10 @@ pub trait UnwindSafe {}
 /// This is a "helper marker trait" used to provide impl blocks for the
 /// `UnwindSafe` trait, for more information see that documentation.
 #[stable(feature = "catch_unwind", since = "1.9.0")]
-#[rustc_on_unimplemented = "the type {Self} contains interior mutability \
+#[rustc_on_unimplemented = "the type {Self} may contain interior mutability \
                             and a reference may not be safely transferrable \
                             across a catch_unwind boundary"]
-pub trait RefUnwindSafe {}
+pub auto trait RefUnwindSafe {}
 
 /// A simple wrapper around a type to assert that it is unwind safe.
 ///
@@ -187,8 +187,7 @@ pub struct AssertUnwindSafe<T>(
 // * Unique, an owning pointer, lifts an implementation
 // * Types like Mutex/RwLock which are explicilty poisoned are unwind safe
 // * Our custom AssertUnwindSafe wrapper is indeed unwind safe
-#[stable(feature = "catch_unwind", since = "1.9.0")]
-impl UnwindSafe for .. {}
+
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<'a, T: ?Sized> !UnwindSafe for &'a mut T {}
 #[stable(feature = "catch_unwind", since = "1.9.0")]
@@ -197,9 +196,9 @@ impl<'a, T: RefUnwindSafe + ?Sized> UnwindSafe for &'a T {}
 impl<T: RefUnwindSafe + ?Sized> UnwindSafe for *const T {}
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<T: RefUnwindSafe + ?Sized> UnwindSafe for *mut T {}
-#[stable(feature = "catch_unwind", since = "1.9.0")]
-impl<T: UnwindSafe> UnwindSafe for Unique<T> {}
-#[stable(feature = "catch_unwind", since = "1.9.0")]
+#[unstable(feature = "unique", issue = "27730")]
+impl<T: UnwindSafe + ?Sized> UnwindSafe for Unique<T> {}
+#[unstable(feature = "shared", issue = "27730")]
 impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Shared<T> {}
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<T: ?Sized> UnwindSafe for Mutex<T> {}
@@ -217,15 +216,58 @@ impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Rc<T> {}
 impl<T: RefUnwindSafe + ?Sized> UnwindSafe for Arc<T> {}
 
 // Pretty simple implementations for the `RefUnwindSafe` marker trait,
-// basically just saying that this is a marker trait and `UnsafeCell` is the
+// basically just saying that `UnsafeCell` is the
 // only thing which doesn't implement it (which then transitively applies to
 // everything else).
-#[stable(feature = "catch_unwind", since = "1.9.0")]
-impl RefUnwindSafe for .. {}
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<T: ?Sized> !RefUnwindSafe for UnsafeCell<T> {}
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<T> RefUnwindSafe for AssertUnwindSafe<T> {}
+
+#[stable(feature = "unwind_safe_lock_refs", since = "1.12.0")]
+impl<T: ?Sized> RefUnwindSafe for Mutex<T> {}
+#[stable(feature = "unwind_safe_lock_refs", since = "1.12.0")]
+impl<T: ?Sized> RefUnwindSafe for RwLock<T> {}
+
+#[cfg(target_has_atomic = "ptr")]
+#[stable(feature = "unwind_safe_atomic_refs", since = "1.14.0")]
+impl RefUnwindSafe for atomic::AtomicIsize {}
+#[cfg(target_has_atomic = "8")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicI8 {}
+#[cfg(target_has_atomic = "16")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicI16 {}
+#[cfg(target_has_atomic = "32")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicI32 {}
+#[cfg(target_has_atomic = "64")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicI64 {}
+
+#[cfg(target_has_atomic = "ptr")]
+#[stable(feature = "unwind_safe_atomic_refs", since = "1.14.0")]
+impl RefUnwindSafe for atomic::AtomicUsize {}
+#[cfg(target_has_atomic = "8")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicU8 {}
+#[cfg(target_has_atomic = "16")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicU16 {}
+#[cfg(target_has_atomic = "32")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicU32 {}
+#[cfg(target_has_atomic = "64")]
+#[unstable(feature = "integer_atomics", issue = "32976")]
+impl RefUnwindSafe for atomic::AtomicU64 {}
+
+#[cfg(target_has_atomic = "8")]
+#[stable(feature = "unwind_safe_atomic_refs", since = "1.14.0")]
+impl RefUnwindSafe for atomic::AtomicBool {}
+
+#[cfg(target_has_atomic = "ptr")]
+#[stable(feature = "unwind_safe_atomic_refs", since = "1.14.0")]
+impl<T> RefUnwindSafe for atomic::AtomicPtr<T> {}
 
 #[stable(feature = "catch_unwind", since = "1.9.0")]
 impl<T> Deref for AssertUnwindSafe<T> {
@@ -249,6 +291,15 @@ impl<R, F: FnOnce() -> R> FnOnce<()> for AssertUnwindSafe<F> {
 
     extern "rust-call" fn call_once(self, _args: ()) -> R {
         (self.0)()
+    }
+}
+
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl<T: fmt::Debug> fmt::Debug for AssertUnwindSafe<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_tuple("AssertUnwindSafe")
+            .field(&self.0)
+            .finish()
     }
 }
 
@@ -335,5 +386,5 @@ pub fn catch_unwind<F: FnOnce() -> R + UnwindSafe, R>(f: F) -> Result<R> {
 /// ```
 #[stable(feature = "resume_unwind", since = "1.9.0")]
 pub fn resume_unwind(payload: Box<Any + Send>) -> ! {
-    panicking::rust_panic(payload)
+    panicking::update_count_then_panic(payload)
 }

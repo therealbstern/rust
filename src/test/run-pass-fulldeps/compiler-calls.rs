@@ -21,9 +21,11 @@ extern crate rustc_driver;
 extern crate syntax;
 extern crate rustc_errors as errors;
 
+use rustc::middle::cstore::CrateStore;
 use rustc::session::Session;
 use rustc::session::config::{self, Input};
 use rustc_driver::{driver, CompilerCalls, Compilation};
+use syntax::ast;
 
 use std::path::PathBuf;
 
@@ -35,6 +37,7 @@ impl<'a> CompilerCalls<'a> for TestCalls {
     fn early_callback(&mut self,
                       _: &getopts::Matches,
                       _: &config::Options,
+                      _: &ast::CrateConfig,
                       _: &errors::registry::Registry,
                       _: config::ErrorOutputType)
                       -> Compilation {
@@ -45,6 +48,7 @@ impl<'a> CompilerCalls<'a> for TestCalls {
     fn late_callback(&mut self,
                      _: &getopts::Matches,
                      _: &Session,
+                     _: &CrateStore,
                      _: &Input,
                      _: &Option<PathBuf>,
                      _: &Option<PathBuf>)
@@ -62,6 +66,7 @@ impl<'a> CompilerCalls<'a> for TestCalls {
     fn no_input(&mut self,
                 _: &getopts::Matches,
                 _: &config::Options,
+                _: &ast::CrateConfig,
                 _: &Option<PathBuf>,
                 _: &Option<PathBuf>,
                 _: &errors::registry::Registry)
@@ -82,6 +87,6 @@ fn main() {
     let mut tc = TestCalls { count: 1 };
     // we should never get use this filename, but lets make sure they are valid args.
     let args = vec!["compiler-calls".to_string(), "foo.rs".to_string()];
-    rustc_driver::run_compiler(&args, &mut tc);
+    rustc_driver::run_compiler(&args, &mut tc, None, None);
     assert_eq!(tc.count, 30);
 }

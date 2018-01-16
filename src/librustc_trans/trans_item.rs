@@ -14,584 +14,192 @@
 //! item-path. This is used for unit testing the code that generates
 //! paths etc in all kinds of annoying scenarios.
 
+use asm;
 use attributes;
 use base;
 use consts;
-use context::{CrateContext, SharedCrateContext};
+use context::CrateContext;
 use declare;
-use glue::DropGlueKind;
 use llvm;
-use monomorphize::{self, Instance};
-use inline;
+use monomorphize::Instance;
+use type_of::LayoutLlvmExt;
 use rustc::hir;
-use rustc::hir::map as hir_map;
-use rustc::hir::def_id::DefId;
-use rustc::ty::{self, Ty, TyCtxt, TypeFoldable};
-use rustc::ty::subst;
-use std::hash::{Hash, Hasher};
-use syntax::ast::{self, NodeId};
-use syntax::{attr,errors};
-use syntax::parse::token;
-use type_of;
-use glue;
-use abi::{Abi, FnType};
-use back::symbol_names;
+use rustc::mir::mono::{Linkage, Visibility};
+use rustc::ty::{TyCtxt, TypeFoldable};
+use rustc::ty::layout::LayoutOf;
+use syntax::ast;
+use syntax::attr;
+use syntax_pos::Span;
+use std::fmt;
 
-#[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub enum TransItem<'tcx> {
-    DropGlue(DropGlueKind<'tcx>),
-    Fn(Instance<'tcx>),
-    Static(NodeId)
-}
+pub use rustc::mir::mono::MonoItem;
 
-impl<'tcx> Hash for TransItem<'tcx> {
-    fn hash<H: Hasher>(&self, s: &mut H) {
-        match *self {
-            TransItem::DropGlue(t) => {
-                0u8.hash(s);
-                t.hash(s);
-            },
-            TransItem::Fn(instance) => {
-                1u8.hash(s);
-                instance.def.hash(s);
-                (instance.substs as *const _ as usize).hash(s);
-            }
-            TransItem::Static(node_id) => {
-                2u8.hash(s);
-                node_id.hash(s);
-            }
-        };
-    }
-}
+pub use rustc_mir::monomorphize::item::*;
+pub use rustc_mir::monomorphize::item::MonoItemExt as BaseMonoItemExt;
 
-impl<'a, 'tcx> TransItem<'tcx> {
-
-    pub fn define(&self, ccx: &CrateContext<'a, 'tcx>) {
-
+pub trait MonoItemExt<'a, 'tcx>: fmt::Debug + BaseMonoItemExt<'a, 'tcx> {
+    fn define(&self, ccx: &CrateContext<'a, 'tcx>) {
         debug!("BEGIN IMPLEMENTING '{} ({})' in cgu {}",
-                  self.to_string(ccx.tcx()),
-                  self.to_raw_string(),
-                  ccx.codegen_unit().name);
+               self.to_string(ccx.tcx()),
+               self.to_raw_string(),
+               ccx.codegen_unit().name());
 
-        match *self {
-            TransItem::Static(node_id) => {
-                let item = ccx.tcx().map.expect_item(node_id);
-                if let hir::ItemStatic(_, m, ref expr) = item.node {
-                    match consts::trans_static(&ccx, m, expr, item.id, &item.attrs) {
+        match *self.as_mono_item() {
+            MonoItem::Static(node_id) => {
+                let tcx = ccx.tcx();
+                let item = tcx.hir.expect_item(node_id);
+                if let hir::ItemStatic(_, m, _) = item.node {
+                    match consts::trans_static(&ccx, m, item.id, &item.attrs) {
                         Ok(_) => { /* Cool, everything's alright. */ },
-                        Err(err) => ccx.tcx().sess.span_fatal(expr.span, &err.description()),
+                        Err(err) => {
+                            err.report(tcx, item.span, "static");
+                        }
                     };
                 } else {
                     span_bug!(item.span, "Mismatch between hir::Item type and TransItem type")
                 }
             }
-            TransItem::Fn(instance) => {
-                base::trans_instance(&ccx, instance);
+            MonoItem::GlobalAsm(node_id) => {
+                let item = ccx.tcx().hir.expect_item(node_id);
+                if let hir::ItemGlobalAsm(ref ga) = item.node {
+                    asm::trans_global_asm(ccx, ga);
+                } else {
+                    span_bug!(item.span, "Mismatch between hir::Item type and TransItem type")
+                }
             }
-            TransItem::DropGlue(dg) => {
-                glue::implement_drop_glue(&ccx, dg);
+            MonoItem::Fn(instance) => {
+                base::trans_instance(&ccx, instance);
             }
         }
 
         debug!("END IMPLEMENTING '{} ({})' in cgu {}",
                self.to_string(ccx.tcx()),
                self.to_raw_string(),
-               ccx.codegen_unit().name);
+               ccx.codegen_unit().name());
     }
 
-    pub fn predefine(&self,
-                     ccx: &CrateContext<'a, 'tcx>,
-                     linkage: llvm::Linkage) {
+    fn predefine(&self,
+                 ccx: &CrateContext<'a, 'tcx>,
+                 linkage: Linkage,
+                 visibility: Visibility) {
         debug!("BEGIN PREDEFINING '{} ({})' in cgu {}",
                self.to_string(ccx.tcx()),
                self.to_raw_string(),
-               ccx.codegen_unit().name);
+               ccx.codegen_unit().name());
 
-        let symbol_name = ccx.symbol_map()
-                             .get_or_compute(ccx.shared(), *self);
+        let symbol_name = self.symbol_name(ccx.tcx());
 
         debug!("symbol {}", &symbol_name);
 
-        match *self {
-            TransItem::Static(node_id) => {
-                TransItem::predefine_static(ccx, node_id, linkage, &symbol_name);
+        match *self.as_mono_item() {
+            MonoItem::Static(node_id) => {
+                predefine_static(ccx, node_id, linkage, visibility, &symbol_name);
             }
-            TransItem::Fn(instance) => {
-                TransItem::predefine_fn(ccx, instance, linkage, &symbol_name);
+            MonoItem::Fn(instance) => {
+                predefine_fn(ccx, instance, linkage, visibility, &symbol_name);
             }
-            TransItem::DropGlue(dg) => {
-                TransItem::predefine_drop_glue(ccx, dg, linkage, &symbol_name);
-            }
+            MonoItem::GlobalAsm(..) => {}
         }
 
         debug!("END PREDEFINING '{} ({})' in cgu {}",
                self.to_string(ccx.tcx()),
                self.to_raw_string(),
-               ccx.codegen_unit().name);
+               ccx.codegen_unit().name());
     }
 
-    fn predefine_static(ccx: &CrateContext<'a, 'tcx>,
-                        node_id: ast::NodeId,
-                        linkage: llvm::Linkage,
-                        symbol_name: &str) {
-        let def_id = ccx.tcx().map.local_def_id(node_id);
-        let ty = ccx.tcx().lookup_item_type(def_id).ty;
-        let llty = type_of::type_of(ccx, ty);
-
-        match ccx.tcx().map.get(node_id) {
-            hir::map::NodeItem(&hir::Item {
-                span, node: hir::ItemStatic(..), ..
-            }) => {
-                let g = declare::define_global(ccx, symbol_name, llty).unwrap_or_else(|| {
-                    ccx.sess().span_fatal(span,
-                        &format!("symbol `{}` is already defined", symbol_name))
-                });
-
-                llvm::SetLinkage(g, linkage);
+    fn local_span(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Option<Span> {
+        match *self.as_mono_item() {
+            MonoItem::Fn(Instance { def, .. }) => {
+                tcx.hir.as_local_node_id(def.def_id())
             }
-
-            item => bug!("predefine_static: expected static, found {:?}", item)
-        }
-    }
-
-    fn predefine_fn(ccx: &CrateContext<'a, 'tcx>,
-                    instance: Instance<'tcx>,
-                    linkage: llvm::Linkage,
-                    symbol_name: &str) {
-        assert!(!instance.substs.types.needs_infer() &&
-                !instance.substs.types.has_param_types());
-
-        let instance = inline::maybe_inline_instance(ccx, instance);
-
-        let item_ty = ccx.tcx().lookup_item_type(instance.def).ty;
-        let item_ty = ccx.tcx().erase_regions(&item_ty);
-        let mono_ty = monomorphize::apply_param_substs(ccx.tcx(), instance.substs, &item_ty);
-
-        let fn_node_id = ccx.tcx().map.as_local_node_id(instance.def).unwrap();
-        let map_node = errors::expect(
-            ccx.sess().diagnostic(),
-            ccx.tcx().map.find(fn_node_id),
-            || {
-                format!("while instantiating `{}`, couldn't find it in \
-                     the item map (may have attempted to monomorphize \
-                     an item defined in a different crate?)",
-                    instance)
-            });
-
-        match map_node {
-            hir_map::NodeItem(&hir::Item {
-                ref attrs, node: hir::ItemFn(..), ..
-            }) |
-            hir_map::NodeTraitItem(&hir::TraitItem {
-                ref attrs, node: hir::MethodTraitItem(..), ..
-            }) |
-            hir_map::NodeImplItem(&hir::ImplItem {
-                ref attrs, node: hir::ImplItemKind::Method(..), ..
-            }) => {
-                let lldecl = declare::declare_fn(ccx, symbol_name, mono_ty);
-                llvm::SetLinkage(lldecl, linkage);
-                base::set_link_section(ccx, lldecl, attrs);
-                if linkage == llvm::LinkOnceODRLinkage ||
-                   linkage == llvm::WeakODRLinkage {
-                    llvm::SetUniqueComdat(ccx.llmod(), lldecl);
-                }
-
-                attributes::from_fn_attrs(ccx, attrs, lldecl);
-                ccx.instances().borrow_mut().insert(instance, lldecl);
+            MonoItem::Static(node_id) |
+            MonoItem::GlobalAsm(node_id) => {
+                Some(node_id)
             }
-            _ => bug!("Invalid item for TransItem::Fn: `{:?}`", map_node)
-        };
-
+        }.map(|node_id| tcx.hir.span(node_id))
     }
 
-    fn predefine_drop_glue(ccx: &CrateContext<'a, 'tcx>,
-                           dg: glue::DropGlueKind<'tcx>,
-                           linkage: llvm::Linkage,
-                           symbol_name: &str) {
-        let tcx = ccx.tcx();
-        assert_eq!(dg.ty(), glue::get_drop_glue_type(tcx, dg.ty()));
-        let t = dg.ty();
-
-        let sig = ty::FnSig {
-            inputs: vec![tcx.mk_mut_ptr(tcx.types.i8)],
-            output: ty::FnOutput::FnConverging(tcx.mk_nil()),
-            variadic: false,
-        };
-
-        // Create a FnType for fn(*mut i8) and substitute the real type in
-        // later - that prevents FnType from splitting fat pointers up.
-        let mut fn_ty = FnType::new(ccx, Abi::Rust, &sig, &[]);
-        fn_ty.args[0].original_ty = type_of::type_of(ccx, t).ptr_to();
-        let llfnty = fn_ty.llvm_type(ccx);
-
-        assert!(declare::get_defined_value(ccx, symbol_name).is_none());
-        let llfn = declare::declare_cfn(ccx, symbol_name, llfnty);
-        llvm::SetLinkage(llfn, linkage);
-        if linkage == llvm::LinkOnceODRLinkage ||
-           linkage == llvm::WeakODRLinkage {
-            llvm::SetUniqueComdat(ccx.llmod(), llfn);
-        }
-        attributes::set_frame_pointer_elimination(ccx, llfn);
-        ccx.drop_glues().borrow_mut().insert(dg, (llfn, fn_ty));
-    }
-
-    pub fn compute_symbol_name(&self,
-                               scx: &SharedCrateContext<'a, 'tcx>) -> String {
-        match *self {
-            TransItem::Fn(instance) => instance.symbol_name(scx),
-            TransItem::Static(node_id) => {
-                let def_id = scx.tcx().map.local_def_id(node_id);
-                Instance::mono(scx, def_id).symbol_name(scx)
-            }
-            TransItem::DropGlue(dg) => {
-                let prefix = match dg {
-                    DropGlueKind::Ty(_) => "drop",
-                    DropGlueKind::TyContents(_) => "drop_contents",
-                };
-                symbol_names::exported_name_from_type_and_prefix(scx, dg.ty(), prefix)
-            }
-        }
-    }
-
-    pub fn requests_inline(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> bool {
-        match *self {
-            TransItem::Fn(ref instance) => {
-                !instance.substs.types.is_empty() || {
-                    let attributes = tcx.get_attrs(instance.def);
-                    attr::requests_inline(&attributes[..])
-                }
-            }
-            TransItem::DropGlue(..) => true,
-            TransItem::Static(..)   => false,
-        }
-    }
-
-    pub fn is_from_extern_crate(&self) -> bool {
-        match *self {
-            TransItem::Fn(ref instance) => !instance.def.is_local(),
-            TransItem::DropGlue(..) |
-            TransItem::Static(..)   => false,
-        }
-    }
-
-    pub fn is_instantiated_only_on_demand(&self) -> bool {
-        match *self {
-            TransItem::Fn(ref instance) => !instance.def.is_local() ||
-                                           !instance.substs.types.is_empty(),
-            TransItem::DropGlue(..) => true,
-            TransItem::Static(..)   => false,
-        }
-    }
-
-    pub fn is_generic_fn(&self) -> bool {
-        match *self {
-            TransItem::Fn(ref instance) => !instance.substs.types.is_empty(),
-            TransItem::DropGlue(..) |
-            TransItem::Static(..)   => false,
-        }
-    }
-
-    pub fn explicit_linkage(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Option<llvm::Linkage> {
-        let def_id = match *self {
-            TransItem::Fn(ref instance) => instance.def,
-            TransItem::Static(node_id) => tcx.map.local_def_id(node_id),
-            TransItem::DropGlue(..) => return None,
-        };
-
-        let attributes = tcx.get_attrs(def_id);
-        if let Some(name) = attr::first_attr_value_str_by_name(&attributes, "linkage") {
-            if let Some(linkage) = base::llvm_linkage_by_name(&name) {
-                Some(linkage)
-            } else {
-                let span = tcx.map.span_if_local(def_id);
-                if let Some(span) = span {
-                    tcx.sess.span_fatal(span, "invalid linkage specified")
-                } else {
-                    tcx.sess.fatal(&format!("invalid linkage specified: {}", name))
-                }
-            }
-        } else {
-            None
-        }
-    }
-
-    pub fn to_string(&self, tcx: TyCtxt<'a, 'tcx, 'tcx>) -> String {
-        let hir_map = &tcx.map;
-
-        return match *self {
-            TransItem::DropGlue(dg) => {
-                let mut s = String::with_capacity(32);
-                match dg {
-                    DropGlueKind::Ty(_) => s.push_str("drop-glue "),
-                    DropGlueKind::TyContents(_) => s.push_str("drop-glue-contents "),
-                };
-                push_unique_type_name(tcx, dg.ty(), &mut s);
-                s
-            }
-            TransItem::Fn(instance) => {
-                to_string_internal(tcx, "fn ", instance)
-            },
-            TransItem::Static(node_id) => {
-                let def_id = hir_map.local_def_id(node_id);
-                let instance = Instance::new(def_id,
-                                             tcx.mk_substs(subst::Substs::empty()));
-                to_string_internal(tcx, "static ", instance)
-            },
-        };
-
-        fn to_string_internal<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                        prefix: &str,
-                                        instance: Instance<'tcx>)
-                                        -> String {
-            let mut result = String::with_capacity(32);
-            result.push_str(prefix);
-            push_instance_as_string(tcx, instance, &mut result);
-            result
-        }
-    }
-
-    pub fn to_raw_string(&self) -> String {
-        match *self {
-            TransItem::DropGlue(dg) => {
-                let prefix = match dg {
-                    DropGlueKind::Ty(_) => "Ty",
-                    DropGlueKind::TyContents(_) => "TyContents",
-                };
-                format!("DropGlue({}: {})", prefix, dg.ty() as *const _ as usize)
-            }
-            TransItem::Fn(instance) => {
+    fn to_raw_string(&self) -> String {
+        match *self.as_mono_item() {
+            MonoItem::Fn(instance) => {
                 format!("Fn({:?}, {})",
                          instance.def,
-                         instance.substs as *const _ as usize)
+                         instance.substs.as_ptr() as usize)
             }
-            TransItem::Static(id) => {
+            MonoItem::Static(id) => {
                 format!("Static({:?})", id)
             }
+            MonoItem::GlobalAsm(id) => {
+                format!("GlobalAsm({:?})", id)
+            }
         }
     }
 }
 
+impl<'a, 'tcx> MonoItemExt<'a, 'tcx> for MonoItem<'tcx> {}
 
-//=-----------------------------------------------------------------------------
-// TransItem String Keys
-//=-----------------------------------------------------------------------------
+fn predefine_static<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                              node_id: ast::NodeId,
+                              linkage: Linkage,
+                              visibility: Visibility,
+                              symbol_name: &str) {
+    let def_id = ccx.tcx().hir.local_def_id(node_id);
+    let instance = Instance::mono(ccx.tcx(), def_id);
+    let ty = instance.ty(ccx.tcx());
+    let llty = ccx.layout_of(ty).llvm_type(ccx);
 
-// The code below allows for producing a unique string key for a trans item.
-// These keys are used by the handwritten auto-tests, so they need to be
-// predictable and human-readable.
-//
-// Note: A lot of this could looks very similar to what's already in the
-//       ppaux module. It would be good to refactor things so we only have one
-//       parameterizable implementation for printing types.
+    let g = declare::define_global(ccx, symbol_name, llty).unwrap_or_else(|| {
+        ccx.sess().span_fatal(ccx.tcx().hir.span(node_id),
+            &format!("symbol `{}` is already defined", symbol_name))
+    });
 
-/// Same as `unique_type_name()` but with the result pushed onto the given
-/// `output` parameter.
-pub fn push_unique_type_name<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                       t: ty::Ty<'tcx>,
-                                       output: &mut String) {
-    match t.sty {
-        ty::TyBool              => output.push_str("bool"),
-        ty::TyChar              => output.push_str("char"),
-        ty::TyStr               => output.push_str("str"),
-        ty::TyInt(ast::IntTy::Is)    => output.push_str("isize"),
-        ty::TyInt(ast::IntTy::I8)    => output.push_str("i8"),
-        ty::TyInt(ast::IntTy::I16)   => output.push_str("i16"),
-        ty::TyInt(ast::IntTy::I32)   => output.push_str("i32"),
-        ty::TyInt(ast::IntTy::I64)   => output.push_str("i64"),
-        ty::TyUint(ast::UintTy::Us)   => output.push_str("usize"),
-        ty::TyUint(ast::UintTy::U8)   => output.push_str("u8"),
-        ty::TyUint(ast::UintTy::U16)  => output.push_str("u16"),
-        ty::TyUint(ast::UintTy::U32)  => output.push_str("u32"),
-        ty::TyUint(ast::UintTy::U64)  => output.push_str("u64"),
-        ty::TyFloat(ast::FloatTy::F32) => output.push_str("f32"),
-        ty::TyFloat(ast::FloatTy::F64) => output.push_str("f64"),
-        ty::TyStruct(adt_def, substs) |
-        ty::TyEnum(adt_def, substs) => {
-            push_item_name(tcx, adt_def.did, output);
-            push_type_params(tcx, &substs.types, &[], output);
-        },
-        ty::TyTuple(component_types) => {
-            output.push('(');
-            for &component_type in component_types {
-                push_unique_type_name(tcx, component_type, output);
-                output.push_str(", ");
-            }
-            if !component_types.is_empty() {
-                output.pop();
-                output.pop();
-            }
-            output.push(')');
-        },
-        ty::TyBox(inner_type) => {
-            output.push_str("Box<");
-            push_unique_type_name(tcx, inner_type, output);
-            output.push('>');
-        },
-        ty::TyRawPtr(ty::TypeAndMut { ty: inner_type, mutbl } ) => {
-            output.push('*');
-            match mutbl {
-                hir::MutImmutable => output.push_str("const "),
-                hir::MutMutable => output.push_str("mut "),
-            }
+    unsafe {
+        llvm::LLVMRustSetLinkage(g, base::linkage_to_llvm(linkage));
+        llvm::LLVMRustSetVisibility(g, base::visibility_to_llvm(visibility));
+    }
 
-            push_unique_type_name(tcx, inner_type, output);
-        },
-        ty::TyRef(_, ty::TypeAndMut { ty: inner_type, mutbl }) => {
-            output.push('&');
-            if mutbl == hir::MutMutable {
-                output.push_str("mut ");
-            }
+    ccx.instances().borrow_mut().insert(instance, g);
+    ccx.statics().borrow_mut().insert(g, def_id);
+}
 
-            push_unique_type_name(tcx, inner_type, output);
-        },
-        ty::TyArray(inner_type, len) => {
-            output.push('[');
-            push_unique_type_name(tcx, inner_type, output);
-            output.push_str(&format!("; {}", len));
-            output.push(']');
-        },
-        ty::TySlice(inner_type) => {
-            output.push('[');
-            push_unique_type_name(tcx, inner_type, output);
-            output.push(']');
-        },
-        ty::TyTrait(ref trait_data) => {
-            push_item_name(tcx, trait_data.principal.skip_binder().def_id, output);
-            push_type_params(tcx,
-                             &trait_data.principal.skip_binder().substs.types,
-                             &trait_data.bounds.projection_bounds,
-                             output);
-        },
-        ty::TyFnDef(_, _, &ty::BareFnTy{ unsafety, abi, ref sig } ) |
-        ty::TyFnPtr(&ty::BareFnTy{ unsafety, abi, ref sig } ) => {
-            if unsafety == hir::Unsafety::Unsafe {
-                output.push_str("unsafe ");
-            }
+fn predefine_fn<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                          instance: Instance<'tcx>,
+                          linkage: Linkage,
+                          visibility: Visibility,
+                          symbol_name: &str) {
+    assert!(!instance.substs.needs_infer() &&
+            !instance.substs.has_param_types());
 
-            if abi != ::abi::Abi::Rust {
-                output.push_str("extern \"");
-                output.push_str(abi.name());
-                output.push_str("\" ");
-            }
+    let mono_ty = instance.ty(ccx.tcx());
+    let attrs = instance.def.attrs(ccx.tcx());
+    let lldecl = declare::declare_fn(ccx, symbol_name, mono_ty);
+    unsafe { llvm::LLVMRustSetLinkage(lldecl, base::linkage_to_llvm(linkage)) };
+    base::set_link_section(ccx, lldecl, &attrs);
+    if linkage == Linkage::LinkOnceODR ||
+        linkage == Linkage::WeakODR {
+        llvm::SetUniqueComdat(ccx.llmod(), lldecl);
+    }
 
-            output.push_str("fn(");
-
-            let sig = tcx.erase_late_bound_regions(sig);
-            if !sig.inputs.is_empty() {
-                for &parameter_type in &sig.inputs {
-                    push_unique_type_name(tcx, parameter_type, output);
-                    output.push_str(", ");
-                }
-                output.pop();
-                output.pop();
-            }
-
-            if sig.variadic {
-                if !sig.inputs.is_empty() {
-                    output.push_str(", ...");
-                } else {
-                    output.push_str("...");
-                }
-            }
-
-            output.push(')');
-
-            match sig.output {
-                ty::FnConverging(result_type) if result_type.is_nil() => {}
-                ty::FnConverging(result_type) => {
-                    output.push_str(" -> ");
-                    push_unique_type_name(tcx, result_type, output);
-                }
-                ty::FnDiverging => {
-                    output.push_str(" -> !");
-                }
-            }
-        },
-        ty::TyClosure(def_id, ref closure_substs) => {
-            push_item_name(tcx, def_id, output);
-            output.push_str("{");
-            output.push_str(&format!("{}:{}", def_id.krate, def_id.index.as_usize()));
-            output.push_str("}");
-            push_type_params(tcx, &closure_substs.func_substs.types, &[], output);
+    // If we're compiling the compiler-builtins crate, e.g. the equivalent of
+    // compiler-rt, then we want to implicitly compile everything with hidden
+    // visibility as we're going to link this object all over the place but
+    // don't want the symbols to get exported.
+    if linkage != Linkage::Internal && linkage != Linkage::Private &&
+       attr::contains_name(ccx.tcx().hir.krate_attrs(), "compiler_builtins") {
+        unsafe {
+            llvm::LLVMRustSetVisibility(lldecl, llvm::Visibility::Hidden);
         }
-        ty::TyError |
-        ty::TyInfer(_) |
-        ty::TyProjection(..) |
-        ty::TyParam(_) => {
-            bug!("debuginfo: Trying to create type name for \
-                  unexpected type: {:?}", t);
+    } else {
+        unsafe {
+            llvm::LLVMRustSetVisibility(lldecl, base::visibility_to_llvm(visibility));
         }
     }
-}
 
-fn push_item_name(tcx: TyCtxt,
-                  def_id: DefId,
-                  output: &mut String) {
-    let def_path = tcx.def_path(def_id);
-
-    // some_crate::
-    output.push_str(&tcx.crate_name(def_path.krate));
-    output.push_str("::");
-
-    // foo::bar::ItemName::
-    for part in tcx.def_path(def_id).data {
-        output.push_str(&format!("{}[{}]::",
-                        part.data.as_interned_str(),
-                        part.disambiguator));
+    debug!("predefine_fn: mono_ty = {:?} instance = {:?}", mono_ty, instance);
+    if instance.def.is_inline(ccx.tcx()) {
+        attributes::inline(lldecl, attributes::InlineAttr::Hint);
     }
+    attributes::from_fn_attrs(ccx, lldecl, instance.def.def_id());
 
-    // remove final "::"
-    output.pop();
-    output.pop();
-}
-
-fn push_type_params<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                              types: &'tcx subst::VecPerParamSpace<Ty<'tcx>>,
-                              projections: &[ty::PolyProjectionPredicate<'tcx>],
-                              output: &mut String) {
-    if types.is_empty() && projections.is_empty() {
-        return;
-    }
-
-    output.push('<');
-
-    for &type_parameter in types {
-        push_unique_type_name(tcx, type_parameter, output);
-        output.push_str(", ");
-    }
-
-    for projection in projections {
-        let projection = projection.skip_binder();
-        let name = token::get_ident_interner().get(projection.projection_ty.item_name);
-        output.push_str(&name[..]);
-        output.push_str("=");
-        push_unique_type_name(tcx, projection.ty, output);
-        output.push_str(", ");
-    }
-
-    output.pop();
-    output.pop();
-
-    output.push('>');
-}
-
-fn push_instance_as_string<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                     instance: Instance<'tcx>,
-                                     output: &mut String) {
-    push_item_name(tcx, instance.def, output);
-    push_type_params(tcx, &instance.substs.types, &[], output);
-}
-
-pub fn def_id_to_string(tcx: TyCtxt, def_id: DefId) -> String {
-    let mut output = String::new();
-    push_item_name(tcx, def_id, &mut output);
-    output
-}
-
-pub fn type_to_string<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                ty: ty::Ty<'tcx>)
-                                -> String {
-    let mut output = String::new();
-    push_unique_type_name(tcx, ty, &mut output);
-    output
+    ccx.instances().borrow_mut().insert(instance, lldecl);
 }

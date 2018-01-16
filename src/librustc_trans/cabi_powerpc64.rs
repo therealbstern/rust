@@ -8,238 +8,139 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// FIXME: The PowerPC64 ABI needs to zero or sign extend function
-// call parameters, but compute_abi_info() is passed LLVM types
-// which have no sign information.
-//
+// FIXME:
 // Alignment of 128 bit types is not currently handled, this will
 // need to be fixed when PowerPC vector support is added.
 
-use llvm::{Integer, Pointer, Float, Double, Struct, Array};
-use abi::{FnType, ArgType};
+use abi::{FnType, ArgType, LayoutExt, Reg, RegKind, Uniform};
 use context::CrateContext;
-use type_::Type;
+use rustc::ty::layout;
 
-use std::cmp;
-
-fn align_up_to(off: usize, a: usize) -> usize {
-    return (off + a - 1) / a * a;
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ABI {
+    ELFv1, // original ABI used for powerpc64 (big-endian)
+    ELFv2, // newer ABI used for powerpc64le
 }
+use self::ABI::*;
 
-fn align(off: usize, ty: Type) -> usize {
-    let a = ty_align(ty);
-    return align_up_to(off, a);
-}
-
-fn ty_align(ty: Type) -> usize {
-    match ty.kind() {
-        Integer => ((ty.int_width() as usize) + 7) / 8,
-        Pointer => 8,
-        Float => 4,
-        Double => 8,
-        Struct => {
-            if ty.is_packed() {
-                1
-            } else {
-                let str_tys = ty.field_types();
-                str_tys.iter().fold(1, |a, t| cmp::max(a, ty_align(*t)))
-            }
-        }
-        Array => {
-            let elt = ty.element_type();
-            ty_align(elt)
-        }
-        _ => bug!("ty_align: unhandled type")
-    }
-}
-
-fn ty_size(ty: Type) -> usize {
-    match ty.kind() {
-        Integer => ((ty.int_width() as usize) + 7) / 8,
-        Pointer => 8,
-        Float => 4,
-        Double => 8,
-        Struct => {
-            if ty.is_packed() {
-                let str_tys = ty.field_types();
-                str_tys.iter().fold(0, |s, t| s + ty_size(*t))
-            } else {
-                let str_tys = ty.field_types();
-                let size = str_tys.iter().fold(0, |s, t| align(s, *t) + ty_size(*t));
-                align(size, ty)
-            }
-        }
-        Array => {
-            let len = ty.array_length();
-            let elt = ty.element_type();
-            let eltsz = ty_size(elt);
-            len * eltsz
-        }
-        _ => bug!("ty_size: unhandled type")
-    }
-}
-
-fn is_homogenous_aggregate_ty(ty: Type) -> Option<(Type, u64)> {
-    fn check_array(ty: Type) -> Option<(Type, u64)> {
-        let len = ty.array_length() as u64;
-        if len == 0 {
-            return None
-        }
-        let elt = ty.element_type();
-
-        // if our element is an HFA/HVA, so are we; multiply members by our len
-        is_homogenous_aggregate_ty(elt).map(|(base_ty, members)| (base_ty, len * members))
-    }
-
-    fn check_struct(ty: Type) -> Option<(Type, u64)> {
-        let str_tys = ty.field_types();
-        if str_tys.len() == 0 {
-            return None
+fn is_homogeneous_aggregate<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>,
+                                      arg: &mut ArgType<'tcx>,
+                                      abi: ABI)
+                                     -> Option<Uniform> {
+    arg.layout.homogeneous_aggregate(ccx).and_then(|unit| {
+        // ELFv1 only passes one-member aggregates transparently.
+        // ELFv2 passes up to eight uniquely addressable members.
+        if (abi == ELFv1 && arg.layout.size > unit.size)
+                || arg.layout.size > unit.size.checked_mul(8, ccx).unwrap() {
+            return None;
         }
 
-        let mut prev_base_ty = None;
-        let mut members = 0;
-        for opt_homog_agg in str_tys.iter().map(|t| is_homogenous_aggregate_ty(*t)) {
-            match (prev_base_ty, opt_homog_agg) {
-                // field isn't itself an HFA, so we aren't either
-                (_, None) => return None,
+        let valid_unit = match unit.kind {
+            RegKind::Integer => false,
+            RegKind::Float => true,
+            RegKind::Vector => arg.layout.size.bits() == 128
+        };
 
-                // first field - store its type and number of members
-                (None, Some((field_ty, field_members))) => {
-                    prev_base_ty = Some(field_ty);
-                    members = field_members;
-                },
-
-                // 2nd or later field - give up if it's a different type; otherwise incr. members
-                (Some(prev_ty), Some((field_ty, field_members))) => {
-                    if prev_ty != field_ty {
-                        return None;
-                    }
-                    members += field_members;
-                }
-            }
-        }
-
-        // Because of previous checks, we know prev_base_ty is Some(...) because
-        //   1. str_tys has at least one element; and
-        //   2. prev_base_ty was filled in (or we would've returned early)
-        let (base_ty, members) = (prev_base_ty.unwrap(), members);
-
-        // Ensure there is no padding.
-        if ty_size(ty) == ty_size(base_ty) * (members as usize) {
-            Some((base_ty, members))
-        } else {
-            None
-        }
-    }
-
-    let homog_agg = match ty.kind() {
-        Float  => Some((ty, 1)),
-        Double => Some((ty, 1)),
-        Array  => check_array(ty),
-        Struct => check_struct(ty),
-        _ => None
-    };
-
-    // Ensure we have at most eight uniquely addressable members
-    homog_agg.and_then(|(base_ty, members)| {
-        if members > 0 && members <= 8 {
-            Some((base_ty, members))
+        if valid_unit {
+            Some(Uniform {
+                unit,
+                total: arg.layout.size
+            })
         } else {
             None
         }
     })
 }
 
-fn classify_ret_ty(ccx: &CrateContext, ret: &mut ArgType) {
-    if is_reg_ty(ret.ty) {
+fn classify_ret_ty<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>, ret: &mut ArgType<'tcx>, abi: ABI) {
+    if !ret.layout.is_aggregate() {
         ret.extend_integer_width_to(64);
         return;
     }
 
-    // The PowerPC64 big endian ABI doesn't return aggregates in registers
-    if ccx.sess().target.target.target_endian == "big" {
-        ret.make_indirect(ccx);
-    }
-
-    if let Some((base_ty, members)) = is_homogenous_aggregate_ty(ret.ty) {
-        ret.cast = Some(Type::array(&base_ty, members));
+    // The ELFv1 ABI doesn't return aggregates in registers
+    if abi == ELFv1 {
+        ret.make_indirect();
         return;
     }
-    let size = ty_size(ret.ty);
-    if size <= 16 {
-        let llty = if size <= 1 {
-            Type::i8(ccx)
-        } else if size <= 2 {
-            Type::i16(ccx)
-        } else if size <= 4 {
-            Type::i32(ccx)
-        } else if size <= 8 {
-            Type::i64(ccx)
+
+    if let Some(uniform) = is_homogeneous_aggregate(ccx, ret, abi) {
+        ret.cast_to(uniform);
+        return;
+    }
+
+    let size = ret.layout.size;
+    let bits = size.bits();
+    if bits <= 128 {
+        let unit = if bits <= 8 {
+            Reg::i8()
+        } else if bits <= 16 {
+            Reg::i16()
+        } else if bits <= 32 {
+            Reg::i32()
         } else {
-            Type::array(&Type::i64(ccx), ((size + 7 ) / 8 ) as u64)
+            Reg::i64()
         };
-        ret.cast = Some(llty);
+
+        ret.cast_to(Uniform {
+            unit,
+            total: size
+        });
         return;
     }
 
-    ret.make_indirect(ccx);
+    ret.make_indirect();
 }
 
-fn classify_arg_ty(ccx: &CrateContext, arg: &mut ArgType) {
-    if is_reg_ty(arg.ty) {
+fn classify_arg_ty<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>, arg: &mut ArgType<'tcx>, abi: ABI) {
+    if !arg.layout.is_aggregate() {
         arg.extend_integer_width_to(64);
         return;
     }
 
-    if let Some((base_ty, members)) = is_homogenous_aggregate_ty(arg.ty) {
-        arg.cast = Some(Type::array(&base_ty, members));
+    if let Some(uniform) = is_homogeneous_aggregate(ccx, arg, abi) {
+        arg.cast_to(uniform);
         return;
     }
 
-    arg.cast = Some(struct_ty(ccx, arg.ty));
+    let size = arg.layout.size;
+    let (unit, total) = match abi {
+        ELFv1 => {
+            // In ELFv1, aggregates smaller than a doubleword should appear in
+            // the least-significant bits of the parameter doubleword.  The rest
+            // should be padded at their tail to fill out multiple doublewords.
+            if size.bits() <= 64 {
+                (Reg { kind: RegKind::Integer, size }, size)
+            } else {
+                let align = layout::Align::from_bits(64, 64).unwrap();
+                (Reg::i64(), size.abi_align(align))
+            }
+        },
+        ELFv2 => {
+            // In ELFv2, we can just cast directly.
+            (Reg::i64(), size)
+        },
+    };
+
+    arg.cast_to(Uniform {
+        unit,
+        total
+    });
 }
 
-fn is_reg_ty(ty: Type) -> bool {
-    match ty.kind() {
-        Integer
-        | Pointer
-        | Float
-        | Double => true,
-        _ => false
-    }
-}
+pub fn compute_abi_info<'a, 'tcx>(ccx: &CrateContext<'a, 'tcx>, fty: &mut FnType<'tcx>) {
+    let abi = match ccx.sess().target.target.target_endian.as_str() {
+        "big" => ELFv1,
+        "little" => ELFv2,
+        _ => unimplemented!(),
+    };
 
-fn coerce_to_long(ccx: &CrateContext, size: usize) -> Vec<Type> {
-    let long_ty = Type::i64(ccx);
-    let mut args = Vec::new();
-
-    let mut n = size / 64;
-    while n > 0 {
-        args.push(long_ty);
-        n -= 1;
-    }
-
-    let r = size % 64;
-    if r > 0 {
-        args.push(Type::ix(ccx, r as u64));
-    }
-
-    args
-}
-
-fn struct_ty(ccx: &CrateContext, ty: Type) -> Type {
-    let size = ty_size(ty) * 8;
-    Type::struct_(ccx, &coerce_to_long(ccx, size), false)
-}
-
-pub fn compute_abi_info(ccx: &CrateContext, fty: &mut FnType) {
     if !fty.ret.is_ignore() {
-        classify_ret_ty(ccx, &mut fty.ret);
+        classify_ret_ty(ccx, &mut fty.ret, abi);
     }
 
     for arg in &mut fty.args {
         if arg.is_ignore() { continue; }
-        classify_arg_ty(ccx, arg);
+        classify_arg_ty(ccx, arg, abi);
     }
 }

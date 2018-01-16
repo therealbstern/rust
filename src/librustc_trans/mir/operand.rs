@@ -9,19 +9,23 @@
 // except according to those terms.
 
 use llvm::ValueRef;
-use rustc::ty::Ty;
-use rustc::mir::repr as mir;
+use rustc::ty;
+use rustc::ty::layout::{self, Align, LayoutOf, TyLayout};
+use rustc::mir;
 use rustc_data_structures::indexed_vec::Idx;
 
 use base;
-use common::{self, Block, BlockAndBuilder};
+use common::{self, CrateContext, C_undef, C_usize};
+use builder::Builder;
 use value::Value;
-use type_of;
+use type_of::LayoutLlvmExt;
 use type_::Type;
 
 use std::fmt;
+use std::ptr;
 
 use super::{MirContext, LocalRef};
+use super::place::PlaceRef;
 
 /// The representation of a Rust value. The enum variant is in fact
 /// uniquely determined by the value's type, but is kept as a
@@ -30,11 +34,27 @@ use super::{MirContext, LocalRef};
 pub enum OperandValue {
     /// A reference to the actual operand. The data is guaranteed
     /// to be valid for the operand's lifetime.
-    Ref(ValueRef),
+    Ref(ValueRef, Align),
     /// A single LLVM value.
     Immediate(ValueRef),
     /// A pair of immediate LLVM values. Used by fat pointers too.
     Pair(ValueRef, ValueRef)
+}
+
+impl fmt::Debug for OperandValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+            OperandValue::Ref(r, align) => {
+                write!(f, "Ref({:?}, {:?})", Value(r), align)
+            }
+            OperandValue::Immediate(i) => {
+                write!(f, "Immediate({:?})", Value(i))
+            }
+            OperandValue::Pair(a, b) => {
+                write!(f, "Pair({:?}, {:?})", Value(a), Value(b))
+            }
+        }
+    }
 }
 
 /// An `OperandRef` is an "SSA" reference to a Rust value, along with
@@ -42,235 +62,280 @@ pub enum OperandValue {
 ///
 /// NOTE: unless you know a value's type exactly, you should not
 /// generate LLVM opcodes acting on it and instead act via methods,
-/// to avoid nasty edge cases. In particular, using `Builder.store`
-/// directly is sure to cause problems -- use `MirContext.store_operand`
+/// to avoid nasty edge cases. In particular, using `Builder::store`
+/// directly is sure to cause problems -- use `OperandRef::store`
 /// instead.
 #[derive(Copy, Clone)]
 pub struct OperandRef<'tcx> {
     // The value.
     pub val: OperandValue,
 
-    // The type of value being returned.
-    pub ty: Ty<'tcx>
+    // The layout of value, based on its Rust type.
+    pub layout: TyLayout<'tcx>,
 }
 
 impl<'tcx> fmt::Debug for OperandRef<'tcx> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self.val {
-            OperandValue::Ref(r) => {
-                write!(f, "OperandRef(Ref({:?}) @ {:?})",
-                       Value(r), self.ty)
-            }
-            OperandValue::Immediate(i) => {
-                write!(f, "OperandRef(Immediate({:?}) @ {:?})",
-                       Value(i), self.ty)
-            }
-            OperandValue::Pair(a, b) => {
-                write!(f, "OperandRef(Pair({:?}, {:?}) @ {:?})",
-                       Value(a), Value(b), self.ty)
-            }
-        }
+        write!(f, "OperandRef({:?} @ {:?})", self.val, self.layout)
     }
 }
 
-impl<'bcx, 'tcx> OperandRef<'tcx> {
+impl<'a, 'tcx> OperandRef<'tcx> {
+    pub fn new_zst(ccx: &CrateContext<'a, 'tcx>,
+                   layout: TyLayout<'tcx>) -> OperandRef<'tcx> {
+        assert!(layout.is_zst());
+        OperandRef {
+            val: OperandValue::Immediate(C_undef(layout.immediate_llvm_type(ccx))),
+            layout
+        }
+    }
+
     /// Asserts that this operand refers to a scalar and returns
     /// a reference to its value.
     pub fn immediate(self) -> ValueRef {
         match self.val {
             OperandValue::Immediate(s) => s,
-            _ => bug!()
+            _ => bug!("not immediate: {:?}", self)
         }
     }
 
-    /// If this operand is a Pair, we return an
-    /// Immediate aggregate with the two values.
-    pub fn pack_if_pair(mut self, bcx: &BlockAndBuilder<'bcx, 'tcx>)
-                        -> OperandRef<'tcx> {
+    pub fn deref(self, ccx: &CrateContext<'a, 'tcx>) -> PlaceRef<'tcx> {
+        let projected_ty = self.layout.ty.builtin_deref(true, ty::NoPreference)
+            .unwrap_or_else(|| bug!("deref of non-pointer {:?}", self)).ty;
+        let (llptr, llextra) = match self.val {
+            OperandValue::Immediate(llptr) => (llptr, ptr::null_mut()),
+            OperandValue::Pair(llptr, llextra) => (llptr, llextra),
+            OperandValue::Ref(..) => bug!("Deref of by-Ref operand {:?}", self)
+        };
+        let layout = ccx.layout_of(projected_ty);
+        PlaceRef {
+            llval: llptr,
+            llextra,
+            layout,
+            align: layout.align,
+        }
+    }
+
+    /// If this operand is a `Pair`, we return an aggregate with the two values.
+    /// For other cases, see `immediate`.
+    pub fn immediate_or_packed_pair(self, bcx: &Builder<'a, 'tcx>) -> ValueRef {
         if let OperandValue::Pair(a, b) = self.val {
+            let llty = self.layout.llvm_type(bcx.ccx);
+            debug!("Operand::immediate_or_packed_pair: packing {:?} into {:?}",
+                   self, llty);
             // Reconstruct the immediate aggregate.
-            let llty = type_of::type_of(bcx.ccx(), self.ty);
-            let mut llpair = common::C_undef(llty);
-            let elems = [a, b];
-            for i in 0..2 {
-                let mut elem = elems[i];
-                // Extend boolean i1's to i8.
-                if common::val_ty(elem) == Type::i1(bcx.ccx()) {
-                    elem = bcx.zext(elem, Type::i8(bcx.ccx()));
-                }
-                llpair = bcx.insert_value(llpair, elem, i);
-            }
-            self.val = OperandValue::Immediate(llpair);
+            let mut llpair = C_undef(llty);
+            llpair = bcx.insert_value(llpair, a, 0);
+            llpair = bcx.insert_value(llpair, b, 1);
+            llpair
+        } else {
+            self.immediate()
         }
-        self
     }
 
-    /// If this operand is a pair in an Immediate,
-    /// we return a Pair with the two halves.
-    pub fn unpack_if_pair(mut self, bcx: &BlockAndBuilder<'bcx, 'tcx>)
-                          -> OperandRef<'tcx> {
-        if let OperandValue::Immediate(llval) = self.val {
+    /// If the type is a pair, we return a `Pair`, otherwise, an `Immediate`.
+    pub fn from_immediate_or_packed_pair(bcx: &Builder<'a, 'tcx>,
+                                         llval: ValueRef,
+                                         layout: TyLayout<'tcx>)
+                                         -> OperandRef<'tcx> {
+        let val = if layout.is_llvm_scalar_pair() {
+            debug!("Operand::from_immediate_or_packed_pair: unpacking {:?} @ {:?}",
+                    llval, layout);
+
             // Deconstruct the immediate aggregate.
-            if common::type_is_imm_pair(bcx.ccx(), self.ty) {
-                debug!("Operand::unpack_if_pair: unpacking {:?}", self);
+            OperandValue::Pair(bcx.extract_value(llval, 0),
+                               bcx.extract_value(llval, 1))
+        } else {
+            OperandValue::Immediate(llval)
+        };
+        OperandRef { val, layout }
+    }
 
-                let mut a = bcx.extract_value(llval, 0);
-                let mut b = bcx.extract_value(llval, 1);
+    pub fn extract_field(&self, bcx: &Builder<'a, 'tcx>, i: usize) -> OperandRef<'tcx> {
+        let field = self.layout.field(bcx.ccx, i);
+        let offset = self.layout.fields.offset(i);
 
-                let pair_fields = common::type_pair_fields(bcx.ccx(), self.ty);
-                if let Some([a_ty, b_ty]) = pair_fields {
-                    if a_ty.is_bool() {
-                        a = bcx.trunc(a, Type::i1(bcx.ccx()));
-                    }
-                    if b_ty.is_bool() {
-                        b = bcx.trunc(b, Type::i1(bcx.ccx()));
-                    }
-                }
-
-                self.val = OperandValue::Pair(a, b);
+        let mut val = match (self.val, &self.layout.abi) {
+            // If we're uninhabited, or the field is ZST, it has no data.
+            _ if self.layout.abi == layout::Abi::Uninhabited || field.is_zst() => {
+                return OperandRef {
+                    val: OperandValue::Immediate(C_undef(field.immediate_llvm_type(bcx.ccx))),
+                    layout: field
+                };
             }
+
+            // Newtype of a scalar, scalar pair or vector.
+            (OperandValue::Immediate(_), _) |
+            (OperandValue::Pair(..), _) if field.size == self.layout.size => {
+                assert_eq!(offset.bytes(), 0);
+                self.val
+            }
+
+            // Extract a scalar component from a pair.
+            (OperandValue::Pair(a_llval, b_llval), &layout::Abi::ScalarPair(ref a, ref b)) => {
+                if offset.bytes() == 0 {
+                    assert_eq!(field.size, a.value.size(bcx.ccx));
+                    OperandValue::Immediate(a_llval)
+                } else {
+                    assert_eq!(offset, a.value.size(bcx.ccx)
+                        .abi_align(b.value.align(bcx.ccx)));
+                    assert_eq!(field.size, b.value.size(bcx.ccx));
+                    OperandValue::Immediate(b_llval)
+                }
+            }
+
+            // `#[repr(simd)]` types are also immediate.
+            (OperandValue::Immediate(llval), &layout::Abi::Vector { .. }) => {
+                OperandValue::Immediate(
+                    bcx.extract_element(llval, C_usize(bcx.ccx, i as u64)))
+            }
+
+            _ => bug!("OperandRef::extract_field({:?}): not applicable", self)
+        };
+
+        // HACK(eddyb) have to bitcast pointers until LLVM removes pointee types.
+        match val {
+            OperandValue::Immediate(ref mut llval) => {
+                *llval = bcx.bitcast(*llval, field.immediate_llvm_type(bcx.ccx));
+            }
+            OperandValue::Pair(ref mut a, ref mut b) => {
+                *a = bcx.bitcast(*a, field.scalar_pair_element_llvm_type(bcx.ccx, 0));
+                *b = bcx.bitcast(*b, field.scalar_pair_element_llvm_type(bcx.ccx, 1));
+            }
+            OperandValue::Ref(..) => bug!()
         }
-        self
+
+        OperandRef {
+            val,
+            layout: field
+        }
     }
 }
 
-impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
-    pub fn trans_load(&mut self,
-                      bcx: &BlockAndBuilder<'bcx, 'tcx>,
-                      llval: ValueRef,
-                      ty: Ty<'tcx>)
-                      -> OperandRef<'tcx>
-    {
-        debug!("trans_load: {:?} @ {:?}", Value(llval), ty);
-
-        let val = if common::type_is_imm_pair(bcx.ccx(), ty) {
-            let a_ptr = bcx.struct_gep(llval, 0);
-            let b_ptr = bcx.struct_gep(llval, 1);
-
-            // This is None only for fat pointers, which don't
-            // need any special load-time behavior anyway.
-            let pair_fields = common::type_pair_fields(bcx.ccx(), ty);
-            let (a, b) = if let Some([a_ty, b_ty]) = pair_fields {
-                (base::load_ty_builder(bcx, a_ptr, a_ty),
-                 base::load_ty_builder(bcx, b_ptr, b_ty))
-            } else {
-                (bcx.load(a_ptr), bcx.load(b_ptr))
-            };
-            OperandValue::Pair(a, b)
-        } else if common::type_is_immediate(bcx.ccx(), ty) {
-            OperandValue::Immediate(base::load_ty_builder(bcx, llval, ty))
-        } else {
-            OperandValue::Ref(llval)
-        };
-
-        OperandRef { val: val, ty: ty }
+impl<'a, 'tcx> OperandValue {
+    pub fn store(self, bcx: &Builder<'a, 'tcx>, dest: PlaceRef<'tcx>) {
+        debug!("OperandRef::store: operand={:?}, dest={:?}", self, dest);
+        // Avoid generating stores of zero-sized values, because the only way to have a zero-sized
+        // value is through `undef`, and store itself is useless.
+        if dest.layout.is_zst() {
+            return;
+        }
+        match self {
+            OperandValue::Ref(r, source_align) =>
+                base::memcpy_ty(bcx, dest.llval, r, dest.layout,
+                                source_align.min(dest.align)),
+            OperandValue::Immediate(s) => {
+                bcx.store(base::from_immediate(bcx, s), dest.llval, dest.align);
+            }
+            OperandValue::Pair(a, b) => {
+                for (i, &x) in [a, b].iter().enumerate() {
+                    let mut llptr = bcx.struct_gep(dest.llval, i as u64);
+                    // Make sure to always store i1 as i8.
+                    if common::val_ty(x) == Type::i1(bcx.ccx) {
+                        llptr = bcx.pointercast(llptr, Type::i8p(bcx.ccx));
+                    }
+                    bcx.store(base::from_immediate(bcx, x), llptr, dest.align);
+                }
+            }
+        }
     }
+}
 
-    pub fn trans_consume(&mut self,
-                         bcx: &BlockAndBuilder<'bcx, 'tcx>,
-                         lvalue: &mir::Lvalue<'tcx>)
-                         -> OperandRef<'tcx>
+impl<'a, 'tcx> MirContext<'a, 'tcx> {
+    fn maybe_trans_consume_direct(&mut self,
+                                  bcx: &Builder<'a, 'tcx>,
+                                  place: &mir::Place<'tcx>)
+                                   -> Option<OperandRef<'tcx>>
     {
-        debug!("trans_consume(lvalue={:?})", lvalue);
+        debug!("maybe_trans_consume_direct(place={:?})", place);
 
         // watch out for locals that do not have an
         // alloca; they are handled somewhat differently
-        if let Some(index) = self.mir.local_index(lvalue) {
+        if let mir::Place::Local(index) = *place {
             match self.locals[index] {
                 LocalRef::Operand(Some(o)) => {
-                    return o;
+                    return Some(o);
                 }
                 LocalRef::Operand(None) => {
-                    bug!("use of {:?} before def", lvalue);
+                    bug!("use of {:?} before def", place);
                 }
-                LocalRef::Lvalue(..) => {
+                LocalRef::Place(..) => {
                     // use path below
                 }
             }
         }
 
-        // Moves out of pair fields are trivial.
-        if let &mir::Lvalue::Projection(ref proj) = lvalue {
-            if let Some(index) = self.mir.local_index(&proj.base) {
-                if let LocalRef::Operand(Some(o)) = self.locals[index] {
-                    match (o.val, &proj.elem) {
-                        (OperandValue::Pair(a, b),
-                         &mir::ProjectionElem::Field(ref f, ty)) => {
-                            let llval = [a, b][f.index()];
-                            let op = OperandRef {
-                                val: OperandValue::Immediate(llval),
-                                ty: bcx.monomorphize(&ty)
-                            };
-
-                            // Handle nested pairs.
-                            return op.unpack_if_pair(bcx);
-                        }
-                        _ => {}
+        // Moves out of scalar and scalar pair fields are trivial.
+        if let &mir::Place::Projection(ref proj) = place {
+            if let Some(o) = self.maybe_trans_consume_direct(bcx, &proj.base) {
+                match proj.elem {
+                    mir::ProjectionElem::Field(ref f, _) => {
+                        return Some(o.extract_field(bcx, f.index()));
                     }
+                    mir::ProjectionElem::Index(_) |
+                    mir::ProjectionElem::ConstantIndex { .. } => {
+                        // ZSTs don't require any actual memory access.
+                        // FIXME(eddyb) deduplicate this with the identical
+                        // checks in `trans_consume` and `extract_field`.
+                        let elem = o.layout.field(bcx.ccx, 0);
+                        if elem.is_zst() {
+                            return Some(OperandRef::new_zst(bcx.ccx, elem));
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
-        // for most lvalues, to consume them we just load them
+        None
+    }
+
+    pub fn trans_consume(&mut self,
+                         bcx: &Builder<'a, 'tcx>,
+                         place: &mir::Place<'tcx>)
+                         -> OperandRef<'tcx>
+    {
+        debug!("trans_consume(place={:?})", place);
+
+        let ty = self.monomorphized_place_ty(place);
+        let layout = bcx.ccx.layout_of(ty);
+
+        // ZSTs don't require any actual memory access.
+        if layout.is_zst() {
+            return OperandRef::new_zst(bcx.ccx, layout);
+        }
+
+        if let Some(o) = self.maybe_trans_consume_direct(bcx, place) {
+            return o;
+        }
+
+        // for most places, to consume them we just load them
         // out from their home
-        let tr_lvalue = self.trans_lvalue(bcx, lvalue);
-        let ty = tr_lvalue.ty.to_ty(bcx.tcx());
-        self.trans_load(bcx, tr_lvalue.llval, ty)
+        self.trans_place(bcx, place).load(bcx)
     }
 
     pub fn trans_operand(&mut self,
-                         bcx: &BlockAndBuilder<'bcx, 'tcx>,
+                         bcx: &Builder<'a, 'tcx>,
                          operand: &mir::Operand<'tcx>)
                          -> OperandRef<'tcx>
     {
         debug!("trans_operand(operand={:?})", operand);
 
         match *operand {
-            mir::Operand::Consume(ref lvalue) => {
-                self.trans_consume(bcx, lvalue)
+            mir::Operand::Copy(ref place) |
+            mir::Operand::Move(ref place) => {
+                self.trans_consume(bcx, place)
             }
 
             mir::Operand::Constant(ref constant) => {
-                let val = self.trans_constant(bcx, constant);
-                let operand = val.to_operand(bcx.ccx());
-                if let OperandValue::Ref(ptr) = operand.val {
+                let val = self.trans_constant(&bcx, constant);
+                let operand = val.to_operand(bcx.ccx);
+                if let OperandValue::Ref(ptr, align) = operand.val {
                     // If this is a OperandValue::Ref to an immediate constant, load it.
-                    self.trans_load(bcx, ptr, operand.ty)
+                    PlaceRef::new_sized(ptr, operand.layout, align).load(bcx)
                 } else {
                     operand
                 }
-            }
-        }
-    }
-
-    pub fn store_operand(&mut self,
-                         bcx: &BlockAndBuilder<'bcx, 'tcx>,
-                         lldest: ValueRef,
-                         operand: OperandRef<'tcx>)
-    {
-        debug!("store_operand: operand={:?}", operand);
-        bcx.with_block(|bcx| self.store_operand_direct(bcx, lldest, operand))
-    }
-
-    pub fn store_operand_direct(&mut self,
-                                bcx: Block<'bcx, 'tcx>,
-                                lldest: ValueRef,
-                                operand: OperandRef<'tcx>)
-    {
-        // Avoid generating stores of zero-sized values, because the only way to have a zero-sized
-        // value is through `undef`, and store itself is useless.
-        if common::type_is_zero_size(bcx.ccx(), operand.ty) {
-            return;
-        }
-        match operand.val {
-            OperandValue::Ref(r) => base::memcpy_ty(bcx, lldest, r, operand.ty),
-            OperandValue::Immediate(s) => base::store_ty(bcx, s, lldest, operand.ty),
-            OperandValue::Pair(a, b) => {
-                use build::*;
-                let a = base::from_immediate(bcx, a);
-                let b = base::from_immediate(bcx, b);
-                Store(bcx, a, StructGEP(bcx, lldest, 0));
-                Store(bcx, b, StructGEP(bcx, lldest, 1));
             }
         }
     }

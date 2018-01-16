@@ -17,17 +17,31 @@ pub struct BitVector {
 }
 
 impl BitVector {
+    #[inline]
     pub fn new(num_bits: usize) -> BitVector {
         let num_words = u64s(num_bits);
         BitVector { data: vec![0; num_words] }
     }
 
+    #[inline]
+    pub fn clear(&mut self) {
+        for p in &mut self.data {
+            *p = 0;
+        }
+    }
+
+    pub fn count(&self) -> usize {
+        self.data.iter().map(|e| e.count_ones() as usize).sum()
+    }
+
+    #[inline]
     pub fn contains(&self, bit: usize) -> bool {
         let (word, mask) = word_mask(bit);
         (self.data[word] & mask) != 0
     }
 
     /// Returns true if the bit has changed.
+    #[inline]
     pub fn insert(&mut self, bit: usize) -> bool {
         let (word, mask) = word_mask(bit);
         let data = &mut self.data[word];
@@ -37,6 +51,7 @@ impl BitVector {
         new_value != value
     }
 
+    #[inline]
     pub fn insert_all(&mut self, all: &BitVector) -> bool {
         assert!(self.data.len() == all.data.len());
         let mut changed = false;
@@ -50,6 +65,7 @@ impl BitVector {
         changed
     }
 
+    #[inline]
     pub fn grow(&mut self, num_bits: usize) {
         let num_words = u64s(num_bits);
         if self.data.len() < num_words {
@@ -58,6 +74,7 @@ impl BitVector {
     }
 
     /// Iterates over indexes of set bits in a sorted order
+    #[inline]
     pub fn iter<'a>(&'a self) -> BitVectorIter<'a> {
         BitVectorIter {
             iter: self.data.iter(),
@@ -118,62 +135,66 @@ impl FromIterator<bool> for BitVector {
     }
 }
 
-/// A "bit matrix" is basically a square matrix of booleans
-/// represented as one gigantic bitvector. In other words, it is as if
-/// you have N bitvectors, each of length N. Note that `elements` here is `N`/
-#[derive(Clone)]
+/// A "bit matrix" is basically a matrix of booleans represented as
+/// one gigantic bitvector. In other words, it is as if you have
+/// `rows` bitvectors, each of length `columns`.
+#[derive(Clone, Debug)]
 pub struct BitMatrix {
-    elements: usize,
+    columns: usize,
     vector: Vec<u64>,
 }
 
 impl BitMatrix {
-    // Create a new `elements x elements` matrix, initially empty.
-    pub fn new(elements: usize) -> BitMatrix {
+    /// Create a new `rows x columns` matrix, initially empty.
+    pub fn new(rows: usize, columns: usize) -> BitMatrix {
         // For every element, we need one bit for every other
         // element. Round up to an even number of u64s.
-        let u64s_per_elem = u64s(elements);
+        let u64s_per_row = u64s(columns);
         BitMatrix {
-            elements: elements,
-            vector: vec![0; elements * u64s_per_elem],
+            columns,
+            vector: vec![0; rows * u64s_per_row],
         }
     }
 
-    /// The range of bits for a given element.
-    fn range(&self, element: usize) -> (usize, usize) {
-        let u64s_per_elem = u64s(self.elements);
-        let start = element * u64s_per_elem;
-        (start, start + u64s_per_elem)
+    /// The range of bits for a given row.
+    fn range(&self, row: usize) -> (usize, usize) {
+        let u64s_per_row = u64s(self.columns);
+        let start = row * u64s_per_row;
+        (start, start + u64s_per_row)
     }
 
-    pub fn add(&mut self, source: usize, target: usize) -> bool {
-        let (start, _) = self.range(source);
-        let (word, mask) = word_mask(target);
-        let mut vector = &mut self.vector[..];
+    /// Sets the cell at `(row, column)` to true. Put another way, add
+    /// `column` to the bitset for `row`.
+    ///
+    /// Returns true if this changed the matrix, and false otherwies.
+    pub fn add(&mut self, row: usize, column: usize) -> bool {
+        let (start, _) = self.range(row);
+        let (word, mask) = word_mask(column);
+        let vector = &mut self.vector[..];
         let v1 = vector[start + word];
         let v2 = v1 | mask;
         vector[start + word] = v2;
         v1 != v2
     }
 
-    /// Do the bits from `source` contain `target`?
-    ///
-    /// Put another way, if the matrix represents (transitive)
-    /// reachability, can `source` reach `target`?
-    pub fn contains(&self, source: usize, target: usize) -> bool {
-        let (start, _) = self.range(source);
-        let (word, mask) = word_mask(target);
+    /// Do the bits from `row` contain `column`? Put another way, is
+    /// the matrix cell at `(row, column)` true?  Put yet another way,
+    /// if the matrix represents (transitive) reachability, can
+    /// `row` reach `column`?
+    pub fn contains(&self, row: usize, column: usize) -> bool {
+        let (start, _) = self.range(row);
+        let (word, mask) = word_mask(column);
         (self.vector[start + word] & mask) != 0
     }
 
-    /// Returns those indices that are reachable from both `a` and
-    /// `b`. This is an O(n) operation where `n` is the number of
-    /// elements (somewhat independent from the actual size of the
+    /// Returns those indices that are true in rows `a` and `b`.  This
+    /// is an O(n) operation where `n` is the number of elements
+    /// (somewhat independent from the actual size of the
     /// intersection, in particular).
     pub fn intersection(&self, a: usize, b: usize) -> Vec<usize> {
         let (a_start, a_end) = self.range(a);
         let (b_start, b_end) = self.range(b);
-        let mut result = Vec::with_capacity(self.elements);
+        let mut result = Vec::with_capacity(self.columns);
         for (base, (i, j)) in (a_start..a_end).zip(b_start..b_end).enumerate() {
             let mut v = self.vector[i] & self.vector[j];
             for bit in 0..64 {
@@ -189,7 +210,7 @@ impl BitMatrix {
         result
     }
 
-    /// Add the bits from `read` to the bits from `write`,
+    /// Add the bits from row `read` to the bits from row `write`,
     /// return true if anything changed.
     ///
     /// This is used when computing transitive reachability because if
@@ -209,12 +230,25 @@ impl BitMatrix {
         }
         changed
     }
+
+    /// Iterates through all the columns set to true in a given row of
+    /// the matrix.
+    pub fn iter<'a>(&'a self, row: usize) -> BitVectorIter<'a> {
+        let (start, end) = self.range(row);
+        BitVectorIter {
+            iter: self.vector[start..end].iter(),
+            current: 0,
+            idx: 0,
+        }
+    }
 }
 
+#[inline]
 fn u64s(elements: usize) -> usize {
     (elements + 63) / 64
 }
 
+#[inline]
 fn word_mask(index: usize) -> (usize, u64) {
     let word = index / 64;
     let mask = 1 << (index % 64);
@@ -294,7 +328,7 @@ fn grow() {
 
 #[test]
 fn matrix_intersection() {
-    let mut vec1 = BitMatrix::new(200);
+    let mut vec1 = BitMatrix::new(200, 200);
 
     // (*) Elements reachable from both 2 and 65.
 
@@ -321,4 +355,46 @@ fn matrix_intersection() {
 
     let intersection = vec1.intersection(2, 65);
     assert_eq!(intersection, &[10, 64, 160]);
+}
+
+#[test]
+fn matrix_iter() {
+    let mut matrix = BitMatrix::new(64, 100);
+    matrix.add(3, 22);
+    matrix.add(3, 75);
+    matrix.add(2, 99);
+    matrix.add(4, 0);
+    matrix.merge(3, 5);
+
+    let expected = [99];
+    let mut iter = expected.iter();
+    for i in matrix.iter(2) {
+        let j = *iter.next().unwrap();
+        assert_eq!(i, j);
+    }
+    assert!(iter.next().is_none());
+
+    let expected = [22, 75];
+    let mut iter = expected.iter();
+    for i in matrix.iter(3) {
+        let j = *iter.next().unwrap();
+        assert_eq!(i, j);
+    }
+    assert!(iter.next().is_none());
+
+    let expected = [0];
+    let mut iter = expected.iter();
+    for i in matrix.iter(4) {
+        let j = *iter.next().unwrap();
+        assert_eq!(i, j);
+    }
+    assert!(iter.next().is_none());
+
+    let expected = [22, 75];
+    let mut iter = expected.iter();
+    for i in matrix.iter(5) {
+        let j = *iter.next().unwrap();
+        assert_eq!(i, j);
+    }
+    assert!(iter.next().is_none());
 }

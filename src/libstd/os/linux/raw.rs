@@ -17,6 +17,7 @@
                               crates.io should be used instead for the correct \
                               definitions")]
 #![allow(deprecated)]
+#![allow(missing_debug_implementations)]
 
 use os::raw::c_ulong;
 
@@ -34,7 +35,8 @@ pub use self::arch::{off_t, ino_t, nlink_t, blksize_t, blkcnt_t, stat, time_t};
           target_arch = "le32",
           target_arch = "powerpc",
           target_arch = "arm",
-          target_arch = "asmjs"))]
+          target_arch = "asmjs",
+          target_arch = "wasm32"))]
 mod arch {
     use os::raw::{c_long, c_short, c_uint};
 
@@ -153,6 +155,13 @@ mod arch {
         #[stable(feature = "raw_ext", since = "1.1.0")]
         pub st_pad5: [c_long; 14],
     }
+}
+
+#[cfg(any(target_arch = "mips64",
+          target_arch = "s390x",
+          target_arch = "sparc64"))]
+mod arch {
+    pub use libc::{off_t, ino_t, nlink_t, blksize_t, blkcnt_t, stat, time_t};
 }
 
 #[cfg(target_arch = "aarch64")]

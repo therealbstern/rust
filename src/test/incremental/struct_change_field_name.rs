@@ -12,6 +12,7 @@
 // in between revisions (hashing should be stable).
 
 // revisions:rpass1 cfail2
+// compile-flags: -Z query-dep-graph
 
 #![feature(rustc_attrs)]
 
@@ -33,21 +34,21 @@ pub struct Y {
     pub y: char
 }
 
-#[rustc_dirty(label="TypeckItemBody", cfg="cfail2")]
+#[rustc_dirty(label="TypeckTables", cfg="cfail2")]
 pub fn use_X() -> u32 {
     let x: X = X { x: 22 };
-    //[cfail2]~^ ERROR structure `X` has no field named `x`
+    //[cfail2]~^ ERROR struct `X` has no field named `x`
     x.x as u32
-    //[cfail2]~^ ERROR attempted access of field `x`
+    //[cfail2]~^ ERROR no field `x` on type `X`
 }
 
-#[rustc_dirty(label="TypeckItemBody", cfg="cfail2")]
+#[rustc_dirty(label="TypeckTables", cfg="cfail2")]
 pub fn use_EmbedX(embed: EmbedX) -> u32 {
     embed.x.x as u32
-    //[cfail2]~^ ERROR attempted access of field `x`
+    //[cfail2]~^ ERROR no field `x` on type `X`
 }
 
-#[rustc_clean(label="TypeckItemBody", cfg="cfail2")]
+#[rustc_clean(label="TypeckTables", cfg="cfail2")]
 pub fn use_Y() {
     let x: Y = Y { y: 'c' };
 }

@@ -11,5 +11,6 @@
 unsafe fn f() { return; }
 
 fn main() {
-    f(); //~ ERROR E0133
+    f();
+    //~^ ERROR E0133
 }

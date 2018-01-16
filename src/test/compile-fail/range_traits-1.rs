@@ -12,82 +12,38 @@
 
 use std::ops::*;
 
-// FIXME #34229 duplicated errors
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 struct AllTheRanges {
     a: Range<usize>,
     //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^^ ERROR Ord
+    //~^^^ ERROR binary operation `<` cannot be applied to type
+    //~^^^^ ERROR binary operation `>` cannot be applied to type
     b: RangeTo<usize>,
     //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^^ ERROR Ord
+    //~^^^ ERROR binary operation `<` cannot be applied to type
+    //~^^^^ ERROR binary operation `>` cannot be applied to type
     c: RangeFrom<usize>,
     //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^^ ERROR Ord
+    //~^^^ ERROR binary operation `<` cannot be applied to type
+    //~^^^^ ERROR binary operation `>` cannot be applied to type
     d: RangeFull,
     //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^^ ERROR Ord
+    //~^^^ ERROR binary operation `<` cannot be applied to type
+    //~^^^^ ERROR binary operation `>` cannot be applied to type
     e: RangeInclusive<usize>,
     //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^^ ERROR Ord
+    //~^^^ ERROR binary operation `<` cannot be applied to type
+    //~^^^^ ERROR binary operation `>` cannot be applied to type
     f: RangeToInclusive<usize>,
     //~^ ERROR PartialOrd
-    //~^^ ERROR PartialOrd
-    //~^^^ ERROR Ord
-    //~^^^^ ERROR binary operation
-    //~^^^^^ ERROR binary operation
-    //~^^^^^^ ERROR binary operation
-    //~^^^^^^^ ERROR binary operation
-    //~^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^ ERROR binary operation
-    //~^^^^^^^^^^^ ERROR binary operation
+    //~^^ ERROR Ord
+    //~^^^ ERROR binary operation `<` cannot be applied to type
+    //~^^^^ ERROR binary operation `>` cannot be applied to type
 }
 
 fn main() {}
-

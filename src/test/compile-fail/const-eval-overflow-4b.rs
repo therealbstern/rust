@@ -20,9 +20,9 @@ use std::{u8, u16, u32, u64, usize};
 
 const A_I8_T
     : [u32; (i8::MAX as i8 + 1u8) as usize]
-    //~^ ERROR mismatched types:
-    //~| expected `i8`,
-    //~| found `u8` [E0250]
+    //~^ ERROR mismatched types
+    //~| expected i8, found u8
+    //~| ERROR the trait bound `i8: std::ops::Add<u8>` is not satisfied
     = [0; (i8::MAX as usize) + 1];
 
 

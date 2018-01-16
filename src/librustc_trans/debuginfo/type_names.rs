@@ -12,7 +12,7 @@
 
 use common::CrateContext;
 use rustc::hir::def_id::DefId;
-use rustc::ty::subst;
+use rustc::ty::subst::Substs;
 use rustc::ty::{self, Ty};
 
 use rustc::hir;
@@ -36,19 +36,24 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
                                           t: Ty<'tcx>,
                                           qualified: bool,
                                           output: &mut String) {
+    // When targeting MSVC, emit C++ style type names for compatibility with
+    // .natvis visualizers (and perhaps other existing native debuggers?)
+    let cpp_like_names = cx.sess().target.target.options.is_like_msvc;
+
     match t.sty {
         ty::TyBool => output.push_str("bool"),
         ty::TyChar => output.push_str("char"),
         ty::TyStr => output.push_str("str"),
+        ty::TyNever => output.push_str("!"),
         ty::TyInt(int_ty) => output.push_str(int_ty.ty_to_string()),
         ty::TyUint(uint_ty) => output.push_str(uint_ty.ty_to_string()),
         ty::TyFloat(float_ty) => output.push_str(float_ty.ty_to_string()),
-        ty::TyStruct(def, substs) |
-        ty::TyEnum(def, substs) => {
+        ty::TyForeign(def_id) => push_item_name(cx, def_id, qualified, output),
+        ty::TyAdt(def, substs) => {
             push_item_name(cx, def.did, qualified, output);
             push_type_params(cx, substs, output);
         },
-        ty::TyTuple(component_types) => {
+        ty::TyTuple(component_types, _) => {
             output.push('(');
             for &component_type in component_types {
                 push_debuginfo_type_name(cx, component_type, true, output);
@@ -60,50 +65,71 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
             }
             output.push(')');
         },
-        ty::TyBox(inner_type) => {
-            output.push_str("Box<");
-            push_debuginfo_type_name(cx, inner_type, true, output);
-            output.push('>');
-        },
         ty::TyRawPtr(ty::TypeAndMut { ty: inner_type, mutbl } ) => {
-            output.push('*');
+            if !cpp_like_names {
+                output.push('*');
+            }
             match mutbl {
                 hir::MutImmutable => output.push_str("const "),
                 hir::MutMutable => output.push_str("mut "),
             }
 
             push_debuginfo_type_name(cx, inner_type, true, output);
+
+            if cpp_like_names {
+                output.push('*');
+            }
         },
         ty::TyRef(_, ty::TypeAndMut { ty: inner_type, mutbl }) => {
-            output.push('&');
+            if !cpp_like_names {
+                output.push('&');
+            }
             if mutbl == hir::MutMutable {
                 output.push_str("mut ");
             }
 
             push_debuginfo_type_name(cx, inner_type, true, output);
+
+            if cpp_like_names {
+                output.push('*');
+            }
         },
         ty::TyArray(inner_type, len) => {
             output.push('[');
             push_debuginfo_type_name(cx, inner_type, true, output);
-            output.push_str(&format!("; {}", len));
+            output.push_str(&format!("; {}", len.val.to_const_int().unwrap().to_u64().unwrap()));
             output.push(']');
         },
         ty::TySlice(inner_type) => {
-            output.push('[');
+            if cpp_like_names {
+                output.push_str("slice<");
+            } else {
+                output.push('[');
+            }
+
             push_debuginfo_type_name(cx, inner_type, true, output);
-            output.push(']');
+
+            if cpp_like_names {
+                output.push('>');
+            } else {
+                output.push(']');
+            }
         },
-        ty::TyTrait(ref trait_data) => {
-            let principal = cx.tcx().erase_late_bound_regions(&trait_data.principal);
-            push_item_name(cx, principal.def_id, false, output);
-            push_type_params(cx, principal.substs, output);
+        ty::TyDynamic(ref trait_data, ..) => {
+            if let Some(principal) = trait_data.principal() {
+                let principal = cx.tcx().erase_late_bound_regions_and_normalize(
+                    &principal);
+                push_item_name(cx, principal.def_id, false, output);
+                push_type_params(cx, principal.substs, output);
+            }
         },
-        ty::TyFnDef(_, _, &ty::BareFnTy{ unsafety, abi, ref sig } ) |
-        ty::TyFnPtr(&ty::BareFnTy{ unsafety, abi, ref sig } ) => {
-            if unsafety == hir::Unsafety::Unsafe {
+        ty::TyFnDef(..) | ty::TyFnPtr(_) => {
+            let sig = t.fn_sig(cx.tcx());
+            if sig.unsafety() == hir::Unsafety::Unsafe {
                 output.push_str("unsafe ");
             }
 
+            let abi = sig.abi();
             if abi != ::abi::Abi::Rust {
                 output.push_str("extern \"");
                 output.push_str(abi.name());
@@ -112,10 +138,9 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
 
             output.push_str("fn(");
 
-            let sig = cx.tcx().erase_late_bound_regions(sig);
-            let sig = cx.tcx().normalize_associated_type(&sig);
-            if !sig.inputs.is_empty() {
-                for &parameter_type in &sig.inputs {
+            let sig = cx.tcx().erase_late_bound_regions_and_normalize(&sig);
+            if !sig.inputs().is_empty() {
+                for &parameter_type in sig.inputs() {
                     push_debuginfo_type_name(cx, parameter_type, true, output);
                     output.push_str(", ");
                 }
@@ -124,7 +149,7 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
             }
 
             if sig.variadic {
-                if !sig.inputs.is_empty() {
+                if !sig.inputs().is_empty() {
                     output.push_str(", ...");
                 } else {
                     output.push_str("...");
@@ -133,23 +158,21 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
 
             output.push(')');
 
-            match sig.output {
-                ty::FnConverging(result_type) if result_type.is_nil() => {}
-                ty::FnConverging(result_type) => {
-                    output.push_str(" -> ");
-                    push_debuginfo_type_name(cx, result_type, true, output);
-                }
-                ty::FnDiverging => {
-                    output.push_str(" -> !");
-                }
+            if !sig.output().is_nil() {
+                output.push_str(" -> ");
+                push_debuginfo_type_name(cx, sig.output(), true, output);
             }
         },
         ty::TyClosure(..) => {
             output.push_str("closure");
         }
+        ty::TyGenerator(..) => {
+            output.push_str("generator");
+        }
         ty::TyError |
         ty::TyInfer(_) |
         ty::TyProjection(..) |
+        ty::TyAnon(..) |
         ty::TyParam(_) => {
             bug!("debuginfo: Trying to create type name for \
                 unexpected type: {:?}", t);
@@ -161,13 +184,13 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
                       qualified: bool,
                       output: &mut String) {
         if qualified {
-            output.push_str(&cx.tcx().crate_name(def_id.krate));
+            output.push_str(&cx.tcx().crate_name(def_id.krate).as_str());
             for path_element in cx.tcx().def_path(def_id).data {
                 output.push_str("::");
                 output.push_str(&path_element.data.as_interned_str());
             }
         } else {
-            output.push_str(&cx.tcx().item_name(def_id).as_str());
+            output.push_str(&cx.tcx().item_name(def_id));
         }
     }
 
@@ -177,15 +200,15 @@ pub fn push_debuginfo_type_name<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
     // would be possible but with inlining and LTO we have to use the least
     // common denominator - otherwise we would run into conflicts.
     fn push_type_params<'a, 'tcx>(cx: &CrateContext<'a, 'tcx>,
-                                  substs: &subst::Substs<'tcx>,
+                                  substs: &Substs<'tcx>,
                                   output: &mut String) {
-        if substs.types.is_empty() {
+        if substs.types().next().is_none() {
             return;
         }
 
         output.push('<');
 
-        for &type_parameter in &substs.types {
+        for type_parameter in substs.types() {
             push_debuginfo_type_name(cx, type_parameter, true, output);
             output.push_str(", ");
         }

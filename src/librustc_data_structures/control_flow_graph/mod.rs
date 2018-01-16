@@ -9,13 +9,10 @@
 // except according to those terms.
 
 use super::indexed_vec::Idx;
-pub use std::slice::Iter;
 
 pub mod dominators;
 pub mod iterate;
-pub mod reachable;
 mod reference;
-pub mod transpose;
 
 #[cfg(test)]
 mod test;
@@ -36,10 +33,10 @@ pub trait ControlFlowGraph
 
 pub trait GraphPredecessors<'graph> {
     type Item;
-    type Iter: Iterator<Item=Self::Item>;
+    type Iter: Iterator<Item = Self::Item>;
 }
 
 pub trait GraphSuccessors<'graph> {
     type Item;
-    type Iter: Iterator<Item=Self::Item>;
+    type Iter: Iterator<Item = Self::Item>;
 }

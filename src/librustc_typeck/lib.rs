@@ -44,11 +44,13 @@ independently:
   into the `ty` representation
 
 - collect: computes the types of each top-level item and enters them into
-  the `cx.tcache` table for later use
+  the `tcx.types` table for later use
 
 - coherence: enforces coherence rules, builds some tables
 
 - variance: variance inference
+
+- outlives: outlives inference
 
 - check: walks over function bodies and type checks them, inferring types for
   local variables, type parameters, etc as necessary.
@@ -63,194 +65,169 @@ This API is completely unstable and subject to change.
 
 */
 
-#![crate_name = "rustc_typeck"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
 #![allow(non_camel_case_types)]
 
+#![feature(advanced_slice_patterns)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
+#![feature(crate_visibility_modifier)]
+#![feature(conservative_impl_trait)]
+#![feature(from_ref)]
+#![feature(match_default_bindings)]
+#![feature(never_type)]
 #![feature(quote)]
+#![feature(refcell_replace_swap)]
 #![feature(rustc_diagnostic_macros)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(question_mark)]
+#![feature(slice_patterns)]
 
 #[macro_use] extern crate log;
 #[macro_use] extern crate syntax;
 extern crate syntax_pos;
 
 extern crate arena;
-extern crate fmt_macros;
 #[macro_use] extern crate rustc;
 extern crate rustc_platform_intrinsics as intrinsics;
-extern crate rustc_back;
 extern crate rustc_const_math;
-extern crate rustc_const_eval;
+extern crate rustc_data_structures;
 extern crate rustc_errors as errors;
 
-pub use rustc::dep_graph;
-pub use rustc::hir;
-pub use rustc::lint;
-pub use rustc::middle;
-pub use rustc::session;
-pub use rustc::util;
+use rustc::hir;
+use rustc::lint;
+use rustc::middle;
+use rustc::session;
+use rustc::util;
 
-use dep_graph::DepNode;
 use hir::map as hir_map;
-use rustc::infer::TypeOrigin;
+use rustc::infer::InferOk;
 use rustc::ty::subst::Substs;
-use rustc::ty::{self, Ty, TyCtxt, TypeFoldable};
-use rustc::traits::ProjectionMode;
-use session::{config, CompileResult};
+use rustc::ty::{self, Ty, TyCtxt};
+use rustc::ty::maps::Providers;
+use rustc::traits::{FulfillmentContext, ObligationCause, ObligationCauseCode, Reveal};
+use session::{CompileIncomplete, config};
 use util::common::time;
 
 use syntax::ast;
 use syntax::abi::Abi;
 use syntax_pos::Span;
 
-use std::cell::RefCell;
-use util::nodemap::NodeMap;
+use std::iter;
 
 // NB: This module needs to be declared first so diagnostics are
 // registered before they are used.
-pub mod diagnostics;
+mod diagnostics;
 
-pub mod check;
-pub mod check_unused;
-mod rscope;
+mod check;
+mod check_unused;
 mod astconv;
-pub mod collect;
+mod collect;
 mod constrained_type_params;
-pub mod coherence;
-pub mod variance;
+mod impl_wf_check;
+mod coherence;
+mod outlives;
+mod variance;
+mod namespace;
 
 pub struct TypeAndSubsts<'tcx> {
-    pub substs: Substs<'tcx>,
-    pub ty: Ty<'tcx>,
-}
-
-pub struct CrateCtxt<'a, 'tcx: 'a> {
-    ast_ty_to_ty_cache: RefCell<NodeMap<Ty<'tcx>>>,
-
-    /// A mapping from method call sites to traits that have that method.
-    pub trait_map: hir::TraitMap,
-
-    /// A vector of every trait accessible in the whole crate
-    /// (i.e. including those from subcrates). This is used only for
-    /// error reporting, and so is lazily initialised and generally
-    /// shouldn't taint the common path (hence the RefCell).
-    pub all_traits: RefCell<Option<check::method::AllTraitsVec>>,
-
-    /// This stack is used to identify cycles in the user's source.
-    /// Note that these cycles can cross multiple items.
-    pub stack: RefCell<Vec<collect::AstConvRequest>>,
-
-    pub tcx: TyCtxt<'a, 'tcx, 'tcx>,
-}
-
-// Functions that write types into the node type table
-fn write_ty_to_tcx<'a, 'tcx>(ccx: &CrateCtxt<'a, 'tcx>, node_id: ast::NodeId, ty: Ty<'tcx>) {
-    debug!("write_ty_to_tcx({}, {:?})", node_id,  ty);
-    assert!(!ty.needs_infer());
-    ccx.tcx.node_type_insert(node_id, ty);
-}
-
-fn write_substs_to_tcx<'a, 'tcx>(ccx: &CrateCtxt<'a, 'tcx>,
-                                 node_id: ast::NodeId,
-                                 item_substs: ty::ItemSubsts<'tcx>) {
-    if !item_substs.is_noop() {
-        debug!("write_substs_to_tcx({}, {:?})",
-               node_id,
-               item_substs);
-
-        assert!(!item_substs.substs.types.needs_infer());
-
-        ccx.tcx.tables.borrow_mut().item_substs.insert(node_id, item_substs);
-    }
+    substs: &'tcx Substs<'tcx>,
+    ty: Ty<'tcx>,
 }
 
 fn require_c_abi_if_variadic(tcx: TyCtxt,
                              decl: &hir::FnDecl,
                              abi: Abi,
                              span: Span) {
-    if decl.variadic && abi != Abi::C {
-        span_err!(tcx.sess, span, E0045,
-                  "variadic function must have C calling convention");
+    if decl.variadic && !(abi == Abi::C || abi == Abi::Cdecl) {
+        let mut err = struct_span_err!(tcx.sess, span, E0045,
+                  "variadic function must have C or cdecl calling convention");
+        err.span_label(span, "variadics require C or cdecl calling convention").emit();
     }
 }
 
-pub fn emit_type_err<'a, 'gcx, 'tcx>(tcx: TyCtxt<'a, 'gcx, 'tcx>,
-                                     span: Span,
-                                     found_ty: Ty<'tcx>,
-                                     expected_ty: Ty<'tcx>,
-                                     terr: &ty::error::TypeError<'tcx>,
-                                     msg: &str) {
-    let mut err = struct_span_err!(tcx.sess, span, E0211, "{}", msg);
-    err.span_label(span, &terr);
-    err.note_expected_found(&"type", &expected_ty, &found_ty);
-    tcx.note_and_explain_type_err(&mut err, terr, span);
-    err.emit();
-}
-
-fn require_same_types<'a, 'tcx>(ccx: &CrateCtxt<'a, 'tcx>,
-                                span: Span,
-                                t1: Ty<'tcx>,
-                                t2: Ty<'tcx>,
-                                msg: &str)
+fn require_same_types<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                                cause: &ObligationCause<'tcx>,
+                                expected: Ty<'tcx>,
+                                actual: Ty<'tcx>)
                                 -> bool {
-    ccx.tcx.infer_ctxt(None, None, ProjectionMode::AnyFinal).enter(|infcx| {
-        if let Err(err) = infcx.eq_types(false, TypeOrigin::Misc(span), t1, t2) {
-            emit_type_err(infcx.tcx, span, t1, t2, &err, msg);
-            false
-        } else {
-            true
+    tcx.infer_ctxt().enter(|ref infcx| {
+        let param_env = ty::ParamEnv::empty(Reveal::UserFacing);
+        let mut fulfill_cx = FulfillmentContext::new();
+        match infcx.at(&cause, param_env).eq(expected, actual) {
+            Ok(InferOk { obligations, .. }) => {
+                fulfill_cx.register_predicate_obligations(infcx, obligations);
+            }
+            Err(err) => {
+                infcx.report_mismatched_types(cause, expected, actual, err).emit();
+                return false;
+            }
+        }
+
+        match fulfill_cx.select_all_or_error(infcx) {
+            Ok(()) => true,
+            Err(errors) => {
+                infcx.report_fulfillment_errors(&errors, None);
+                false
+            }
         }
     })
 }
 
-fn check_main_fn_ty(ccx: &CrateCtxt,
-                    main_id: ast::NodeId,
-                    main_span: Span) {
-    let tcx = ccx.tcx;
-    let main_t = tcx.node_id_to_type(main_id);
+fn check_main_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                              main_id: ast::NodeId,
+                              main_span: Span) {
+    let main_def_id = tcx.hir.local_def_id(main_id);
+    let main_t = tcx.type_of(main_def_id);
     match main_t.sty {
         ty::TyFnDef(..) => {
-            match tcx.map.find(main_id) {
+            match tcx.hir.find(main_id) {
                 Some(hir_map::NodeItem(it)) => {
                     match it.node {
-                        hir::ItemFn(_, _, _, _, ref ps, _)
-                        if ps.is_parameterized() => {
-                            span_err!(ccx.tcx.sess, main_span, E0131,
-                                      "main function is not allowed to have type parameters");
-                            return;
+                        hir::ItemFn(.., ref generics, _) => {
+                            if !generics.params.is_empty() {
+                                struct_span_err!(tcx.sess, generics.span, E0131,
+                                         "main function is not allowed to have type parameters")
+                                    .span_label(generics.span,
+                                                "main cannot have type parameters")
+                                    .emit();
+                                return;
+                            }
                         }
                         _ => ()
                     }
                 }
                 _ => ()
             }
-            let main_def_id = tcx.map.local_def_id(main_id);
-            let substs = tcx.mk_substs(Substs::empty());
-            let se_ty = tcx.mk_fn_def(main_def_id, substs,
-                                      tcx.mk_bare_fn(ty::BareFnTy {
-                unsafety: hir::Unsafety::Normal,
-                abi: Abi::Rust,
-                sig: ty::Binder(ty::FnSig {
-                    inputs: Vec::new(),
-                    output: ty::FnConverging(tcx.mk_nil()),
-                    variadic: false
-                })
-            }));
 
-            require_same_types(ccx, main_span, main_t, se_ty,
-                               "main function has wrong type");
+            let actual = tcx.fn_sig(main_def_id);
+            let expected_return_type = if tcx.lang_items().termination().is_some()
+                && tcx.sess.features.borrow().termination_trait {
+                // we take the return type of the given main function, the real check is done
+                // in `check_fn`
+                actual.output().skip_binder()
+            } else {
+                // standard () main return type
+                tcx.mk_nil()
+            };
+
+            let se_ty = tcx.mk_fn_ptr(ty::Binder(
+                tcx.mk_fn_sig(
+                    iter::empty(),
+                    expected_return_type,
+                    false,
+                    hir::Unsafety::Normal,
+                    Abi::Rust
+                )
+            ));
+
+            require_same_types(
+                tcx,
+                &ObligationCause::new(main_span, main_id, ObligationCauseCode::MainFunctionType),
+                se_ty,
+                tcx.mk_fn_ptr(actual));
         }
         _ => {
             span_bug!(main_span,
@@ -260,20 +237,23 @@ fn check_main_fn_ty(ccx: &CrateCtxt,
     }
 }
 
-fn check_start_fn_ty(ccx: &CrateCtxt,
-                     start_id: ast::NodeId,
-                     start_span: Span) {
-    let tcx = ccx.tcx;
-    let start_t = tcx.node_id_to_type(start_id);
+fn check_start_fn_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                               start_id: ast::NodeId,
+                               start_span: Span) {
+    let start_def_id = tcx.hir.local_def_id(start_id);
+    let start_t = tcx.type_of(start_def_id);
     match start_t.sty {
         ty::TyFnDef(..) => {
-            match tcx.map.find(start_id) {
+            match tcx.hir.find(start_id) {
                 Some(hir_map::NodeItem(it)) => {
                     match it.node {
-                        hir::ItemFn(_,_,_,_,ref ps,_)
-                        if ps.is_parameterized() => {
-                            span_err!(tcx.sess, start_span, E0132,
-                                      "start function is not allowed to have type parameters");
+                        hir::ItemFn(..,ref ps,_)
+                        if !ps.params.is_empty() => {
+                            struct_span_err!(tcx.sess, ps.span, E0132,
+                                "start function is not allowed to have type parameters")
+                                .span_label(ps.span,
+                                            "start function cannot have type parameters")
+                                .emit();
                             return;
                         }
                         _ => ()
@@ -282,24 +262,24 @@ fn check_start_fn_ty(ccx: &CrateCtxt,
                 _ => ()
             }
 
-            let start_def_id = ccx.tcx.map.local_def_id(start_id);
-            let substs = tcx.mk_substs(Substs::empty());
-            let se_ty = tcx.mk_fn_def(start_def_id, substs,
-                                      tcx.mk_bare_fn(ty::BareFnTy {
-                unsafety: hir::Unsafety::Normal,
-                abi: Abi::Rust,
-                sig: ty::Binder(ty::FnSig {
-                    inputs: vec!(
+            let se_ty = tcx.mk_fn_ptr(ty::Binder(
+                tcx.mk_fn_sig(
+                    [
                         tcx.types.isize,
                         tcx.mk_imm_ptr(tcx.mk_imm_ptr(tcx.types.u8))
-                    ),
-                    output: ty::FnConverging(tcx.types.isize),
-                    variadic: false,
-                }),
-            }));
+                    ].iter().cloned(),
+                    tcx.types.isize,
+                    false,
+                    hir::Unsafety::Normal,
+                    Abi::Rust
+                )
+            ));
 
-            require_same_types(ccx, start_span, start_t, se_ty,
-                               "start function has wrong type");
+            require_same_types(
+                tcx,
+                &ObligationCause::new(start_span, start_id, ObligationCauseCode::StartFunctionType),
+                se_ty,
+                tcx.mk_fn_ptr(tcx.fn_sig(start_def_id)));
         }
         _ => {
             span_bug!(start_span,
@@ -309,64 +289,96 @@ fn check_start_fn_ty(ccx: &CrateCtxt,
     }
 }
 
-fn check_for_entry_fn(ccx: &CrateCtxt) {
-    let tcx = ccx.tcx;
-    let _task = tcx.dep_graph.in_task(DepNode::CheckEntryFn);
+fn check_for_entry_fn<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     if let Some((id, sp)) = *tcx.sess.entry_fn.borrow() {
         match tcx.sess.entry_type.get() {
-            Some(config::EntryMain) => check_main_fn_ty(ccx, id, sp),
-            Some(config::EntryStart) => check_start_fn_ty(ccx, id, sp),
+            Some(config::EntryMain) => check_main_fn_ty(tcx, id, sp),
+            Some(config::EntryStart) => check_start_fn_ty(tcx, id, sp),
             Some(config::EntryNone) => {}
             None => bug!("entry function without a type")
         }
     }
 }
 
-pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                             trait_map: hir::TraitMap)
-                             -> CompileResult {
+pub fn provide(providers: &mut Providers) {
+    collect::provide(providers);
+    coherence::provide(providers);
+    check::provide(providers);
+    variance::provide(providers);
+    outlives::provide(providers);
+}
+
+pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>)
+                             -> Result<(), CompileIncomplete>
+{
     let time_passes = tcx.sess.time_passes();
-    let ccx = CrateCtxt {
-        ast_ty_to_ty_cache: RefCell::new(NodeMap()),
-        trait_map: trait_map,
-        all_traits: RefCell::new(None),
-        stack: RefCell::new(Vec::new()),
-        tcx: tcx
-    };
 
     // this ensures that later parts of type checking can assume that items
     // have valid types and not error
     tcx.sess.track_errors(|| {
         time(time_passes, "type collecting", ||
-             collect::collect_item_types(&ccx));
+             collect::collect_item_types(tcx));
 
     })?;
 
-    time(time_passes, "variance inference", ||
-         variance::infer_variance(tcx));
+    tcx.sess.track_errors(|| {
+        time(time_passes, "outlives testing", ||
+            outlives::test::test_inferred_outlives(tcx));
+    })?;
+
+    tcx.sess.track_errors(|| {
+        time(time_passes, "impl wf inference", ||
+             impl_wf_check::impl_wf_check(tcx));
+    })?;
 
     tcx.sess.track_errors(|| {
       time(time_passes, "coherence checking", ||
-          coherence::check_coherence(&ccx));
+          coherence::check_coherence(tcx));
     })?;
 
-    time(time_passes, "wf checking", || check::check_wf_new(&ccx))?;
+    tcx.sess.track_errors(|| {
+        time(time_passes, "variance testing", ||
+             variance::test::test_variance(tcx));
+    })?;
 
-    time(time_passes, "item-types checking", || check::check_item_types(&ccx))?;
+    time(time_passes, "wf checking", || check::check_wf_new(tcx))?;
 
-    time(time_passes, "item-bodies checking", || check::check_item_bodies(&ccx))?;
+    time(time_passes, "item-types checking", || check::check_item_types(tcx))?;
 
-    time(time_passes, "drop-impl checking", || check::check_drop_impls(&ccx))?;
+    time(time_passes, "item-bodies checking", || check::check_item_bodies(tcx))?;
 
     check_unused::check_crate(tcx);
-    check_for_entry_fn(&ccx);
+    check_for_entry_fn(tcx);
 
-    let err_count = tcx.sess.err_count();
-    if err_count == 0 {
-        Ok(())
-    } else {
-        Err(err_count)
-    }
+    tcx.sess.compile_status()
 }
 
+/// A quasi-deprecated helper used in rustdoc and save-analysis to get
+/// the type from a HIR node.
+pub fn hir_ty_to_ty<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, hir_ty: &hir::Ty) -> Ty<'tcx> {
+    // In case there are any projections etc, find the "environment"
+    // def-id that will be used to determine the traits/predicates in
+    // scope.  This is derived from the enclosing item-like thing.
+    let env_node_id = tcx.hir.get_parent(hir_ty.id);
+    let env_def_id = tcx.hir.local_def_id(env_node_id);
+    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id);
+    astconv::AstConv::ast_ty_to_ty(&item_cx, hir_ty)
+}
+
+pub fn hir_trait_to_predicates<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>, hir_trait: &hir::TraitRef)
+        -> (ty::PolyTraitRef<'tcx>, Vec<ty::PolyProjectionPredicate<'tcx>>) {
+    // In case there are any projections etc, find the "environment"
+    // def-id that will be used to determine the traits/predicates in
+    // scope.  This is derived from the enclosing item-like thing.
+    let env_node_id = tcx.hir.get_parent(hir_trait.ref_id);
+    let env_def_id = tcx.hir.local_def_id(env_node_id);
+    let item_cx = self::collect::ItemCtxt::new(tcx, env_def_id);
+    let mut projections = Vec::new();
+    let principal = astconv::AstConv::instantiate_poly_trait_ref_inner(
+        &item_cx, hir_trait, tcx.types.err, &mut projections, true
+    );
+    (principal, projections)
+}
+
+#[cfg(not(stage0))] // remove after the next snapshot
 __build_diagnostic_array! { librustc_typeck, DIAGNOSTICS }

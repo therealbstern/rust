@@ -15,6 +15,7 @@ struct Foo {
 fn main() {
     let x = Foo {
         x: 0,
-        x: 0, //~ ERROR E0062
+        x: 0,
+        //~^ ERROR E0062
     };
 }

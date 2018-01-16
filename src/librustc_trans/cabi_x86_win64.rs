@@ -8,26 +8,37 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use llvm::*;
-use super::common::*;
-use super::machine::*;
-use abi::{ArgType, FnType};
-use type_::Type;
+use abi::{ArgType, FnType, Reg};
+
+use rustc::ty::layout;
 
 // Win64 ABI: http://msdn.microsoft.com/en-us/library/zthk2dkh.aspx
 
-pub fn compute_abi_info(ccx: &CrateContext, fty: &mut FnType) {
+pub fn compute_abi_info(fty: &mut FnType) {
     let fixup = |a: &mut ArgType| {
-        if a.ty.kind() == Struct {
-            match llsize_of_alloc(ccx, a.ty) {
-                1 => a.cast = Some(Type::i8(ccx)),
-                2 => a.cast = Some(Type::i16(ccx)),
-                4 => a.cast = Some(Type::i32(ccx)),
-                8 => a.cast = Some(Type::i64(ccx)),
-                _ => a.make_indirect(ccx)
+        match a.layout.abi {
+            layout::Abi::Uninhabited => {}
+            layout::Abi::ScalarPair(..) |
+            layout::Abi::Aggregate { .. } => {
+                match a.layout.size.bits() {
+                    8 => a.cast_to(Reg::i8()),
+                    16 => a.cast_to(Reg::i16()),
+                    32 => a.cast_to(Reg::i32()),
+                    64 => a.cast_to(Reg::i64()),
+                    _ => a.make_indirect()
+                }
             }
-        } else {
-            a.extend_integer_width_to(32);
+            layout::Abi::Vector { .. } => {
+                // FIXME(eddyb) there should be a size cap here
+                // (probably what clang calls "illegal vectors").
+            }
+            layout::Abi::Scalar(_) => {
+                if a.layout.size.bytes() > 8 {
+                    a.make_indirect();
+                } else {
+                    a.extend_integer_width_to(32);
+                }
+            }
         }
     };
 

@@ -43,8 +43,7 @@ fn main() {
         box (true, false) => ()
 //~^ ERROR mismatched types
 //~| expected type `(bool, bool)`
-//~| found type `Box<_>`
-//~| expected tuple, found box
+//~| found type `std::boxed::Box<_>`
     }
 
     match (true, false) {
@@ -52,7 +51,7 @@ fn main() {
 //~^ ERROR mismatched types
 //~| expected type `(bool, bool)`
 //~| found type `&_`
-//~| expected tuple, found &-ptr
+//~| expected tuple, found reference
     }
 
 

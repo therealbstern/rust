@@ -14,38 +14,31 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "syntax"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        test(attr(deny(warnings))))]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
-#![feature(associated_consts)]
-#![feature(const_fn)]
-#![feature(filling_drop)]
-#![feature(libc)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(str_escape)]
 #![feature(unicode)]
-#![feature(question_mark)]
 #![feature(rustc_diagnostic_macros)]
+#![feature(match_default_bindings)]
+#![feature(i128_type)]
+#![feature(const_atomic_usize_new)]
 
+// See librustc_cratesio_shim/Cargo.toml for a comment explaining this.
+#[allow(unused_extern_crates)]
+extern crate rustc_cratesio_shim;
+
+#[macro_use] extern crate bitflags;
 extern crate serialize;
-extern crate term;
-extern crate libc;
 #[macro_use] extern crate log;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
-extern crate rustc_unicode;
+extern crate std_unicode;
 pub extern crate rustc_errors as errors;
 extern crate syntax_pos;
+extern crate rustc_data_structures;
 
 extern crate serialize as rustc_serialize; // used by deriving
-
 
 // A variant of 'try!' that panics on an Err. This is used as a crutch on the
 // way towards a non-panic!-prone parser. It should be used for fatal parsing
@@ -67,6 +60,16 @@ macro_rules! panictry {
     })
 }
 
+#[macro_export]
+macro_rules! unwrap_or {
+    ($opt:expr, $default:expr) => {
+        match $opt {
+            Some(x) => x,
+            None => $default,
+        }
+    }
+}
+
 #[macro_use]
 pub mod diagnostics {
     #[macro_use]
@@ -80,7 +83,6 @@ pub mod diagnostics {
 pub mod diagnostic_list;
 
 pub mod util {
-    pub mod interner;
     pub mod lev_distance;
     pub mod node_count;
     pub mod parser;
@@ -91,6 +93,9 @@ pub mod util {
 
     mod thin_vec;
     pub use self::thin_vec::ThinVec;
+
+    mod rc_slice;
+    pub use self::rc_slice::RcSlice;
 }
 
 pub mod json;
@@ -105,6 +110,7 @@ pub mod abi;
 pub mod ast;
 pub mod attr;
 pub mod codemap;
+#[macro_use]
 pub mod config;
 pub mod entry;
 pub mod feature_gate;
@@ -114,6 +120,7 @@ pub mod ptr;
 pub mod show_span;
 pub mod std_inject;
 pub mod str;
+pub use syntax_pos::symbol;
 pub mod test;
 pub mod tokenstream;
 pub mod visit;
@@ -124,10 +131,12 @@ pub mod print {
 }
 
 pub mod ext {
+    pub use syntax_pos::hygiene;
     pub mod base;
     pub mod build;
+    pub mod derive;
     pub mod expand;
-    pub mod mtwt;
+    pub mod placeholders;
     pub mod quote;
     pub mod source_util;
 
@@ -135,7 +144,12 @@ pub mod ext {
         pub mod transcribe;
         pub mod macro_parser;
         pub mod macro_rules;
+        pub mod quoted;
     }
 }
 
-// __build_diagnostic_array! { libsyntax, DIAGNOSTICS }
+#[cfg(test)]
+mod test_snippet;
+
+#[cfg(not(stage0))] // remove after the next snapshot
+__build_diagnostic_array! { libsyntax, DIAGNOSTICS }

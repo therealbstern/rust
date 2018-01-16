@@ -17,7 +17,7 @@
 //! the `render_inner_with_highlighting` or `render_with_highlighting`
 //! functions. For more advanced use cases (if you want to supply your own css
 //! classes or control how the HTML is generated, or even generate something
-//! other then HTML), then you should implement the the `Writer` trait and use a
+//! other then HTML), then you should implement the `Writer` trait and use a
 //! `Classifier`.
 
 use html::escape::Escape;
@@ -26,27 +26,36 @@ use std::fmt::Display;
 use std::io;
 use std::io::prelude::*;
 
-use syntax::codemap::CodeMap;
-use syntax::parse::lexer::{self, Reader, TokenAndSpan};
+use syntax::codemap::{CodeMap, FilePathMapping};
+use syntax::parse::lexer::{self, TokenAndSpan};
 use syntax::parse::token;
 use syntax::parse;
-use syntax_pos::Span;
+use syntax_pos::{Span, FileName};
 
 /// Highlights `src`, returning the HTML output.
-pub fn render_with_highlighting(src: &str, class: Option<&str>, id: Option<&str>) -> String {
+pub fn render_with_highlighting(src: &str, class: Option<&str>, id: Option<&str>,
+                                extension: Option<&str>,
+                                tooltip: Option<(&str, &str)>) -> String {
     debug!("highlighting: ================\n{}\n==============", src);
-    let sess = parse::ParseSess::new();
-    let fm = sess.codemap().new_filemap("<stdin>".to_string(), None, src.to_string());
+    let sess = parse::ParseSess::new(FilePathMapping::empty());
+    let fm = sess.codemap().new_filemap(FileName::Custom("stdin".to_string()), src.to_string());
 
     let mut out = Vec::new();
+    if let Some((tooltip, class)) = tooltip {
+        write!(out, "<div class='information'><div class='tooltip {}'>ⓘ<span \
+                     class='tooltiptext'>{}</span></div></div>",
+               class, tooltip).unwrap();
+    }
     write_header(class, id, &mut out).unwrap();
 
-    let mut classifier = Classifier::new(lexer::StringReader::new(&sess.span_diagnostic, fm),
-                                         sess.codemap());
+    let mut classifier = Classifier::new(lexer::StringReader::new(&sess, fm), sess.codemap());
     if let Err(_) = classifier.write_source(&mut out) {
         return format!("<pre>{}</pre>", src);
     }
 
+    if let Some(extension) = extension {
+        write!(out, "{}", extension).unwrap();
+    }
     write_footer(&mut out).unwrap();
     String::from_utf8_lossy(&out[..]).into_owned()
 }
@@ -55,12 +64,11 @@ pub fn render_with_highlighting(src: &str, class: Option<&str>, id: Option<&str>
 /// be inserted into an element. C.f., `render_with_highlighting` which includes
 /// an enclosing `<pre>` block.
 pub fn render_inner_with_highlighting(src: &str) -> io::Result<String> {
-    let sess = parse::ParseSess::new();
-    let fm = sess.codemap().new_filemap("<stdin>".to_string(), None, src.to_string());
+    let sess = parse::ParseSess::new(FilePathMapping::empty());
+    let fm = sess.codemap().new_filemap(FileName::Custom("stdin".to_string()), src.to_string());
 
     let mut out = Vec::new();
-    let mut classifier = Classifier::new(lexer::StringReader::new(&sess.span_diagnostic, fm),
-                                         sess.codemap());
+    let mut classifier = Classifier::new(lexer::StringReader::new(&sess, fm), sess.codemap());
     classifier.write_source(&mut out)?;
 
     Ok(String::from_utf8_lossy(&out).into_owned())
@@ -100,10 +108,11 @@ pub enum Class {
     Lifetime,
     PreludeTy,
     PreludeVal,
+    QuestionMark,
 }
 
 /// Trait that controls writing the output of syntax highlighting. Users should
-/// implement this trait to customise writing output.
+/// implement this trait to customize writing output.
 ///
 /// The classifier will call into the `Writer` implementation as it finds spans
 /// of text to highlight. Exactly how that text should be highlighted is up to
@@ -111,7 +120,7 @@ pub enum Class {
 pub trait Writer {
     /// Called when we start processing a span of text that should be highlighted.
     /// The `Class` argument specifies how it should be highlighted.
-    fn enter_span(&mut self, Class) -> io::Result<()>;
+    fn enter_span(&mut self, _: Class) -> io::Result<()>;
 
     /// Called at the end of a span of highlighted text.
     fn exit_span(&mut self) -> io::Result<()>;
@@ -128,7 +137,11 @@ pub trait Writer {
     /// ```
     /// The latter can be thought of as a shorthand for the former, which is
     /// more flexible.
-    fn string<T: Display>(&mut self, T, Class, Option<&TokenAndSpan>) -> io::Result<()>;
+    fn string<T: Display>(&mut self,
+                          text: T,
+                          klass: Class,
+                          tok: Option<&TokenAndSpan>)
+                          -> io::Result<()>;
 }
 
 // Implement `Writer` for anthing that can be written to, this just implements
@@ -141,12 +154,12 @@ impl<U: Write> Writer for U {
                           -> io::Result<()> {
         match klass {
             Class::None => write!(self, "{}", text),
-            klass => write!(self, "<span class='{}'>{}</span>", klass.rustdoc_class(), text),
+            klass => write!(self, "<span class=\"{}\">{}</span>", klass.rustdoc_class(), text),
         }
     }
 
     fn enter_span(&mut self, klass: Class) -> io::Result<()> {
-        write!(self, "<span class='{}'>", klass.rustdoc_class())
+        write!(self, "<span class=\"{}\">", klass.rustdoc_class())
     }
 
     fn exit_span(&mut self) -> io::Result<()> {
@@ -157,11 +170,26 @@ impl<U: Write> Writer for U {
 impl<'a> Classifier<'a> {
     pub fn new(lexer: lexer::StringReader<'a>, codemap: &'a CodeMap) -> Classifier<'a> {
         Classifier {
-            lexer: lexer,
-            codemap: codemap,
+            lexer,
+            codemap,
             in_attribute: false,
             in_macro: false,
             in_macro_nonterminal: false,
+        }
+    }
+
+    /// Gets the next token out of the lexer, emitting fatal errors if lexing fails.
+    fn try_next_token(&mut self) -> io::Result<TokenAndSpan> {
+        match self.lexer.try_next_token() {
+            Ok(tas) => Ok(tas),
+            Err(_) => {
+                self.lexer.emit_fatal_errors();
+                self.lexer.sess.span_diagnostic
+                    .struct_warn("Backing out of syntax highlighting")
+                    .note("You probably did not intend to render this as a rust code-block")
+                    .emit();
+                Err(io::Error::new(io::ErrorKind::Other, ""))
+            }
         }
     }
 
@@ -176,18 +204,7 @@ impl<'a> Classifier<'a> {
                                    out: &mut W)
                                    -> io::Result<()> {
         loop {
-            let next = match self.lexer.try_next_token() {
-                Ok(tas) => tas,
-                Err(_) => {
-                    self.lexer.emit_fatal_errors();
-                    self.lexer.span_diagnostic.struct_warn("Backing out of syntax highlighting")
-                                              .note("You probably did not intend to render this \
-                                                     as a rust code-block")
-                                              .emit();
-                    return Err(io::Error::new(io::ErrorKind::Other, ""));
-                }
-            };
-
+            let next = self.try_next_token()?;
             if next.tok == token::Eof {
                 break;
             }
@@ -213,9 +230,11 @@ impl<'a> Classifier<'a> {
             token::Comment => Class::Comment,
             token::DocComment(..) => Class::DocComment,
 
-            // If this '&' token is directly adjacent to another token, assume
-            // that it's the address-of operator instead of the and-operator.
-            token::BinOp(token::And) if self.lexer.peek().sp.lo == tas.sp.hi => Class::RefKeyWord,
+            // If this '&' or '*' token is followed by a non-whitespace token, assume that it's the
+            // reference or dereference operator or a reference or pointer type, instead of the
+            // bit-and or multiplication operator.
+            token::BinOp(token::And) | token::BinOp(token::Star)
+                if self.lexer.peek().tok != token::Whitespace => Class::RefKeyWord,
 
             // Consider this as part of a macro invocation if there was a
             // leading identifier.
@@ -230,10 +249,13 @@ impl<'a> Classifier<'a> {
                 token::BinOpEq(..) | token::FatArrow => Class::Op,
 
             // Miscellaneous, no highlighting.
-            token::Dot | token::DotDot | token::DotDotDot | token::Comma | token::Semi |
-                token::Colon | token::ModSep | token::LArrow | token::OpenDelim(_) |
+            token::Dot | token::DotDot | token::DotDotDot | token::DotDotEq | token::Comma |
+                token::Semi | token::Colon | token::ModSep | token::LArrow | token::OpenDelim(_) |
                 token::CloseDelim(token::Brace) | token::CloseDelim(token::Paren) |
-                token::Question => Class::None,
+                token::CloseDelim(token::NoDelim) => Class::None,
+
+            token::Question => Class::QuestionMark,
+
             token::Dollar => {
                 if self.lexer.peek().tok.is_ident() {
                     self.in_macro_nonterminal = true;
@@ -243,13 +265,37 @@ impl<'a> Classifier<'a> {
                 }
             }
 
-            // This is the start of an attribute. We're going to want to
+            // This might be the start of an attribute. We're going to want to
             // continue highlighting it as an attribute until the ending ']' is
             // seen, so skip out early. Down below we terminate the attribute
             // span when we see the ']'.
             token::Pound => {
-                self.in_attribute = true;
-                out.enter_span(Class::Attribute)?;
+                // We can't be sure that our # begins an attribute (it could
+                // just be appearing in a macro) until we read either `#![` or
+                // `#[` from the input stream.
+                //
+                // We don't want to start highlighting as an attribute until
+                // we're confident there is going to be a ] coming up, as
+                // otherwise # tokens in macros highlight the rest of the input
+                // as an attribute.
+
+                // Case 1: #![inner_attribute]
+                if self.lexer.peek().tok == token::Not {
+                    self.try_next_token()?; // NOTE: consumes `!` token!
+                    if self.lexer.peek().tok == token::OpenDelim(token::Bracket) {
+                        self.in_attribute = true;
+                        out.enter_span(Class::Attribute)?;
+                    }
+                    out.string("#", Class::None, None)?;
+                    out.string("!", Class::None, None)?;
+                    return Ok(());
+                }
+
+                // Case 2: #[outer_attribute]
+                if self.lexer.peek().tok == token::OpenDelim(token::Bracket) {
+                    self.in_attribute = true;
+                    out.enter_span(Class::Attribute)?;
+                }
                 out.string("#", Class::None, None)?;
                 return Ok(());
             }
@@ -287,7 +333,9 @@ impl<'a> Classifier<'a> {
                     "Option" | "Result" => Class::PreludeTy,
                     "Some" | "None" | "Ok" | "Err" => Class::PreludeVal,
 
-                    _ if tas.tok.is_any_keyword() => Class::KeyWord,
+                    "$crate" => Class::KeyWord,
+                    _ if tas.tok.is_reserved_ident() => Class::KeyWord,
+
                     _ => {
                         if self.in_macro_nonterminal {
                             self.in_macro_nonterminal = false;
@@ -302,13 +350,10 @@ impl<'a> Classifier<'a> {
                 }
             }
 
-            // Special macro vars are like keywords.
-            token::SpecialVarNt(_) => Class::KeyWord,
-
             token::Lifetime(..) => Class::Lifetime,
 
             token::Underscore | token::Eof | token::Interpolated(..) |
-            token::MatchNt(..) | token::SubstNt(..) | token::Tilde | token::At => Class::None,
+            token::Tilde | token::At | token::DotEq => Class::None,
         };
 
         // Anything that didn't return above is the simple case where we the
@@ -343,6 +388,7 @@ impl Class {
             Class::Lifetime => "lifetime",
             Class::PreludeTy => "prelude-ty",
             Class::PreludeVal => "prelude-val",
+            Class::QuestionMark => "question-mark"
         }
     }
 }
@@ -355,7 +401,7 @@ fn write_header(class: Option<&str>,
     if let Some(id) = id {
         write!(out, "id='{}' ", id)?;
     }
-    write!(out, "class='rust {}'>\n", class.unwrap_or(""))
+    write!(out, "class=\"rust {}\">\n", class.unwrap_or(""))
 }
 
 fn write_footer(out: &mut Write) -> io::Result<()> {

@@ -13,15 +13,18 @@ use syntax::ext::base::*;
 use syntax::ext::base;
 use syntax::feature_gate;
 use syntax::parse::token;
-use syntax::parse::token::str_to_ident;
 use syntax::ptr::P;
 use syntax_pos::Span;
+use syntax_pos::symbol::Symbol;
+use syntax_pos::hygiene::SyntaxContext;
 use syntax::tokenstream::TokenTree;
 
-pub fn expand_syntax_ext<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[TokenTree])
-                              -> Box<base::MacResult+'cx> {
+pub fn expand_syntax_ext<'cx>(cx: &'cx mut ExtCtxt,
+                              sp: Span,
+                              tts: &[TokenTree])
+                              -> Box<base::MacResult + 'cx> {
     if !cx.ecfg.enable_concat_idents() {
-        feature_gate::emit_feature_err(&cx.parse_sess.span_diagnostic,
+        feature_gate::emit_feature_err(&cx.parse_sess,
                                        "concat_idents",
                                        sp,
                                        feature_gate::GateIssue::Language,
@@ -33,35 +36,38 @@ pub fn expand_syntax_ext<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[TokenTree])
     for (i, e) in tts.iter().enumerate() {
         if i & 1 == 1 {
             match *e {
-                TokenTree::Token(_, token::Comma) => {},
+                TokenTree::Token(_, token::Comma) => {}
                 _ => {
                     cx.span_err(sp, "concat_idents! expecting comma.");
                     return DummyResult::expr(sp);
-                },
+                }
             }
         } else {
             match *e {
-                TokenTree::Token(_, token::Ident(ident)) => {
-                    res_str.push_str(&ident.name.as_str())
-                },
+                TokenTree::Token(_, token::Ident(ident)) => res_str.push_str(&ident.name.as_str()),
                 _ => {
                     cx.span_err(sp, "concat_idents! requires ident args.");
                     return DummyResult::expr(sp);
-                },
+                }
             }
         }
     }
-    let res = str_to_ident(&res_str);
+    let res = ast::Ident {
+        name: Symbol::intern(&res_str),
+        ctxt: SyntaxContext::empty().apply_mark(cx.current_expansion.mark),
+    };
 
-    struct Result { ident: ast::Ident, span: Span };
+    struct Result {
+        ident: ast::Ident,
+        span: Span,
+    };
 
     impl Result {
         fn path(&self) -> ast::Path {
-            let segment = ast::PathSegment {
-                identifier: self.ident,
-                parameters: ast::PathParameters::none()
-            };
-            ast::Path { span: self.span, global: false, segments: vec![segment] }
+            ast::Path {
+                span: self.span,
+                segments: vec![ast::PathSegment::from_ident(self.ident, self.span)],
+            }
         }
     }
 
@@ -84,5 +90,8 @@ pub fn expand_syntax_ext<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[TokenTree])
         }
     }
 
-    Box::new(Result { ident: res, span: sp })
+    Box::new(Result {
+        ident: res,
+        span: sp.with_ctxt(sp.ctxt().apply_mark(cx.current_expansion.mark)),
+    })
 }

@@ -10,85 +10,89 @@
 
 use ast;
 use attr;
+use std::cell::Cell;
+use ext::hygiene::{Mark, SyntaxContext};
+use symbol::{Symbol, keywords};
 use syntax_pos::{DUMMY_SP, Span};
-use codemap::{self, ExpnInfo, NameAndSpan, MacroAttribute};
-use parse::token::{intern, InternedString, keywords};
-use parse::{token, ParseSess};
+use codemap::{ExpnInfo, NameAndSpan, MacroAttribute};
 use ptr::P;
+use tokenstream::TokenStream;
 
 /// Craft a span that will be ignored by the stability lint's
-/// call to codemap's is_internal check.
+/// call to codemap's `is_internal` check.
 /// The expanded code uses the unstable `#[prelude_import]` attribute.
-fn ignored_span(sess: &ParseSess, sp: Span) -> Span {
-    let info = ExpnInfo {
+fn ignored_span(sp: Span) -> Span {
+    let mark = Mark::fresh(Mark::root());
+    mark.set_expn_info(ExpnInfo {
         call_site: DUMMY_SP,
         callee: NameAndSpan {
-            format: MacroAttribute(intern("std_inject")),
+            format: MacroAttribute(Symbol::intern("std_inject")),
             span: None,
             allow_internal_unstable: true,
+            allow_internal_unsafe: false,
         }
-    };
-    let expn_id = sess.codemap().record_expansion(info);
-    let mut sp = sp;
-    sp.expn_id = expn_id;
-    return sp;
+    });
+    sp.with_ctxt(SyntaxContext::empty().apply_mark(mark))
 }
 
-pub fn no_core(krate: &ast::Crate) -> bool {
-    attr::contains_name(&krate.attrs, "no_core")
+pub fn injected_crate_name() -> Option<&'static str> {
+    INJECTED_CRATE_NAME.with(|name| name.get())
 }
 
-pub fn no_std(krate: &ast::Crate) -> bool {
-    attr::contains_name(&krate.attrs, "no_std") || no_core(krate)
+thread_local! {
+    static INJECTED_CRATE_NAME: Cell<Option<&'static str>> = Cell::new(None);
 }
 
-pub fn maybe_inject_crates_ref(sess: &ParseSess,
-                               mut krate: ast::Crate,
-                               alt_std_name: Option<String>)
-                               -> ast::Crate {
-    if no_core(&krate) {
+pub fn maybe_inject_crates_ref(mut krate: ast::Crate, alt_std_name: Option<String>) -> ast::Crate {
+    let name = if attr::contains_name(&krate.attrs, "no_core") {
         return krate;
-    }
+    } else if attr::contains_name(&krate.attrs, "no_std") {
+        "core"
+    } else {
+        "std"
+    };
 
-    let name = if no_std(&krate) { "core" } else { "std" };
-    let crate_name = token::intern(&alt_std_name.unwrap_or(name.to_string()));
+    INJECTED_CRATE_NAME.with(|opt_name| opt_name.set(Some(name)));
+
+    let crate_name = Symbol::intern(&alt_std_name.unwrap_or_else(|| name.to_string()));
 
     krate.module.items.insert(0, P(ast::Item {
-        attrs: vec![attr::mk_attr_outer(attr::mk_attr_id(),
-                                        attr::mk_word_item(InternedString::new("macro_use")))],
+        attrs: vec![attr::mk_attr_outer(DUMMY_SP,
+                                        attr::mk_attr_id(),
+                                        attr::mk_word_item(Symbol::intern("macro_use")))],
         vis: ast::Visibility::Inherited,
         node: ast::ItemKind::ExternCrate(Some(crate_name)),
-        ident: token::str_to_ident(name),
+        ident: ast::Ident::from_str(name),
         id: ast::DUMMY_NODE_ID,
         span: DUMMY_SP,
+        tokens: None,
     }));
 
-    let span = ignored_span(sess, DUMMY_SP);
+    let span = ignored_span(DUMMY_SP);
     krate.module.items.insert(0, P(ast::Item {
         attrs: vec![ast::Attribute {
-            node: ast::Attribute_ {
-                style: ast::AttrStyle::Outer,
-                value: P(ast::MetaItem {
-                    node: ast::MetaItemKind::Word(token::intern_and_get_ident("prelude_import")),
-                    span: span,
-                }),
-                id: attr::mk_attr_id(),
-                is_sugared_doc: false,
-            },
-            span: span,
+            style: ast::AttrStyle::Outer,
+            path: ast::Path::from_ident(span, ast::Ident::from_str("prelude_import")),
+            tokens: TokenStream::empty(),
+            id: attr::mk_attr_id(),
+            is_sugared_doc: false,
+            span,
         }],
         vis: ast::Visibility::Inherited,
-        node: ast::ItemKind::Use(P(codemap::dummy_spanned(ast::ViewPathGlob(ast::Path {
-            global: false,
-            segments: vec![name, "prelude", "v1"].into_iter().map(|name| ast::PathSegment {
-                identifier: token::str_to_ident(name),
-                parameters: ast::PathParameters::none(),
-            }).collect(),
-            span: span,
-        })))),
+        node: ast::ItemKind::Use(P(ast::UseTree {
+            prefix: ast::Path {
+                segments: ["{{root}}", name, "prelude", "v1"].into_iter().map(|name| {
+                    ast::PathSegment::from_ident(ast::Ident::from_str(name), DUMMY_SP)
+                }).collect(),
+                span,
+            },
+            kind: ast::UseTreeKind::Glob,
+            span,
+        })),
         id: ast::DUMMY_NODE_ID,
         ident: keywords::Invalid.ident(),
-        span: span,
+        span,
+        tokens: None,
     }));
 
     krate

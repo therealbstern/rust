@@ -36,7 +36,7 @@
 //! Arrays are enclosed in square brackets ([ ... ]) and objects in curly brackets ({ ... }).
 //! A simple JSON document encoding a person, their age, address and phone numbers could look like
 //!
-//! ```ignore
+//! ```json
 //! {
 //!     "FirstName": "John",
 //!     "LastName": "Doe",
@@ -199,6 +199,7 @@ use self::DecoderError::*;
 use self::ParserState::*;
 use self::InternalStackElement::*;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, BTreeMap};
 use std::io::prelude::*;
 use std::io;
@@ -433,9 +434,7 @@ fn escape_str(wr: &mut fmt::Write, v: &str) -> EncodeResult {
 }
 
 fn escape_char(writer: &mut fmt::Write, v: char) -> EncodeResult {
-    escape_str(writer, unsafe {
-        str::from_utf8_unchecked(v.encode_utf8().as_slice())
-    })
+    escape_str(writer, v.encode_utf8(&mut [0; 4]))
 }
 
 fn spaces(wr: &mut fmt::Write, mut n: usize) -> EncodeResult {
@@ -475,15 +474,14 @@ impl<'a> Encoder<'a> {
 }
 
 macro_rules! emit_enquoted_if_mapkey {
-    ($enc:ident,$e:expr) => {
+    ($enc:ident,$e:expr) => ({
         if $enc.is_emitting_map_key {
-            try!(write!($enc.writer, "\"{}\"", $e));
-            Ok(())
+            write!($enc.writer, "\"{}\"", $e)?;
         } else {
-            try!(write!($enc.writer, "{}", $e));
-            Ok(())
+            write!($enc.writer, "{}", $e)?;
         }
-    }
+        Ok(())
+    })
 }
 
 impl<'a> ::Encoder for Encoder<'a> {
@@ -495,13 +493,15 @@ impl<'a> ::Encoder for Encoder<'a> {
         Ok(())
     }
 
-    fn emit_uint(&mut self, v: usize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_usize(&mut self, v: usize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_u128(&mut self, v: u128) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u64(&mut self, v: u64) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u32(&mut self, v: u32) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u16(&mut self, v: u16) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u8(&mut self, v: u8) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
 
-    fn emit_int(&mut self, v: isize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_isize(&mut self, v: isize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_i128(&mut self, v: i128) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_i64(&mut self, v: i64) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_i32(&mut self, v: i32) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_i16(&mut self, v: i16) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
@@ -717,7 +717,7 @@ impl<'a> PrettyEncoder<'a> {
     /// Creates a new encoder whose output will be written to the specified writer
     pub fn new(writer: &'a mut fmt::Write) -> PrettyEncoder<'a> {
         PrettyEncoder {
-            writer: writer,
+            writer,
             curr_indent: 0,
             indent: 2,
             is_emitting_map_key: false,
@@ -743,13 +743,15 @@ impl<'a> ::Encoder for PrettyEncoder<'a> {
         Ok(())
     }
 
-    fn emit_uint(&mut self, v: usize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_usize(&mut self, v: usize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_u128(&mut self, v: u128) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u64(&mut self, v: u64) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u32(&mut self, v: u32) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u16(&mut self, v: u16) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_u8(&mut self, v: u8) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
 
-    fn emit_int(&mut self, v: isize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_isize(&mut self, v: isize) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
+    fn emit_i128(&mut self, v: i128) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_i64(&mut self, v: i64) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_i32(&mut self, v: i32) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
     fn emit_i16(&mut self, v: i16) -> EncodeResult { emit_enquoted_if_mapkey!(self, v) }
@@ -1050,10 +1052,7 @@ impl Json {
     pub fn find_path<'a>(&'a self, keys: &[&str]) -> Option<&'a Json>{
         let mut target = self;
         for key in keys {
-            match target.find(*key) {
-                Some(t) => { target = t; },
-                None => return None
-            }
+            target = target.find(*key)?;
         }
         Some(target)
     }
@@ -1449,7 +1448,7 @@ impl<T: Iterator<Item=char>> Parser<T> {
     /// Creates the JSON parser.
     pub fn new(rdr: T) -> Parser<T> {
         let mut p = Parser {
-            rdr: rdr,
+            rdr,
             ch: Some('\x00'),
             line: 1,
             col: 0,
@@ -2084,9 +2083,7 @@ impl Decoder {
     pub fn new(json: Json) -> Decoder {
         Decoder { stack: vec![json] }
     }
-}
 
-impl Decoder {
     fn pop(&mut self) -> Json {
         self.stack.pop().unwrap()
     }
@@ -2137,16 +2134,18 @@ impl ::Decoder for Decoder {
         expect!(self.pop(), Null)
     }
 
-    read_primitive! { read_uint, usize }
+    read_primitive! { read_usize, usize }
     read_primitive! { read_u8, u8 }
     read_primitive! { read_u16, u16 }
     read_primitive! { read_u32, u32 }
     read_primitive! { read_u64, u64 }
-    read_primitive! { read_int, isize }
+    read_primitive! { read_u128, u128 }
+    read_primitive! { read_isize, isize }
     read_primitive! { read_i8, i8 }
     read_primitive! { read_i16, i16 }
     read_primitive! { read_i32, i32 }
     read_primitive! { read_i64, i64 }
+    read_primitive! { read_i128, i128 }
 
     fn read_f32(&mut self) -> DecodeResult<f32> { self.read_f64().map(|x| x as f32) }
 
@@ -2185,8 +2184,8 @@ impl ::Decoder for Decoder {
         Err(ExpectedError("single character string".to_owned(), format!("{}", s)))
     }
 
-    fn read_str(&mut self) -> DecodeResult<string::String> {
-        expect!(self.pop(), String)
+    fn read_str(&mut self) -> DecodeResult<Cow<str>> {
+        expect!(self.pop(), String).map(Cow::Owned)
     }
 
     fn read_enum<T, F>(&mut self, _name: &str, f: F) -> DecodeResult<T> where
@@ -3592,7 +3591,6 @@ mod tests {
         }
     }
     #[test]
-    #[cfg_attr(target_pointer_width = "32", ignore)] // FIXME(#14064)
     fn test_streaming_parser() {
         assert_stream_equal(
             r#"{ "foo":"bar", "array" : [0, 1, 2, 3, 4, 5], "idents":[null,true,false]}"#,
@@ -3631,7 +3629,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(target_pointer_width = "32", ignore)] // FIXME(#14064)
     fn test_read_object_streaming() {
         assert_eq!(last_event("{ "),      Error(SyntaxError(EOFWhileParsingObject, 1, 3)));
         assert_eq!(last_event("{1"),      Error(SyntaxError(KeyMustBeAString,      1, 2)));
@@ -3715,7 +3712,6 @@ mod tests {
         );
     }
     #[test]
-    #[cfg_attr(target_pointer_width = "32", ignore)] // FIXME(#14064)
     fn test_read_array_streaming() {
         assert_stream_equal(
             "[]",
@@ -3887,8 +3883,8 @@ mod tests {
         use std::collections::{HashMap,BTreeMap};
         use super::ToJson;
 
-        let array2 = Array(vec!(U64(1), U64(2)));
-        let array3 = Array(vec!(U64(1), U64(2), U64(3)));
+        let array2 = Array(vec![U64(1), U64(2)]);
+        let array3 = Array(vec![U64(1), U64(2), U64(3)]);
         let object = {
             let mut tree_map = BTreeMap::new();
             tree_map.insert("a".to_string(), U64(1));
@@ -3922,7 +3918,7 @@ mod tests {
         assert_eq!([1_usize, 2_usize].to_json(), array2);
         assert_eq!((&[1_usize, 2_usize, 3_usize]).to_json(), array3);
         assert_eq!((vec![1_usize, 2_usize]).to_json(), array2);
-        assert_eq!(vec!(1_usize, 2_usize, 3_usize).to_json(), array3);
+        assert_eq!(vec![1_usize, 2_usize, 3_usize].to_json(), array3);
         let mut tree_map = BTreeMap::new();
         tree_map.insert("a".to_string(), 1 as usize);
         tree_map.insert("b".to_string(), 2);

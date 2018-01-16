@@ -12,12 +12,11 @@
 // refers to rules defined in RFC 1214 (`OutlivesFooBar`), so see that
 // RFC for reference.
 
-use infer::InferCtxt;
-use ty::{self, Ty, TypeFoldable};
+use ty::{self, Ty, TyCtxt, TypeFoldable};
 
 #[derive(Debug)]
 pub enum Component<'tcx> {
-    Region(ty::Region),
+    Region(ty::Region<'tcx>),
     Param(ty::ParamTy),
     UnresolvedInferenceVariable(ty::InferTy),
 
@@ -55,9 +54,9 @@ pub enum Component<'tcx> {
     EscapingProjection(Vec<Component<'tcx>>),
 }
 
-impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
+impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
     /// Returns all the things that must outlive `'a` for the condition
-    /// `ty0: 'a` to hold.
+    /// `ty0: 'a` to hold. Note that `ty0` must be a **fully resolved type**.
     pub fn outlives_components(&self, ty0: Ty<'tcx>)
                                -> Vec<Component<'tcx>> {
         let mut components = vec![];
@@ -73,47 +72,21 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
         // in the `subtys` iterator (e.g., when encountering a
         // projection).
         match ty.sty {
-            ty::TyClosure(_, ref substs) => {
-                // FIXME(#27086). We do not accumulate from substs, since they
-                // don't represent reachable data. This means that, in
-                // practice, some of the lifetime parameters might not
-                // be in scope when the body runs, so long as there is
-                // no reachable data with that lifetime. For better or
-                // worse, this is consistent with fn types, however,
-                // which can also encapsulate data in this fashion
-                // (though it's somewhat harder, and typically
-                // requires virtual dispatch).
-                //
-                // Note that changing this (in a naive way, at least)
-                // causes regressions for what appears to be perfectly
-                // reasonable code like this:
-                //
-                // ```
-                // fn foo<'a>(p: &Data<'a>) {
-                //    bar(|q: &mut Parser| q.read_addr())
-                // }
-                // fn bar(p: Box<FnMut(&mut Parser)+'static>) {
-                // }
-                // ```
-                //
-                // Note that `p` (and `'a`) are not used in the
-                // closure at all, but to meet the requirement that
-                // the closure type `C: 'static` (so it can be coerced
-                // to the object type), we get the requirement that
-                // `'a: 'static` since `'a` appears in the closure
-                // type `C`.
-                //
-                // A smarter fix might "prune" unused `func_substs` --
-                // this would avoid breaking simple examples like
-                // this, but would still break others (which might
-                // indeed be invalid, depending on your POV). Pruning
-                // would be a subtle process, since we have to see
-                // what func/type parameters are used and unused,
-                // taking into consideration UFCS and so forth.
+            ty::TyClosure(def_id, ref substs) => {
 
-                for &upvar_ty in substs.upvar_tys {
+                for upvar_ty in substs.upvar_tys(def_id, *self) {
                     self.compute_components(upvar_ty, out);
                 }
+            }
+
+            ty::TyGenerator(def_id, ref substs, ref interior) => {
+                // Same as the closure case
+                for upvar_ty in substs.upvar_tys(def_id, *self) {
+                    self.compute_components(upvar_ty, out);
+                }
+
+                // But generators can have additional interior types
+                self.compute_components(interior.witness, out);
             }
 
             // OutlivesTypeParameterEnv -- the actual checking that `X:'a`
@@ -148,16 +121,11 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
                 }
             }
 
-            // If we encounter an inference variable, try to resolve it
-            // and proceed with resolved version. If we cannot resolve it,
-            // then record the unresolved variable as a component.
-            ty::TyInfer(_) => {
-                let ty = self.resolve_type_vars_if_possible(&ty);
-                if let ty::TyInfer(infer_ty) = ty.sty {
-                    out.push(Component::UnresolvedInferenceVariable(infer_ty));
-                } else {
-                    self.compute_components(ty, out);
-                }
+            // We assume that inference variables are fully resolved.
+            // So, if we encounter an inference variable, just record
+            // the unresolved variable as a component.
+            ty::TyInfer(infer_ty) => {
+                out.push(Component::UnresolvedInferenceVariable(infer_ty));
             }
 
             // Most types do not introduce any region binders, nor
@@ -171,9 +139,10 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             ty::TyInt(..) |         // OutlivesScalar
             ty::TyUint(..) |        // OutlivesScalar
             ty::TyFloat(..) |       // OutlivesScalar
-            ty::TyEnum(..) |        // OutlivesNominalType
-            ty::TyStruct(..) |      // OutlivesNominalType
-            ty::TyBox(..) |         // OutlivesNominalType (ish)
+            ty::TyNever |           // ...
+            ty::TyAdt(..) |         // OutlivesNominalType
+            ty::TyAnon(..) |        // OutlivesNominalType (ish)
+            ty::TyForeign(..) |     // OutlivesNominalType
             ty::TyStr |             // OutlivesScalar (ish)
             ty::TyArray(..) |       // ...
             ty::TySlice(..) |       // ...
@@ -182,7 +151,7 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
             ty::TyTuple(..) |       // ...
             ty::TyFnDef(..) |       // OutlivesFunction (*)
             ty::TyFnPtr(_) |        // OutlivesFunction (*)
-            ty::TyTrait(..) |       // OutlivesObject, OutlivesFragment (*)
+            ty::TyDynamic(..) |       // OutlivesObject, OutlivesFragment (*)
             ty::TyError => {
                 // (*) Bare functions and traits are both binders. In the
                 // RFC, this means we would add the bound regions to the
@@ -208,9 +177,9 @@ impl<'a, 'gcx, 'tcx> InferCtxt<'a, 'gcx, 'tcx> {
     }
 }
 
-fn push_region_constraints<'tcx>(out: &mut Vec<Component<'tcx>>, regions: Vec<ty::Region>) {
+fn push_region_constraints<'tcx>(out: &mut Vec<Component<'tcx>>, regions: Vec<ty::Region<'tcx>>) {
     for r in regions {
-        if !r.is_bound() {
+        if !r.is_late_bound() {
             out.push(Component::Region(r));
         }
     }

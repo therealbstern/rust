@@ -12,6 +12,7 @@
 // in between revisions (hashing should be stable).
 
 // revisions:rpass1 rpass2
+// compile-flags: -Z query-dep-graph
 
 #![feature(rustc_attrs)]
 
@@ -33,19 +34,19 @@ pub struct Y {
     pub y: char
 }
 
-#[rustc_clean(label="TypeckItemBody", cfg="rpass2")]
+#[rustc_clean(label="TypeckTables", cfg="rpass2")]
 pub fn use_X() -> u32 {
     let x: X = X { x: 22 };
     x.x as u32
 }
 
-#[rustc_clean(label="TypeckItemBody", cfg="rpass2")]
+#[rustc_clean(label="TypeckTables", cfg="rpass2")]
 pub fn use_EmbedX(x: EmbedX) -> u32 {
     let x: X = X { x: 22 };
     x.x as u32
 }
 
-#[rustc_clean(label="TypeckItemBody", cfg="rpass2")]
+#[rustc_clean(label="TypeckTables", cfg="rpass2")]
 pub fn use_Y() {
     let x: Y = Y { y: 'c' };
 }

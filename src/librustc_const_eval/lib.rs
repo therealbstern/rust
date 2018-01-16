@@ -14,40 +14,47 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![crate_name = "rustc_const_eval"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
+#![deny(warnings)]
 
-
-#![feature(rustc_private)]
-#![feature(staged_api)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_patterns)]
-#![feature(question_mark)]
 #![feature(box_patterns)]
 #![feature(box_syntax)]
+#![feature(i128_type)]
+#![feature(from_ref)]
 
+extern crate arena;
 #[macro_use] extern crate syntax;
 #[macro_use] extern crate log;
 #[macro_use] extern crate rustc;
-extern crate rustc_back;
 extern crate rustc_const_math;
-extern crate graphviz;
+extern crate rustc_data_structures;
+extern crate rustc_errors;
 extern crate syntax_pos;
-extern crate serialize as rustc_serialize; // used by deriving
 
 // NB: This module needs to be declared first so diagnostics are
 // registered before they are used.
-pub mod diagnostics;
+mod diagnostics;
 
 mod eval;
+mod _match;
 pub mod check_match;
+pub mod pattern;
 
 pub use eval::*;
 
+use rustc::ty::maps::Providers;
+
+pub fn provide(providers: &mut Providers) {
+    *providers = Providers {
+        check_match: check_match::check_match,
+        ..*providers
+    };
+}
+
 // Build the diagnostics array at the end so that the metadata includes error use sites.
+#[cfg(not(stage0))] // remove after the next snapshot
 __build_diagnostic_array! { librustc_const_eval, DIAGNOSTICS }

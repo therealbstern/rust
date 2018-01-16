@@ -10,6 +10,7 @@
 #![crate_name="lint_stability"]
 #![crate_type = "lib"]
 #![feature(staged_api)]
+#![feature(associated_type_defaults)]
 #![stable(feature = "lint_stability", since = "1.0.0")]
 
 #[stable(feature = "test_feature", since = "1.0.0")]
@@ -93,6 +94,15 @@ pub trait Trait {
 }
 
 #[stable(feature = "test_feature", since = "1.0.0")]
+pub trait TraitWithAssociatedTypes {
+    #[unstable(feature = "test_feature", issue = "0")]
+    type TypeUnstable = u8;
+    #[stable(feature = "test_feature", since = "1.0.0")]
+    #[rustc_deprecated(since = "1.0.0", reason = "text")]
+    type TypeDeprecated = u8;
+}
+
+#[stable(feature = "test_feature", since = "1.0.0")]
 impl Trait for MethodTester {}
 
 #[unstable(feature = "test_feature", issue = "0")]
@@ -122,6 +132,10 @@ pub struct UnstableStruct {
 pub struct StableStruct {
     #[stable(feature = "test_feature", since = "1.0.0")] pub i: isize
 }
+#[unstable(feature = "test_feature", issue = "0")]
+pub enum UnstableEnum {}
+#[stable(feature = "rust1", since = "1.0.0")]
+pub enum StableEnum {}
 
 #[stable(feature = "test_feature", since = "1.0.0")]
 #[rustc_deprecated(since = "1.0.0", reason = "text")]

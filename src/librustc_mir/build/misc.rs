@@ -17,9 +17,9 @@ use rustc_const_math::{ConstInt, ConstUsize, ConstIsize};
 use rustc::middle::const_val::ConstVal;
 use rustc::ty::{self, Ty};
 
-use rustc::mir::repr::*;
+use rustc::mir::*;
 use syntax::ast;
-use syntax_pos::Span;
+use syntax_pos::{Span, DUMMY_SP};
 
 impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     /// Add a new temporary value of type `ty` storing the result of
@@ -27,12 +27,12 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
     ///
     /// NB: **No cleanup is scheduled for this temporary.** You should
     /// call `schedule_drop` once the temporary is initialized.
-    pub fn temp(&mut self, ty: Ty<'tcx>) -> Lvalue<'tcx> {
-        let temp = self.temp_decls.push(TempDecl { ty: ty });
-        let lvalue = Lvalue::Temp(temp);
+    pub fn temp(&mut self, ty: Ty<'tcx>, span: Span) -> Place<'tcx> {
+        let temp = self.local_decls.push(LocalDecl::new_temp(ty, span));
+        let place = Place::Local(temp);
         debug!("temp: created temp {:?} with type {:?}",
-               lvalue, self.temp_decls[temp].ty);
-        lvalue
+               place, self.local_decls[temp].ty);
+        place
     }
 
     pub fn literal_operand(&mut self,
@@ -40,16 +40,16 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                            ty: Ty<'tcx>,
                            literal: Literal<'tcx>)
                            -> Operand<'tcx> {
-        let constant = Constant {
-            span: span,
-            ty: ty,
-            literal: literal,
+        let constant = box Constant {
+            span,
+            ty,
+            literal,
         };
         Operand::Constant(constant)
     }
 
     pub fn unit_rvalue(&mut self) -> Rvalue<'tcx> {
-        Rvalue::Aggregate(AggregateKind::Tuple, vec![])
+        Rvalue::Aggregate(box AggregateKind::Tuple, vec![])
     }
 
     // Returns a zero literal operand for the appropriate type, works for
@@ -59,21 +59,34 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
             ty::TyBool => {
                 self.hir.false_literal()
             }
-            ty::TyChar => Literal::Value { value: ConstVal::Char('\0') },
+            ty::TyChar => {
+                Literal::Value {
+                    value: self.hir.tcx().mk_const(ty::Const {
+                        val: ConstVal::Char('\0'),
+                        ty
+                    })
+                }
+            }
             ty::TyUint(ity) => {
                 let val = match ity {
                     ast::UintTy::U8  => ConstInt::U8(0),
                     ast::UintTy::U16 => ConstInt::U16(0),
                     ast::UintTy::U32 => ConstInt::U32(0),
                     ast::UintTy::U64 => ConstInt::U64(0),
-                    ast::UintTy::Us => {
-                        let uint_ty = self.hir.tcx().sess.target.uint_type;
+                    ast::UintTy::U128 => ConstInt::U128(0),
+                    ast::UintTy::Usize => {
+                        let uint_ty = self.hir.tcx().sess.target.usize_ty;
                         let val = ConstUsize::new(0, uint_ty).unwrap();
                         ConstInt::Usize(val)
                     }
                 };
 
-                Literal::Value { value: ConstVal::Integral(val) }
+                Literal::Value {
+                    value: self.hir.tcx().mk_const(ty::Const {
+                        val: ConstVal::Integral(val),
+                        ty
+                    })
+                }
             }
             ty::TyInt(ity) => {
                 let val = match ity {
@@ -81,14 +94,20 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                     ast::IntTy::I16 => ConstInt::I16(0),
                     ast::IntTy::I32 => ConstInt::I32(0),
                     ast::IntTy::I64 => ConstInt::I64(0),
-                    ast::IntTy::Is => {
-                        let int_ty = self.hir.tcx().sess.target.int_type;
+                    ast::IntTy::I128 => ConstInt::I128(0),
+                    ast::IntTy::Isize => {
+                        let int_ty = self.hir.tcx().sess.target.isize_ty;
                         let val = ConstIsize::new(0, int_ty).unwrap();
                         ConstInt::Isize(val)
                     }
                 };
 
-                Literal::Value { value: ConstVal::Integral(val) }
+                Literal::Value {
+                    value: self.hir.tcx().mk_const(ty::Const {
+                        val: ConstVal::Integral(val),
+                        ty
+                    })
+                }
             }
             _ => {
                 span_bug!(span, "Invalid type for zero_literal: `{:?}`", ty)
@@ -102,9 +121,9 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                       block: BasicBlock,
                       source_info: SourceInfo,
                       value: u64)
-                      -> Lvalue<'tcx> {
+                      -> Place<'tcx> {
         let usize_ty = self.hir.usize_ty();
-        let temp = self.temp(usize_ty);
+        let temp = self.temp(usize_ty, source_info.span);
         self.cfg.push_assign_constant(
             block, source_info, &temp,
             Constant {
@@ -113,5 +132,15 @@ impl<'a, 'gcx, 'tcx> Builder<'a, 'gcx, 'tcx> {
                 literal: self.hir.usize_literal(value),
             });
         temp
+    }
+
+    pub fn consume_by_copy_or_move(&self, place: Place<'tcx>) -> Operand<'tcx> {
+        let tcx = self.hir.tcx();
+        let ty = place.ty(&self.local_decls, tcx).to_ty(tcx);
+        if self.hir.type_moves_by_default(ty, DUMMY_SP) {
+            Operand::Move(place)
+        } else {
+            Operand::Copy(place)
+        }
     }
 }

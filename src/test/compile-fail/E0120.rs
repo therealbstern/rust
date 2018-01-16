@@ -8,9 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-trait MyTrait {}
+trait MyTrait { fn foo() {} }
 
-impl Drop for MyTrait { //~ ERROR E0120
+impl Drop for MyTrait {
+              //~^ ERROR E0120
     fn drop(&mut self) {}
 }
 

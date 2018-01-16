@@ -43,7 +43,7 @@ match x {
 
 Matching with the wrong number of fields has no sensible interpretation:
 
-```compile_fail
+```compile_fail,E0023
 enum Fruit {
     Apple(String, String),
     Pear(u32),
@@ -66,7 +66,7 @@ E0025: r##"
 Each field of a struct can only be bound once in a pattern. Erroneous code
 example:
 
-```compile_fail
+```compile_fail,E0025
 struct Foo {
     a: u8,
     b: u8,
@@ -123,7 +123,7 @@ by a different name, you should rename it explicitly.
 
 Change this:
 
-```compile_fail
+```compile_fail,E0026
 struct Thing {
     x: u32,
     y: u32
@@ -159,7 +159,7 @@ definition is mentioned in the pattern, or use `..` to ignore unwanted fields.
 
 For example:
 
-```compile_fail
+```compile_fail,E0027
 struct Dog {
     name: String,
     age: u32,
@@ -201,7 +201,9 @@ compile-time, and is unable to evaluate arbitrary comparison functions. If you
 want to capture values of an orderable type between two end-points, you can use
 a guard.
 
-```compile_fail
+```compile_fail,E0029
+let string = "salutations !";
+
 // The ordering relation for strings can't be evaluated at compile time,
 // so this doesn't work:
 match string {
@@ -224,8 +226,10 @@ size of trait implementors isn't fixed, this type has no compile-time size.
 Therefore, all accesses to trait types must be through pointers. If you
 encounter this error you should try to avoid dereferencing the pointer.
 
-```ignore
-let trait_obj: &SomeTrait = ...;
+```compile_fail,E0033
+# trait SomeTrait { fn method_one(&self){} fn method_two(&self){} }
+# impl<T> SomeTrait for T {}
+let trait_obj: &SomeTrait = &"some_value";
 
 // This tries to implicitly dereference to create an unsized local variable.
 let &invalid = trait_obj;
@@ -235,17 +239,17 @@ trait_obj.method_one();
 trait_obj.method_two();
 ```
 
-You can read more about trait objects in the Trait Object section of the
-Reference:
+You can read more about trait objects in the [Trait Objects] section of the
+Reference.
 
-https://doc.rust-lang.org/reference.html#trait-objects
+[Trait Objects]: https://doc.rust-lang.org/reference/types.html#trait-objects
 "##,
 
 E0034: r##"
 The compiler doesn't know what method to call because more than one method
 has the same prototype. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0034
 struct Test;
 
 trait Trait1 {
@@ -328,88 +332,6 @@ fn main() {
 ```
 "##,
 
-E0035: r##"
-You tried to give a type parameter where it wasn't needed. Erroneous code
-example:
-
-```compile_fail
-struct Test;
-
-impl Test {
-    fn method(&self) {}
-}
-
-fn main() {
-    let x = Test;
-
-    x.method::<i32>(); // Error: Test::method doesn't need type parameter!
-}
-```
-
-To fix this error, just remove the type parameter:
-
-```
-struct Test;
-
-impl Test {
-    fn method(&self) {}
-}
-
-fn main() {
-    let x = Test;
-
-    x.method(); // OK, we're good!
-}
-```
-"##,
-
-E0036: r##"
-This error occurrs when you pass too many or not enough type parameters to
-a method. Erroneous code example:
-
-```compile_fail
-struct Test;
-
-impl Test {
-    fn method<T>(&self, v: &[T]) -> usize {
-        v.len()
-    }
-}
-
-fn main() {
-    let x = Test;
-    let v = &[0];
-
-    x.method::<i32, i32>(v); // error: only one type parameter is expected!
-}
-```
-
-To fix it, just specify a correct number of type parameters:
-
-```
-struct Test;
-
-impl Test {
-    fn method<T>(&self, v: &[T]) -> usize {
-        v.len()
-    }
-}
-
-fn main() {
-    let x = Test;
-    let v = &[0];
-
-    x.method::<i32>(v); // OK, we're good!
-}
-```
-
-Please note on the last example that we could have called `method` like this:
-
-```ignore
-x.method(v);
-```
-"##,
-
 E0040: r##"
 It is not allowed to manually call destructors in Rust. It is also not
 necessary to do this since `drop` is called automatically whenever a value goes
@@ -417,7 +339,7 @@ out of scope.
 
 Here's an example of this error:
 
-```compile_fail
+```compile_fail,E0040
 struct Foo {
     x: i32,
 }
@@ -438,7 +360,7 @@ fn main() {
 E0044: r##"
 You can't use type parameters on foreign items. Example of erroneous code:
 
-```compile_fail
+```compile_fail,E0044
 extern { fn some_func<T>(x: T); }
 ```
 
@@ -457,6 +379,8 @@ FFI. As such, variadic parameters can only be used with functions which are
 using the C ABI. Examples of erroneous code:
 
 ```compile_fail
+#![feature(unboxed_closures)]
+
 extern "rust-call" { fn foo(x: u8, ...); }
 
 // or
@@ -465,12 +389,6 @@ fn foo(x: u8, ...) {}
 ```
 
 To fix such code, put them in an extern "C" block:
-
-```ignore
-extern "C" fn foo(x: u8, ...);
-```
-
-Or:
 
 ```
 extern "C" {
@@ -482,7 +400,7 @@ extern "C" {
 E0046: r##"
 Items are missing in a trait implementation. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0046
 trait Foo {
     fn foo();
 }
@@ -518,7 +436,7 @@ has the wrong number of type parameters.
 For example, the trait below has a method `foo` with a type parameter `T`,
 but the implementation of `foo` for the type `Bar` is missing this parameter:
 
-```compile_fail
+```compile_fail,E0049
 trait Foo {
     fn foo<T: Default>(x: T) -> Self;
 }
@@ -541,7 +459,7 @@ For example, the trait below has a method `foo` with two function parameters
 (`&self` and `u8`), but the implementation of `foo` for the type `Bar` omits
 the `u8` parameter:
 
-```compile_fail
+```compile_fail,E0050
 trait Foo {
     fn foo(&self, x: u8) -> bool;
 }
@@ -562,7 +480,7 @@ and the trait definition.
 
 Here are a couple examples of this error:
 
-```compile_fail
+```compile_fail,E0053
 trait Foo {
     fn foo(x: u16);
     fn bar(&self);
@@ -574,7 +492,7 @@ impl Foo for Bar {
     // error, expected u16, found i16
     fn foo(x: i16) { }
 
-    // error, values differ in mutability
+    // error, types differ in mutability
     fn bar(&mut self) { }
 }
 ```
@@ -584,7 +502,7 @@ E0054: r##"
 It is not allowed to cast to a bool. If you are trying to cast a numeric type
 to a bool, you can compare it with zero instead:
 
-```compile_fail
+```compile_fail,E0054
 let x = 5;
 
 // Not allowed, won't compile
@@ -607,7 +525,7 @@ recursion limit (which can be set via the `recursion_limit` attribute).
 
 For a somewhat artificial example:
 
-```compile_fail,ignore
+```compile_fail,E0055
 #![recursion_limit="2"]
 
 struct Foo;
@@ -637,7 +555,7 @@ function must match its definition.
 
 An example using a closure:
 
-```compile_fail
+```compile_fail,E0057
 let f = |x| x * 3;
 let a = f();        // invalid, too few parameters
 let b = f(4);       // this works!
@@ -663,13 +581,17 @@ implemented by closures.
 The most likely source of this error is using angle-bracket notation without
 wrapping the function argument type into a tuple, for example:
 
-```compile_fail
+```compile_fail,E0059
+#![feature(unboxed_closures)]
+
 fn foo<F: Fn<i32>>(f: F) -> F::Output { f(3) }
 ```
 
 It can be fixed by adjusting the trait bound like this:
 
-```ignore
+```
+#![feature(unboxed_closures)]
+
 fn foo<F: Fn<(i32,)>>(f: F) -> F::Output { f(3) }
 ```
 
@@ -682,9 +604,8 @@ External C functions are allowed to be variadic. However, a variadic function
 takes a minimum number of arguments. For example, consider C's variadic `printf`
 function:
 
-```ignore
-extern crate libc;
-use libc::{ c_char, c_int };
+```
+use std::os::raw::{c_char, c_int};
 
 extern "C" {
     fn printf(_: *const c_char, ...) -> c_int;
@@ -694,16 +615,35 @@ extern "C" {
 Using this declaration, it must be called with at least one argument, so
 simply calling `printf()` is invalid. But the following uses are allowed:
 
-```ignore
+```
+# #![feature(static_nobundle)]
+# use std::os::raw::{c_char, c_int};
+# #[cfg_attr(all(windows, target_env = "msvc"),
+#            link(name = "legacy_stdio_definitions", kind = "static-nobundle"))]
+# extern "C" { fn printf(_: *const c_char, ...) -> c_int; }
+# fn main() {
 unsafe {
     use std::ffi::CString;
 
-    printf(CString::new("test\n").unwrap().as_ptr());
-    printf(CString::new("number = %d\n").unwrap().as_ptr(), 3);
-    printf(CString::new("%d, %d\n").unwrap().as_ptr(), 10, 5);
+    let fmt = CString::new("test\n").unwrap();
+    printf(fmt.as_ptr());
+
+    let fmt = CString::new("number = %d\n").unwrap();
+    printf(fmt.as_ptr(), 3);
+
+    let fmt = CString::new("%d, %d\n").unwrap();
+    printf(fmt.as_ptr(), 10, 5);
 }
+# }
 ```
 "##,
+// ^ Note: On MSVC 2015, the `printf` function is "inlined" in the C code, and
+// the C runtime does not contain the `printf` definition. This leads to linker
+// error from the doc test (issue #42830).
+// This can be fixed by linking to the static library
+// `legacy_stdio_definitions.lib` (see https://stackoverflow.com/a/36504365/).
+// If this compatibility library is removed in the future, consider changing
+// `printf` in this example to another well-known variadic function.
 
 E0061: r##"
 The number of arguments passed to a function must match the number of arguments
@@ -726,9 +666,9 @@ This error indicates that during an attempt to build a struct or struct-like
 enum variant, one of the fields was specified more than once. Erroneous code
 example:
 
-```compile_fail
+```compile_fail,E0062
 struct Foo {
-    x: i32
+    x: i32,
 }
 
 fn main() {
@@ -743,7 +683,7 @@ Each field should be specified exactly one time. Example:
 
 ```
 struct Foo {
-    x: i32
+    x: i32,
 }
 
 fn main() {
@@ -756,10 +696,10 @@ E0063: r##"
 This error indicates that during an attempt to build a struct or struct-like
 enum variant, one of the fields was not provided. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0063
 struct Foo {
     x: i32,
-    y: i32
+    y: i32,
 }
 
 fn main() {
@@ -772,7 +712,7 @@ Each field should be specified exactly once. Example:
 ```
 struct Foo {
     x: i32,
-    y: i32
+    y: i32,
 }
 
 fn main() {
@@ -788,7 +728,7 @@ Furthermore, the syntax is changing to use `in` instead of `box`. See [RFC 470]
 and [RFC 809] for more details.
 
 [RFC 470]: https://github.com/rust-lang/rfcs/pull/470
-[RFC 809]: https://github.com/rust-lang/rfcs/pull/809
+[RFC 809]: https://github.com/rust-lang/rfcs/blob/master/text/0809-box-and-in-for-stdlib.md
 "##,
 
 E0067: r##"
@@ -799,7 +739,7 @@ and field references.
 
 Let's start with some erroneous code examples:
 
-```compile_fail
+```compile_fail,E0067
 use std::collections::LinkedList;
 
 // Bad: assignment to non-lvalue expression
@@ -831,7 +771,7 @@ E0069: r##"
 The compiler found a function whose body contains a `return;` statement but
 whose return type is not `()`. An example of this is:
 
-```compile_fail
+```compile_fail,E0069
 // error
 fn foo() -> u8 {
     return;
@@ -848,12 +788,13 @@ lvalue expression represents a memory location and can be a variable (with
 optional namespacing), a dereference, an indexing expression or a field
 reference.
 
-More details can be found here:
-https://doc.rust-lang.org/reference.html#lvalues-rvalues-and-temporaries
+More details can be found in the [Expressions] section of the Reference.
+
+[Expressions]: https://doc.rust-lang.org/reference/expressions.html#lvalues-rvalues-and-temporaries
 
 Now, we can go further. Here are some erroneous code examples:
 
-```compile_fail
+```compile_fail,E0070
 struct SomeStruct {
     x: i32,
     y: i32
@@ -893,17 +834,14 @@ fn some_func(x: &mut i32) {
 
 E0071: r##"
 You tried to use structure-literal syntax to create an item that is
-not a struct-style structure or enum variant.
+not a structure or enum variant.
 
 Example of erroneous code:
 
-```compile_fail
-enum Foo { FirstValue(i32) };
-
-let u = Foo::FirstValue { value: 0 }; // error: Foo::FirstValue
-                                         // isn't a structure!
-// or even simpler, if the name doesn't refer to a structure at all.
-let t = u32 { value: 4 }; // error: `u32` does not name a structure.
+```compile_fail,E0071
+type U32 = u32;
+let t = U32 { value: 4 }; // error: expected struct, variant or union type,
+                          // found builtin type `u32`
 ```
 
 To fix this, ensure that the name was correctly spelled, and that
@@ -925,13 +863,15 @@ fn main() {
 "##,
 
 E0073: r##"
+#### Note: this error code is no longer emitted by the compiler.
+
 You cannot define a struct (or enum) `Foo` that requires an instance of `Foo`
 in order to make a new `Foo` value. This is because there would be no way a
 first instance of `Foo` could be made to initialize another instance!
 
 Here's an example of a struct that has this problem:
 
-```ignore
+```
 struct Foo { x: Box<Foo> } // error
 ```
 
@@ -945,6 +885,8 @@ Now it's possible to create at least one instance of `Foo`: `Foo { x: None }`.
 "##,
 
 E0074: r##"
+#### Note: this error code is no longer emitted by the compiler.
+
 When using the `#[simd]` attribute on a tuple struct, the components of the
 tuple struct must all be of a concrete, nongeneric type so the compiler can
 reason about how to use SIMD with them. This error will occur if the types
@@ -952,7 +894,7 @@ are generic.
 
 This will cause an error:
 
-```ignore
+```
 #![feature(repr_simd)]
 
 #[repr(simd)]
@@ -976,7 +918,7 @@ operate on.
 
 This will cause an error:
 
-```compile_fail
+```compile_fail,E0075
 #![feature(repr_simd)]
 
 #[repr(simd)]
@@ -1000,7 +942,7 @@ will trigger this error.
 
 This will cause an error:
 
-```compile_fail
+```compile_fail,E0076
 #![feature(repr_simd)]
 
 #[repr(simd)]
@@ -1023,7 +965,7 @@ must be machine types so SIMD operations can be applied to them.
 
 This will cause an error:
 
-```compile_fail
+```compile_fail,E0077
 #![feature(repr_simd)]
 
 #[repr(simd)]
@@ -1040,75 +982,17 @@ struct Good(u32, u32, u32);
 ```
 "##,
 
-E0079: r##"
-Enum variants which contain no data can be given a custom integer
-representation. This error indicates that the value provided is not an integer
-literal and is therefore invalid.
-
-For example, in the following code:
-
-```compile_fail
-enum Foo {
-    Q = "32"
-}
-```
-
-We try to set the representation to a string.
-
-There's no general fix for this; if you can work with an integer then just set
-it to one:
-
-```
-enum Foo {
-    Q = 32
-}
-```
-
-However if you actually wanted a mapping between variants and non-integer
-objects, it may be preferable to use a method with a match instead:
-
-```
-enum Foo { Q }
-impl Foo {
-    fn get_str(&self) -> &'static str {
-        match *self {
-            Foo::Q => "32",
-        }
-    }
-}
-```
-"##,
-
-E0080: r##"
-This error indicates that the compiler was unable to sensibly evaluate an
-integer expression provided as an enum discriminant. Attempting to divide by 0
-or causing integer overflow are two ways to induce this error. For example:
-
-```compile_fail
-enum Enum {
-    X = (1 << 500),
-    Y = (1 / 0)
-}
-```
-
-Ensure that the expressions given can be evaluated as the desired integer type.
-See the FFI section of the Reference for more information about using a custom
-integer type:
-
-https://doc.rust-lang.org/reference.html#ffi-attributes
-"##,
-
 E0081: r##"
 Enum discriminants are used to differentiate enum variants stored in memory.
 This error indicates that the same value was used for two or more variants,
 making them impossible to tell apart.
 
-```compile_fail
+```compile_fail,E0081
 // Bad.
 enum Enum {
     P = 3,
     X = 3,
-    Y = 5
+    Y = 5,
 }
 ```
 
@@ -1117,7 +1001,7 @@ enum Enum {
 enum Enum {
     P,
     X = 3,
-    Y = 5
+    Y = 5,
 }
 ```
 
@@ -1125,7 +1009,7 @@ Note that variants without a manually specified discriminant are numbered from
 top to bottom starting from 0, so clashes can occur with seemingly unrelated
 variants.
 
-```compile_fail
+```compile_fail,E0081
 enum Bad {
     X,
     Y = 0
@@ -1137,26 +1021,30 @@ encountered, so a conflict occurs.
 "##,
 
 E0082: r##"
+#### Note: this error code is no longer emitted by the compiler.
+
 When you specify enum discriminants with `=`, the compiler expects `isize`
 values by default. Or you can add the `repr` attibute to the enum declaration
 for an explicit choice of the discriminant type. In either cases, the
 discriminant values must fall within a valid range for the expected type;
 otherwise this error is raised. For example:
 
-```ignore
+```compile_fail
+# #![deny(overflowing_literals)]
 #[repr(u8)]
 enum Thing {
     A = 1024,
-    B = 5
+    B = 5,
 }
 ```
 
 Here, 1024 lies outside the valid range for `u8`, so the discriminant for `A` is
 invalid. Here is another, more subtle example which depends on target word size:
 
-```ignore
+```compile_fail,E0080
+# #[repr(i32)]
 enum DependsOnPointerSize {
-    A = 1 << 32
+    A = 1 << 32,
 }
 ```
 
@@ -1172,7 +1060,7 @@ An unsupported representation was attempted on a zero-variant enum.
 
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0084
 #[repr(i32)]
 enum NightsWatch {} // error: unsupported representation for zero-variant enum
 ```
@@ -1200,7 +1088,7 @@ enum NightsWatch {}
 E0087: r##"
 Too many type parameters were supplied for a function. For example:
 
-```compile_fail
+```compile_fail,E0087
 fn foo<T>() {}
 
 fn main() {
@@ -1215,7 +1103,7 @@ parameters.
 E0088: r##"
 You gave too many lifetime parameters. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0088
 fn f() {}
 
 fn main() {
@@ -1260,7 +1148,7 @@ fn main() {
 E0089: r##"
 Not enough type parameters were supplied for a function. For example:
 
-```compile_fail
+```compile_fail,E0089
 fn foo<T, U>() {}
 
 fn main() {
@@ -1271,7 +1159,7 @@ fn main() {
 Note that if a function takes multiple type parameters but you want the compiler
 to infer some of them, you can use type placeholders:
 
-```compile_fail
+```compile_fail,E0089
 fn foo<T, U>(x: T) {}
 
 fn main() {
@@ -1282,11 +1170,33 @@ fn main() {
 ```
 "##,
 
+E0090: r##"
+You gave too few lifetime parameters. Example:
+
+```compile_fail,E0090
+fn foo<'a: 'b, 'b: 'a>() {}
+
+fn main() {
+    foo::<'static>(); // error, expected 2 lifetime parameters
+}
+```
+
+Please check you give the right number of lifetime parameters. Example:
+
+```
+fn foo<'a: 'b, 'b: 'a>() {}
+
+fn main() {
+    foo::<'static, 'static>();
+}
+```
+"##,
+
 E0091: r##"
 You gave an unnecessary type parameter in a type alias. Erroneous code
 example:
 
-```compile_fail
+```compile_fail,E0091
 type Foo<T> = u32; // error: type parameter `T` is unused
 // or:
 type Foo<A,B> = Box<A>; // error: type parameter `B` is unused
@@ -1304,7 +1214,7 @@ E0092: r##"
 You tried to declare an undefined atomic operation function.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0092
 #![feature(intrinsics)]
 
 extern "rust-intrinsic" {
@@ -1329,7 +1239,7 @@ extern "rust-intrinsic" {
 E0093: r##"
 You declared an unknown intrinsic function. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0093
 #![feature(intrinsics)]
 
 extern "rust-intrinsic" {
@@ -1366,7 +1276,7 @@ E0094: r##"
 You gave an invalid number of type parameters to an intrinsic function.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0094
 #![feature(intrinsics)]
 
 extern "rust-intrinsic" {
@@ -1375,7 +1285,7 @@ extern "rust-intrinsic" {
 }
 ```
 
-Please check that you provided the right number of lifetime parameters
+Please check that you provided the right number of type parameters
 and verify with the function declaration in the Rust source code.
 Example:
 
@@ -1388,134 +1298,57 @@ extern "rust-intrinsic" {
 ```
 "##,
 
-E0101: r##"
-You hit this error because the compiler lacks the information to
-determine a type for this expression. Erroneous code example:
-
-```compile_fail
-fn main() {
-    let x = |_| {}; // error: cannot determine a type for this expression
-}
-```
-
-You have two possibilities to solve this situation:
- * Give an explicit definition of the expression
- * Infer the expression
-
-Examples:
-
-```
-fn main() {
-    let x = |_ : u32| {}; // ok!
-    // or:
-    let x = |_| {};
-    x(0u32);
-}
-```
-"##,
-
-E0102: r##"
-You hit this error because the compiler lacks the information to
-determine the type of this variable. Erroneous code example:
-
-```compile_fail
-fn main() {
-    // could be an array of anything
-    let x = []; // error: cannot determine a type for this local variable
-}
-```
-
-To solve this situation, constrain the type of the variable.
-Examples:
-
-```
-#![allow(unused_variables)]
-
-fn main() {
-    let x: [u8; 0] = [];
-}
-```
-"##,
-
-E0106: r##"
-This error indicates that a lifetime is missing from a type. If it is an error
-inside a function signature, the problem may be with failing to adhere to the
-lifetime elision rules (see below).
-
-Here are some simple examples of where you'll run into this error:
-
-```compile_fail
-struct Foo { x: &bool }        // error
-struct Foo<'a> { x: &'a bool } // correct
-
-enum Bar { A(u8), B(&bool), }        // error
-enum Bar<'a> { A(u8), B(&'a bool), } // correct
-
-type MyStr = &str;        // error
-type MyStr<'a> = &'a str; // correct
-```
-
-Lifetime elision is a special, limited kind of inference for lifetimes in
-function signatures which allows you to leave out lifetimes in certain cases.
-For more background on lifetime elision see [the book][book-le].
-
-The lifetime elision rules require that any function signature with an elided
-output lifetime must either have
-
- - exactly one input lifetime
- - or, multiple input lifetimes, but the function must also be a method with a
-   `&self` or `&mut self` receiver
-
-In the first case, the output lifetime is inferred to be the same as the unique
-input lifetime. In the second case, the lifetime is instead inferred to be the
-same as the lifetime on `&self` or `&mut self`.
-
-Here are some examples of elision errors:
-
-```compile_fail
-// error, no input lifetimes
-fn foo() -> &str { }
-
-// error, `x` and `y` have distinct lifetimes inferred
-fn bar(x: &str, y: &str) -> &str { }
-
-// error, `y`'s lifetime is inferred to be distinct from `x`'s
-fn baz<'a>(x: &'a str, y: &str) -> &str { }
-```
-
-[book-le]: https://doc.rust-lang.org/nightly/book/lifetimes.html#lifetime-elision
-"##,
-
 E0107: r##"
 This error means that an incorrect number of lifetime parameters were provided
-for a type (like a struct or enum) or trait.
+for a type (like a struct or enum) or trait:
 
-Some basic examples include:
-
-```compile_fail
-struct Foo<'a>(&'a str);
+```compile_fail,E0107
+struct Foo<'a, 'b>(&'a str, &'b str);
 enum Bar { A, B, C }
 
 struct Baz<'a> {
-    foo: Foo,     // error: expected 1, found 0
+    foo: Foo<'a>, // error: expected 2, found 1
     bar: Bar<'a>, // error: expected 0, found 1
 }
 ```
+"##,
 
-Here's an example that is currently an error, but may work in a future version
-of Rust:
+E0109: r##"
+You tried to give a type parameter to a type which doesn't need it. Erroneous
+code example:
 
-```compile_fail
-struct Foo<'a>(&'a str);
-
-trait Quux { }
-impl Quux for Foo { } // error: expected 1, found 0
+```compile_fail,E0109
+type X = u32<i32>; // error: type parameters are not allowed on this type
 ```
 
-Lifetime elision in implementation headers was part of the lifetime elision
-RFC. It is, however, [currently unimplemented][iss15872].
+Please check that you used the correct type and recheck its definition. Perhaps
+it doesn't need the type parameter.
 
-[iss15872]: https://github.com/rust-lang/rust/issues/15872
+Example:
+
+```
+type X = u32; // this compiles
+```
+
+Note that type parameters for enum-variant constructors go after the variant,
+not after the enum (`Option::None::<u32>`, not `Option::<u32>::None`).
+"##,
+
+E0110: r##"
+You tried to give a lifetime parameter to a type which doesn't need it.
+Erroneous code example:
+
+```compile_fail,E0110
+type X = u32<'static>; // error: lifetime parameters are not allowed on
+                       //        this type
+```
+
+Please check that the correct type was used and recheck its definition; perhaps
+it doesn't need the lifetime parameter. Example:
+
+```
+type X = u32; // ok!
+```
 "##,
 
 E0116: r##"
@@ -1523,7 +1356,7 @@ You can only define an inherent implementation for a type in the same crate
 where the type was defined. For example, an `impl` block as below is not allowed
 since `Vec` is defined in the standard library:
 
-```compile_fail
+```compile_fail,E0116
 impl Vec<u8> { } // error
 ```
 
@@ -1537,7 +1370,7 @@ To fix this problem, you can do either of these things:
 Note that using the `type` keyword does not work here because `type` only
 introduces a type alias:
 
-```compile_fail
+```compile_fail,E0116
 type Bytes = Vec<u8>;
 
 impl Bytes { } // error, same as above
@@ -1555,18 +1388,19 @@ trait defined in another crate) where
 
 Here's one example of this error:
 
-```compile_fail
+```compile_fail,E0117
 impl Drop for u32 {}
 ```
 
 To avoid this kind of error, ensure that at least one local type is referenced
 by the `impl`:
 
-```ignore
+```
 pub struct Foo; // you define your type in your crate
 
 impl Drop for Foo { // and you can implement the trait on it!
     // code of trait implementation here
+#   fn drop(&mut self) { }
 }
 
 impl From<Foo> for i32 { // or you use a type from your crate as
@@ -1591,14 +1425,14 @@ impl Bar for u32 {
 
 For information on the design of the orphan rules, see [RFC 1023].
 
-[RFC 1023]: https://github.com/rust-lang/rfcs/pull/1023
+[RFC 1023]: https://github.com/rust-lang/rfcs/blob/master/text/1023-rebalancing-coherence.md
 "##,
 
 E0118: r##"
 You're trying to write an inherent implementation for something which isn't a
 struct nor an enum. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0118
 impl (u8, u8) { // error: no base type found for inherent implementation
     fn get_state(&self) -> String {
         // ...
@@ -1638,72 +1472,11 @@ impl TypeWrapper {
 ```
 "##,
 
-E0119: r##"
-There are conflicting trait implementations for the same type.
-Example of erroneous code:
-
-```compile_fail
-trait MyTrait {
-    fn get(&self) -> usize;
-}
-
-impl<T> MyTrait for T {
-    fn get(&self) -> usize { 0 }
-}
-
-struct Foo {
-    value: usize
-}
-
-impl MyTrait for Foo { // error: conflicting implementations of trait
-                       //        `MyTrait` for type `Foo`
-    fn get(&self) -> usize { self.value }
-}
-```
-
-When looking for the implementation for the trait, the compiler finds
-both the `impl<T> MyTrait for T` where T is all types and the `impl
-MyTrait for Foo`. Since a trait cannot be implemented multiple times,
-this is an error. So, when you write:
-
-```
-trait MyTrait {
-    fn get(&self) -> usize;
-}
-
-impl<T> MyTrait for T {
-    fn get(&self) -> usize { 0 }
-}
-```
-
-This makes the trait implemented on all types in the scope. So if you
-try to implement it on another one after that, the implementations will
-conflict. Example:
-
-```
-trait MyTrait {
-    fn get(&self) -> usize;
-}
-
-impl<T> MyTrait for T {
-    fn get(&self) -> usize { 0 }
-}
-
-struct Foo;
-
-fn main() {
-    let f = Foo;
-
-    f.get(); // the trait is implemented so we can use it
-}
-```
-"##,
-
 E0120: r##"
 An attempt was made to implement Drop on a trait, which is not allowed: only
 structs and enums can implement Drop. An example causing this error:
 
-```compile_fail
+```compile_fail,E0120
 trait MyTrait {}
 
 impl Drop for MyTrait {
@@ -1744,7 +1517,7 @@ placeholders are disallowed by design in item signatures.
 
 Examples of this error include:
 
-```compile_fail
+```compile_fail,E0121
 fn foo() -> _ { 5 } // error, explicitly write out the return type instead
 
 static BAR: _ = "test"; // error, explicitly write out the type instead
@@ -1752,9 +1525,9 @@ static BAR: _ = "test"; // error, explicitly write out the type instead
 "##,
 
 E0122: r##"
-An attempt was made to add a generic constraint to a type alias. While Rust will
-allow this with a warning, it will not currently enforce the constraint.
-Consider the example below:
+An attempt was made to add a generic constraint to a type alias. This constraint
+is entirely ignored. For backwards compatibility, Rust still allows this with a
+warning. Consider the example below:
 
 ```
 trait Foo{}
@@ -1775,7 +1548,7 @@ E0124: r##"
 You declared two fields of a struct with the same name. Erroneous code
 example:
 
-```compile_fail
+```compile_fail,E0124
 struct Foo {
     field1: i32,
     field1: i32, // error: field is already declared
@@ -1792,72 +1565,12 @@ struct Foo {
 ```
 "##,
 
-E0128: r##"
-Type parameter defaults can only use parameters that occur before them.
-Erroneous code example:
-
-```compile_fail
-struct Foo<T=U, U=()> {
-    field1: T,
-    filed2: U,
-}
-// error: type parameters with a default cannot use forward declared
-// identifiers
-```
-
-Since type parameters are evaluated in-order, you may be able to fix this issue
-by doing:
-
-```
-struct Foo<U=(), T=U> {
-    field1: T,
-    filed2: U,
-}
-```
-
-Please also verify that this wasn't because of a name-clash and rename the type
-parameter if so.
-"##,
-
-E0130: r##"
-You declared a pattern as an argument in a foreign function declaration.
-Erroneous code example:
-
-```compile_fail
-extern {
-    fn foo((a, b): (u32, u32)); // error: patterns aren't allowed in foreign
-                                //        function declarations
-}
-```
-
-Please replace the pattern argument with a regular one. Example:
-
-```
-struct SomeStruct {
-    a: u32,
-    b: u32,
-}
-
-extern {
-    fn foo(s: SomeStruct); // ok!
-}
-```
-
-Or:
-
-```
-extern {
-    fn foo(a: (u32, u32)); // ok!
-}
-```
-"##,
-
 E0131: r##"
 It is not possible to define `main` with type parameters, or even with function
 parameters. When `main` is present, it must take no arguments and return `()`.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0131
 fn main<T>() { // error: main function is not allowed to have type parameters
 }
 ```
@@ -1868,7 +1581,7 @@ A function with the `start` attribute was declared with type parameters.
 
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0132
 #![feature(start)]
 
 #[start]
@@ -1877,9 +1590,10 @@ fn f<T>() {}
 
 It is not possible to declare type parameters on a function that has the `start`
 attribute. Such a function must have the following type signature (for more
-information: http://doc.rust-lang.org/stable/book/no-stdlib.html):
+information: http://doc.rust-lang.org/stable/book/first-edition/no-stdlib.html):
 
-```ignore
+```
+# let _:
 fn(isize, *const *const u8) -> isize;
 ```
 
@@ -1895,38 +1609,11 @@ fn my_start(argc: isize, argv: *const *const u8) -> isize {
 ```
 "##,
 
-E0163: r##"
-This error means that an attempt was made to match an enum variant as a
-struct type when the variant isn't a struct type:
-
-```compile_fail
-enum Foo { B(u32) }
-
-fn bar(foo: Foo) -> u32 {
-    match foo {
-        B{i} => i, // error E0163
-    }
-}
-```
-
-Try using `()` instead:
-
-```
-enum Foo { B(u32) }
-
-fn bar(foo: Foo) -> u32 {
-    match foo {
-        Foo::B(i) => i,
-    }
-}
-```
-"##,
-
 E0164: r##"
 This error means that an attempt was made to match a struct type enum
 variant as a non-struct type:
 
-```compile_fail
+```compile_fail,E0164
 enum Foo { B { i: u32 } }
 
 fn bar(foo: Foo) -> u32 {
@@ -1949,152 +1636,6 @@ fn bar(foo: Foo) -> u32 {
 ```
 "##,
 
-E0166: r##"
-This error means that the compiler found a return expression in a function
-marked as diverging. A function diverges if it has `!` in the place of the
-return type in its signature. For example:
-
-```compile_fail
-fn foo() -> ! { return; } // error
-```
-
-For a function that diverges, every control path in the function must never
-return, for example with a `loop` that never breaks or a call to another
-diverging function (such as `panic!()`).
-"##,
-
-E0172: r##"
-This error means that an attempt was made to specify the type of a variable with
-a combination of a concrete type and a trait. Consider the following example:
-
-```compile_fail
-fn foo(bar: i32+std::fmt::Display) {}
-```
-
-The code is trying to specify that we want to receive a signed 32-bit integer
-which also implements `Display`. This doesn't make sense: when we pass `i32`, a
-concrete type, it implicitly includes all of the traits that it implements.
-This includes `Display`, `Debug`, `Clone`, and a host of others.
-
-If `i32` implements the trait we desire, there's no need to specify the trait
-separately. If it does not, then we need to `impl` the trait for `i32` before
-passing it into `foo`. Either way, a fixed definition for `foo` will look like
-the following:
-
-```
-fn foo(bar: i32) {}
-```
-
-To learn more about traits, take a look at the Book:
-
-https://doc.rust-lang.org/book/traits.html
-"##,
-
-E0174: r##"
-This error occurs because of the explicit use of unboxed closure methods
-that are an experimental feature in current Rust version.
-
-Example of erroneous code:
-
-```compile_fail
-fn foo<F: Fn(&str)>(mut f: F) {
-    f.call(("call",));
-    // error: explicit use of unboxed closure method `call`
-    f.call_mut(("call_mut",));
-    // error: explicit use of unboxed closure method `call_mut`
-    f.call_once(("call_once",));
-    // error: explicit use of unboxed closure method `call_once`
-}
-
-fn bar(text: &str) {
-    println!("Calling {} it works!", text);
-}
-
-fn main() {
-    foo(bar);
-}
-```
-
-Rust's implementation of closures is a bit different than other languages.
-They are effectively syntax sugar for traits `Fn`, `FnMut` and `FnOnce`.
-To understand better how the closures are implemented see here:
-https://doc.rust-lang.org/book/closures.html#closure-implementation
-
-To fix this you can call them using parenthesis, like this: `foo()`.
-When you execute the closure with parenthesis, under the hood you are executing
-the method `call`, `call_mut` or `call_once`. However, using them explicitly is
-currently an experimental feature.
-
-Example of an implicit call:
-
-```
-fn foo<F: Fn(&str)>(f: F) {
-    f("using ()"); // Calling using () it works!
-}
-
-fn bar(text: &str) {
-    println!("Calling {} it works!", text);
-}
-
-fn main() {
-    foo(bar);
-}
-```
-
-To enable the explicit calls you need to add `#![feature(unboxed_closures)]`.
-
-This feature is still unstable so you will also need to add
-`#![feature(fn_traits)]`.
-More details about this issue here:
-https://github.com/rust-lang/rust/issues/29625
-
-Example of use:
-
-```
-#![feature(fn_traits)]
-#![feature(unboxed_closures)]
-
-fn foo<F: Fn(&str)>(mut f: F) {
-    f.call(("call",)); // Calling 'call' it works!
-    f.call_mut(("call_mut",)); // Calling 'call_mut' it works!
-    f.call_once(("call_once",)); // Calling 'call_once' it works!
-}
-
-fn bar(text: &str) {
-    println!("Calling '{}' it works!", text);
-}
-
-fn main() {
-    foo(bar);
-}
-```
-
-To see more about closures take a look here:
-https://doc.rust-lang.org/book/closures.html`
-"##,
-
-E0178: r##"
-In types, the `+` type operator has low precedence, so it is often necessary
-to use parentheses.
-
-For example:
-
-```compile_fail
-trait Foo {}
-
-struct Bar<'a> {
-    w: &'a Foo + Copy,   // error, use &'a (Foo + Copy)
-    x: &'a Foo + 'a,     // error, use &'a (Foo + 'a)
-    y: &'a mut Foo + 'a, // error, use &'a mut (Foo + 'a)
-    z: fn() -> Foo + 'a, // error, use fn() -> (Foo + 'a)
-}
-```
-
-More details can be found in [RFC 438].
-
-[RFC 438]: https://github.com/rust-lang/rfcs/pull/438
-"##,
-
 E0184: r##"
 Explicitly implementing both Drop and Copy for a type is currently disallowed.
 This feature can make some sense in theory, but the current implementation is
@@ -2111,7 +1652,7 @@ take a `self` parameter).
 
 Here's an example of this error:
 
-```compile_fail
+```compile_fail,E0185
 trait Foo {
     fn foo();
 }
@@ -2133,7 +1674,7 @@ to be static.
 
 Here's an example of this error:
 
-```compile_fail
+```compile_fail,E0186
 trait Foo {
     fn foo(&self);
 }
@@ -2152,7 +1693,7 @@ E0191: r##"
 Trait objects need to have all associated types specified. Erroneous code
 example:
 
-```compile_fail
+```compile_fail,E0191
 trait Trait {
     type Bar;
 }
@@ -2174,16 +1715,19 @@ type Foo = Trait<Bar=i32>; // ok!
 "##,
 
 E0192: r##"
-Negative impls are only allowed for traits with default impls. For more
-information see the [opt-in builtin traits RFC](https://github.com/rust-lang/
-rfcs/blob/master/text/0019-opt-in-builtin-traits.md).
+Negative impls are only allowed for auto traits. For more
+information see the [opt-in builtin traits RFC][RFC 19].
+
+[RFC 19]: https://github.com/rust-lang/rfcs/blob/master/text/0019-opt-in-builtin-traits.md
 "##,
 
 E0193: r##"
+#### Note: this error code is no longer emitted by the compiler.
+
 `where` clauses must use generic type parameters: it does not make sense to use
 them otherwise. An example causing this error:
 
-```ignore
+```
 trait Foo {
     fn bar(&self);
 }
@@ -2228,7 +1772,7 @@ E0194: r##"
 A type parameter was declared which shadows an existing one. An example of this
 error:
 
-```compile_fail
+```compile_fail,E0194
 trait Foo<T> {
     fn do_something(&self) -> T;
     fn do_something_else<T: Clone>(&self, bar: T);
@@ -2244,7 +1788,7 @@ E0195: r##"
 Your method's lifetime parameters do not match the trait declaration.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0195
 trait Trait {
     fn bar<'a,'b:'a>(x: &'a str, y: &'b str);
 }
@@ -2277,60 +1821,12 @@ impl Trait for Foo {
 ```
 "##,
 
-E0197: r##"
-Inherent implementations (one that do not implement a trait but provide
-methods associated with a type) are always safe because they are not
-implementing an unsafe trait. Removing the `unsafe` keyword from the inherent
-implementation will resolve this error.
-
-```compile_fail
-struct Foo;
-
-// this will cause this error
-unsafe impl Foo { }
-// converting it to this will fix it
-impl Foo { }
-```
-"##,
-
-E0198: r##"
-A negative implementation is one that excludes a type from implementing a
-particular trait. Not being able to use a trait is always a safe operation,
-so negative implementations are always safe and never need to be marked as
-unsafe.
-
-```compile_fail
-#![feature(optin_builtin_traits)]
-
-struct Foo;
-
-// unsafe is unnecessary
-unsafe impl !Clone for Foo { }
-```
-
-This will compile:
-
-```
-#![feature(optin_builtin_traits)]
-
-struct Foo;
-
-trait Enterprise {}
-
-impl Enterprise for .. { }
-
-impl !Enterprise for Foo { }
-```
-
-Please note that negative impls are only allowed for traits with default impls.
-"##,
-
 E0199: r##"
 Safe traits should not have unsafe implementations, therefore marking an
 implementation for a safe trait unsafe will cause a compiler error. Removing
 the unsafe marker on the trait noted in the error will resolve this problem.
 
-```compile_fail
+```compile_fail,E0199
 struct Foo;
 
 trait Bar { }
@@ -2347,7 +1843,7 @@ Unsafe traits must have unsafe implementations. This error occurs when an
 implementation for an unsafe trait isn't marked as unsafe. This may be resolved
 by marking the unsafe implementation as unsafe.
 
-```compile_fail
+```compile_fail,E0200
 struct Foo;
 
 unsafe trait Bar { }
@@ -2365,7 +1861,7 @@ associated functions, etc.) with the same identifier.
 
 For example:
 
-```compile_fail
+```compile_fail,E0201
 struct Foo(u8);
 
 impl Foo {
@@ -2411,7 +1907,7 @@ E0202: r##"
 Inherent associated types were part of [RFC 195] but are not yet implemented.
 See [the tracking issue][iss8995] for the status of this implementation.
 
-[RFC 195]: https://github.com/rust-lang/rfcs/pull/195
+[RFC 195]: https://github.com/rust-lang/rfcs/blob/master/text/0195-associated-items.md
 [iss8995]: https://github.com/rust-lang/rust/issues/8995
 "##,
 
@@ -2420,7 +1916,7 @@ An attempt to implement the `Copy` trait for a struct failed because one of the
 fields does not implement `Copy`. To fix this, you must implement `Copy` for the
 mentioned field. Note that this may not be possible, as in the example of
 
-```compile_fail
+```compile_fail,E0204
 struct Foo {
     foo : Vec<u32>,
 }
@@ -2432,7 +1928,7 @@ This fails because `Vec<T>` does not implement `Copy` for any `T`.
 
 Here's another example that will fail:
 
-```compile_fail
+```compile_fail,E0204
 #[derive(Copy)]
 struct Foo<'a> {
     ty: &'a mut bool,
@@ -2443,12 +1939,13 @@ This fails because `&mut T` is not `Copy`, even when `T` is `Copy` (this
 differs from the behavior for `&T`, which is always `Copy`).
 "##,
 
+/*
 E0205: r##"
 An attempt to implement the `Copy` trait for an enum failed because one of the
 variants does not implement `Copy`. To fix this, you must implement `Copy` for
 the mentioned variant. Note that this may not be possible, as in the example of
 
-```compile_fail
+```compile_fail,E0205
 enum Foo {
     Bar(Vec<u32>),
     Baz,
@@ -2461,24 +1958,25 @@ This fails because `Vec<T>` does not implement `Copy` for any `T`.
 
 Here's another example that will fail:
 
-```compile_fail
+```compile_fail,E0205
 #[derive(Copy)]
 enum Foo<'a> {
     Bar(&'a mut bool),
-    Baz
+    Baz,
 }
 ```
 
 This fails because `&mut T` is not `Copy`, even when `T` is `Copy` (this
 differs from the behavior for `&T`, which is always `Copy`).
 "##,
+*/
 
 E0206: r##"
 You can only implement `Copy` for a struct or enum. Both of the following
 examples will fail, because neither `i32` (primitive type) nor `&'static Bar`
 (reference to `Bar`) is a struct or enum:
 
-```compile_fail
+```compile_fail,E0206
 type Foo = i32;
 impl Copy for Foo { } // error
 
@@ -2501,7 +1999,7 @@ the following criteria:
 Suppose we have a struct `Foo` and we would like to define some methods for it.
 The following definition leads to a compiler error:
 
-```compile_fail
+```compile_fail,E0207
 struct Foo;
 
 impl<T: Default> Foo {
@@ -2534,7 +2032,7 @@ impl Foo {
 As another example, suppose we have a `Maker` trait and want to establish a
 type `FooMaker` that makes `Foo`s:
 
-```compile_fail
+```compile_fail,E0207
 trait Maker {
     type Item;
     fn make(&mut self) -> Self::Item;
@@ -2630,16 +2128,21 @@ what this means, it is perhaps easiest to consider a few examples.
 If `ForeignTrait` is a trait defined in some external crate `foo`, then the
 following trait `impl` is an error:
 
-```compile_fail
+```compile_fail,E0210
+# #[cfg(for_demonstration_only)]
 extern crate foo;
+# #[cfg(for_demonstration_only)]
 use foo::ForeignTrait;
+# use std::panic::UnwindSafe as ForeignTrait;
 
 impl<T> ForeignTrait for T { } // error
+# fn main() {}
 ```
 
 To work around this, it can be covered with a local type, `MyType`:
 
-```ignore
+```
+# use std::panic::UnwindSafe as ForeignTrait;
 struct MyType<T>(T);
 impl<T> ForeignTrait for MyType<T> { } // Ok
 ```
@@ -2650,7 +2153,7 @@ For another example of an error, suppose there's another trait defined in `foo`
 named `ForeignTrait2` that takes two type parameters. Then this `impl` results
 in the same rule violation:
 
-```compile_fail
+```ignore (cannot-doctest-multicrate-project)
 struct MyType2;
 impl<T> ForeignTrait2<T, MyType<T>> for MyType2 { } // error
 ```
@@ -2661,7 +2164,7 @@ is uncovered, and so runs afoul of the orphan rule.
 
 Consider one more example:
 
-```ignore
+```ignore (cannot-doctest-multicrate-project)
 impl<T> ForeignTrait2<MyType<T>, T> for MyType2 { } // Ok
 ```
 
@@ -2672,7 +2175,7 @@ violate the orphan rule; it is permitted.
 To see why that last example was allowed, you need to understand the general
 rule. Unfortunately this rule is a bit tricky to state. Consider an `impl`:
 
-```ignore
+```ignore (only-for-syntax-highlight)
 impl<P1, ..., Pm> ForeignTrait<T1, ..., Tn> for T0 { ... }
 ```
 
@@ -2684,9 +2187,10 @@ such that `Ti` is a local type. Then no type parameter can appear in any of the
 
 For information on the design of the orphan rules, see [RFC 1023].
 
-[RFC 1023]: https://github.com/rust-lang/rfcs/pull/1023
+[RFC 1023]: https://github.com/rust-lang/rfcs/blob/master/text/1023-rebalancing-coherence.md
 "##,
 
+/*
 E0211: r##"
 You used a function or type which doesn't fit the requirements for where it was
 used. Erroneous code examples:
@@ -2766,27 +2270,13 @@ impl Foo {
 }
 ```
 "##,
-
-E0214: r##"
-A generic type was described using parentheses rather than angle brackets. For
-example:
-
-```compile_fail
-fn main() {
-    let v: Vec(&str) = vec!["foo"];
-}
-```
-
-This is not currently supported: `v` should be defined as `Vec<&str>`.
-Parentheses are currently only used with generic types when defining parameters
-for `Fn`-family traits.
-"##,
+     */
 
 E0220: r##"
 You used an associated type which isn't defined in the trait.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0220
 trait T1 {
     type Bar;
 }
@@ -2799,7 +2289,7 @@ trait T2 {
     type Bar;
 
     // error: Baz is used but not declared
-    fn return_bool(&self, &Self::Bar, &Self::Baz) -> bool;
+    fn return_bool(&self, _: &Self::Bar, _: &Self::Baz) -> bool;
 }
 ```
 
@@ -2821,7 +2311,7 @@ trait T2 {
     type Baz; // we declare `Baz` in our trait.
 
     // and now we can use it here:
-    fn return_bool(&self, &Self::Bar, &Self::Baz) -> bool;
+    fn return_bool(&self, _: &Self::Bar, _: &Self::Baz) -> bool;
 }
 ```
 "##,
@@ -2830,7 +2320,7 @@ E0221: r##"
 An attempt was made to retrieve an associated type, but the type was ambiguous.
 For example:
 
-```compile_fail
+```compile_fail,E0221
 trait T1 {}
 trait T2 {}
 
@@ -2876,7 +2366,7 @@ E0223: r##"
 An attempt was made to retrieve an associated type, but the type was ambiguous.
 For example:
 
-```compile_fail
+```compile_fail,E0223
 trait MyTrait {type X; }
 
 fn main() {
@@ -2911,15 +2401,15 @@ E0225: r##"
 You attempted to use multiple types as bounds for a closure or trait object.
 Rust does not currently support this. A simple example that causes this error:
 
-```compile_fail
+```compile_fail,E0225
 fn main() {
     let _: Box<std::io::Read + std::io::Write>;
 }
 ```
 
-Builtin traits are an exception to this rule: it's possible to have bounds of
-one non-builtin type, plus any number of builtin types. For example, the
-following compiles correctly:
+Auto traits such as Send and Sync are an exception to this rule:
+It's possible to have bounds of one non-builtin trait, plus any number of
+auto traits. For example, the following compiles correctly:
 
 ```
 fn main() {
@@ -2928,23 +2418,42 @@ fn main() {
 ```
 "##,
 
-E0232: r##"
-The attribute must have a value. Erroneous code example:
+E0229: r##"
+An associated type binding was done outside of the type parameter declaration
+and `where` clause. Erroneous code example:
 
-```compile_fail
-#![feature(on_unimplemented)]
+```compile_fail,E0229
+pub trait Foo {
+    type A;
+    fn boo(&self) -> <Self as Foo>::A;
+}
 
-#[rustc_on_unimplemented] // error: this attribute must have a value
-trait Bar {}
+struct Bar;
+
+impl Foo for isize {
+    type A = usize;
+    fn boo(&self) -> usize { 42 }
+}
+
+fn baz<I>(x: &<I as Foo<A=Bar>>::A) {}
+// error: associated type bindings are not allowed here
 ```
 
-Please supply the missing value of the attribute. Example:
+To solve this error, please move the type bindings in the type parameter
+declaration:
 
 ```
-#![feature(on_unimplemented)]
+# struct Bar;
+# trait Foo { type A; }
+fn baz<I: Foo<A=Bar>>(x: &<I as Foo>::A) {} // ok!
+```
 
-#[rustc_on_unimplemented = "foo"] // ok!
-trait Bar {}
+Or in the `where` clause:
+
+```
+# struct Bar;
+# trait Foo { type A; }
+fn baz<I>(x: &<I as Foo>::A) where I: Foo<A=Bar> {}
 ```
 "##,
 
@@ -2955,7 +2464,7 @@ trait.
 For example, the `Foo` struct below is defined to be generic in `T`, but the
 type parameter is missing in the definition of `Bar`:
 
-```compile_fail
+```compile_fail,E0243
 struct Foo<T> { x: T }
 
 struct Bar { x: Foo }
@@ -2969,82 +2478,25 @@ trait.
 For example, the `Foo` struct below has no type parameters, but is supplied
 with two in the definition of `Bar`:
 
-```compile_fail
+```compile_fail,E0244
 struct Foo { x: bool }
 
 struct Bar<S, T> { x: Foo<S, T> }
 ```
 "##,
 
-E0248: r##"
-This error indicates an attempt to use a value where a type is expected. For
-example:
-
-```compile_fail
-enum Foo {
-    Bar(u32)
-}
-
-fn do_something(x: Foo::Bar) { }
-```
-
-In this example, we're attempting to take a type of `Foo::Bar` in the
-do_something function. This is not legal: `Foo::Bar` is a value of type `Foo`,
-not a distinct static type. Likewise, it's not legal to attempt to
-`impl Foo::Bar`: instead, you must `impl Foo` and then pattern match to specify
-behavior for specific enum variants.
-"##,
-
-E0249: r##"
-This error indicates a constant expression for the array length was found, but
-it was not an integer (signed or unsigned) expression.
-
-Some examples of code that produces this error are:
-
-```compile_fail
-const A: [u32; "hello"] = []; // error
-const B: [u32; true] = []; // error
-const C: [u32; 0.0] = []; // error
-"##,
-
-E0250: r##"
-There was an error while evaluating the expression for the length of a fixed-
-size array type.
-
-Some examples of this error are:
-
-```compile_fail
-// divide by zero in the length expression
-const A: [u32; 1/0] = [];
-
-// Rust currently will not evaluate the function `foo` at compile time
-fn foo() -> usize { 12 }
-const B: [u32; foo()] = [];
-
-// it is an error to try to add `u8` and `f64`
-use std::{f64, u8};
-const C: [u32; u8::MAX + f64::EPSILON] = [];
-```
-"##,
-
-E0318: r##"
-Default impls for a trait must be located in the same crate where the trait was
-defined. For more information see the [opt-in builtin traits RFC](https://github
-.com/rust-lang/rfcs/blob/master/text/0019-opt-in-builtin-traits.md).
-"##,
-
 E0321: r##"
 A cross-crate opt-out trait was implemented on something which wasn't a struct
 or enum type. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0321
 #![feature(optin_builtin_traits)]
 
 struct Foo;
 
 impl !Sync for Foo {}
 
-unsafe impl Send for &'static Foo {
+unsafe impl Send for &'static Foo {}
 // error: cross-crate traits with a default impl, like `core::marker::Send`,
 //        can only be implemented for a struct/enum type, not
 //        `&'static Foo`
@@ -3066,9 +2518,7 @@ E0323: r##"
 An associated const was implemented when another trait item was expected.
 Erroneous code example:
 
-```compile_fail
-#![feature(associated_consts)]
-
+```compile_fail,E0323
 trait Foo {
     type N;
 }
@@ -3100,8 +2550,6 @@ impl Foo for Bar {
 Or:
 
 ```
-#![feature(associated_consts)]
-
 struct Bar;
 
 trait Foo {
@@ -3118,7 +2566,7 @@ E0324: r##"
 A method was implemented when another trait item was expected. Erroneous
 code example:
 
-```compile_fail
+```compile_fail,E0324
 struct Bar;
 
 trait Foo {
@@ -3138,8 +2586,6 @@ To fix this error, please verify that the method name wasn't misspelled and
 verify that you are indeed implementing the correct trait items. Example:
 
 ```
-#![feature(associated_consts)]
-
 struct Bar;
 
 trait Foo {
@@ -3160,7 +2606,7 @@ E0325: r##"
 An associated type was implemented when another trait item was expected.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0325
 struct Bar;
 
 trait Foo {
@@ -3192,8 +2638,6 @@ impl Foo for Bar {
 Or:
 
 ```
-#![feature(associated_consts)]
-
 struct Bar;
 
 trait Foo {
@@ -3212,7 +2656,7 @@ types in the trait definition. This error indicates that there was a mismatch.
 
 Here's an example of this error:
 
-```compile_fail
+```compile_fail,E0326
 trait Foo {
     const BAR: bool;
 }
@@ -3225,50 +2669,56 @@ impl Foo for Bar {
 ```
 "##,
 
-E0327: r##"
-You cannot use associated items other than constant items as patterns. This
-includes method items. Example of erroneous code:
+E0328: r##"
+The Unsize trait should not be implemented directly. All implementations of
+Unsize are provided automatically by the compiler.
 
-```compile_fail
-enum B {}
+Erroneous code example:
 
-impl B {
-    fn bb() -> i32 { 0 }
-}
+```compile_fail,E0328
+#![feature(unsize)]
 
-fn main() {
-    match 0 {
-        B::bb => {} // error: associated items in match patterns must
-                    // be constants
-    }
-}
+use std::marker::Unsize;
+
+pub struct MyType;
+
+impl<T> Unsize<T> for MyType {}
 ```
 
-Please check that you're not using a method as a pattern. Example:
+If you are defining your own smart pointer type and would like to enable
+conversion from a sized to an unsized type with the
+[DST coercion system][RFC 982], use [`CoerceUnsized`] instead.
 
 ```
-enum B {
-    ba,
-    bb
+#![feature(coerce_unsized)]
+
+use std::ops::CoerceUnsized;
+
+pub struct MyType<T: ?Sized> {
+    field_with_unsized_type: T,
 }
 
-fn main() {
-    match B::ba {
-        B::bb => {} // ok!
-        _ => {}
-    }
-}
+impl<T, U> CoerceUnsized<MyType<U>> for MyType<T>
+    where T: CoerceUnsized<U> {}
 ```
+
+[RFC 982]: https://github.com/rust-lang/rfcs/blob/master/text/0982-dst-coercion.md
+[`CoerceUnsized`]: https://doc.rust-lang.org/std/ops/trait.CoerceUnsized.html
 "##,
+
+/*
+// Associated consts can now be accessed through generic type parameters, and
+// this error is no longer emitted.
+//
+// FIXME: consider whether to leave it in the error index, or remove it entirely
+//        as associated consts is not stabilized yet.
 
 E0329: r##"
 An attempt was made to access an associated constant through either a generic
 type parameter or `Self`. This is not supported yet. An example causing this
 error is shown below:
 
-```ignore
-#![feature(associated_consts)]
-
+```
 trait Foo {
     const BAR: f64;
 }
@@ -3287,9 +2737,7 @@ fn get_bar_bad<F: Foo>(t: F) -> f64 {
 Currently, the value of `BAR` for a particular type can only be accessed
 through a concrete type, as shown below:
 
-```ignore
-#![feature(associated_consts)]
-
+```
 trait Foo {
     const BAR: f64;
 }
@@ -3301,12 +2749,13 @@ fn get_bar_good() -> f64 {
 }
 ```
 "##,
+*/
 
 E0366: r##"
 An attempt was made to implement `Drop` on a concrete specialization of a
 generic type. An example is shown below:
 
-```compile_fail
+```compile_fail,E0366
 struct Foo<T> {
     t: T
 }
@@ -3339,7 +2788,7 @@ E0367: r##"
 An attempt was made to implement `Drop` on a specialization of a generic type.
 An example is shown below:
 
-```compile_fail
+```compile_fail,E0367
 trait Foo{}
 
 struct MyStruct<T> {
@@ -3377,7 +2826,7 @@ E0368: r##"
 This error indicates that a binary assignment operator like `+=` or `^=` was
 applied to a type that doesn't support it. For example:
 
-```compile_fail
+```compile_fail,E0368
 let mut x = 12f32; // error: binary operation `<<` cannot be applied to
                    //        type `f32`
 
@@ -3400,7 +2849,7 @@ Another problem you might be facing is this: suppose you've overloaded the `+`
 operator for some type `Foo` by implementing the `std::ops::Add` trait for
 `Foo`, but you find that using `+=` does not work, as in this example:
 
-```compile_fail
+```compile_fail,E0368
 use std::ops::Add;
 
 struct Foo(u32);
@@ -3427,7 +2876,7 @@ E0369: r##"
 A binary operation was attempted on a type which doesn't support it.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0369
 let x = 12f32; // error: binary operation `<<` cannot be applied to
                //        type `f32`
 
@@ -3446,6 +2895,13 @@ x << 2; // ok!
 
 It is also possible to overload most operators for your own type by
 implementing traits from `std::ops`.
+
+String concatenation appends the string on the right to the string on the
+left and may require reallocation. This requires ownership of the string
+on the left. If something should be added to a string literal, move the
+literal to the heap by allocating it with `to_owned()` like in
+`"Your text".to_owned()`.
+
 "##,
 
 E0370: r##"
@@ -3490,7 +2946,7 @@ definition, so it is not useful to do this.
 
 Example:
 
-```compile_fail
+```compile_fail,E0371
 trait Foo { fn foo(&self) { } }
 trait Bar: Foo { }
 trait Baz: Bar { }
@@ -3505,13 +2961,13 @@ impl Baz for Bar { } // Note: This is OK
 E0374: r##"
 A struct without a field containing an unsized type cannot implement
 `CoerceUnsized`. An
-[unsized type](https://doc.rust-lang.org/book/unsized-types.html)
+[unsized type](https://doc.rust-lang.org/book/first-edition/unsized-types.html)
 is any type that the compiler doesn't know the length or alignment of at
 compile time. Any struct containing an unsized type is also unsized.
 
 Example of erroneous code:
 
-```compile_fail
+```compile_fail,E0374
 #![feature(coerce_unsized)]
 use std::ops::CoerceUnsized;
 
@@ -3564,13 +3020,13 @@ A struct with more than one field containing an unsized type cannot implement
 `CoerceUnsized`. This only occurs when you are trying to coerce one of the
 types in your struct to another type in the struct. In this case we try to
 impl `CoerceUnsized` from `T` to `U` which are both types that the struct
-takes. An [unsized type](https://doc.rust-lang.org/book/unsized-types.html)
-is any type that the compiler doesn't know the length or alignment of at
-compile time. Any struct containing an unsized type is also unsized.
+takes. An [unsized type] is any type that the compiler doesn't know the length
+or alignment of at compile time. Any struct containing an unsized type is also
+unsized.
 
 Example of erroneous code:
 
-```compile_fail
+```compile_fail,E0375
 #![feature(coerce_unsized)]
 use std::ops::CoerceUnsized;
 
@@ -3611,6 +3067,7 @@ fn coerce_foo<T: CoerceUnsized<U>, U>(t: T) -> Foo<U> {
 }
 ```
 
+[unsized type]: https://doc.rust-lang.org/book/first-edition/unsized-types.html
 "##,
 
 E0376: r##"
@@ -3619,13 +3076,13 @@ The type you are trying to impl `CoerceUnsized` for is not a struct.
 already able to be coerced without an implementation of `CoerceUnsized`
 whereas a struct containing an unsized type needs to know the unsized type
 field it's containing is able to be coerced. An
-[unsized type](https://doc.rust-lang.org/book/unsized-types.html)
+[unsized type](https://doc.rust-lang.org/book/first-edition/unsized-types.html)
 is any type that the compiler doesn't know the length or alignment of at
 compile time. Any struct containing an unsized type is also unsized.
 
 Example of erroneous code:
 
-```compile_fail
+```compile_fail,E0376
 #![feature(coerce_unsized)]
 use std::ops::CoerceUnsized;
 
@@ -3660,23 +3117,10 @@ containing the unsized type is the last and only unsized type field in the
 struct.
 "##,
 
-E0379: r##"
-Trait methods cannot be declared `const` by design. For more information, see
-[RFC 911].
-
-[RFC 911]: https://github.com/rust-lang/rfcs/pull/911
-"##,
-
-E0380: r##"
-Default impls are only allowed for traits with no methods or associated items.
-For more information see the [opt-in builtin traits RFC](https://github.com/rust
--lang/rfcs/blob/master/text/0019-opt-in-builtin-traits.md).
-"##,
-
 E0390: r##"
 You tried to implement methods for a primitive type. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0390
 struct Foo {
     x: i32
 }
@@ -3704,30 +3148,13 @@ impl Bar for *mut Foo {
 ```
 "##,
 
-E0391: r##"
-This error indicates that some types or traits depend on each other
-and therefore cannot be constructed.
-
-The following example contains a circular dependency between two traits:
-
-```compile_fail
-trait FirstTrait : SecondTrait {
-
-}
-
-trait SecondTrait : FirstTrait {
-
-}
-```
-"##,
-
 E0392: r##"
 This error indicates that a type or lifetime parameter has been declared
 but not actually used. Here is an example that demonstrates the error:
 
-```compile_fail
+```compile_fail,E0392
 enum Foo<T> {
-    Bar
+    Bar,
 }
 ```
 
@@ -3736,7 +3163,7 @@ by simply removing the type parameter, as shown below:
 
 ```
 enum Foo {
-    Bar
+    Bar,
 }
 ```
 
@@ -3745,7 +3172,7 @@ used. A simple fix is shown below:
 
 ```
 enum Foo<T> {
-    Bar(T)
+    Bar(T),
 }
 ```
 
@@ -3754,9 +3181,9 @@ example, when using raw pointers one may wish to specify the lifetime for
 which the pointed-at data is valid. An initial attempt (below) causes this
 error:
 
-```compile_fail
+```compile_fail,E0392
 struct Foo<'a, T> {
-    x: *const T
+    x: *const T,
 }
 ```
 
@@ -3775,17 +3202,17 @@ struct Foo<'a, T: 'a> {
 }
 ```
 
-PhantomData can also be used to express information about unused type
-parameters. You can read more about it in the API documentation:
+[PhantomData] can also be used to express information about unused type
+parameters.
 
-https://doc.rust-lang.org/std/marker/struct.PhantomData.html
+[PhantomData]: https://doc.rust-lang.org/std/marker/struct.PhantomData.html
 "##,
 
 E0393: r##"
 A type parameter which references `Self` in its default value was not specified.
 Example of erroneous code:
 
-```compile_fail
+```compile_fail,E0393
 trait A<T=Self> {}
 
 fn together_we_will_rule_the_galaxy(son: &A) {}
@@ -3812,11 +3239,99 @@ fn together_we_will_rule_the_galaxy(son: &A<i32>) {} // Ok!
 ```
 "##,
 
+E0399: r##"
+You implemented a trait, overriding one or more of its associated types but did
+not reimplement its default methods.
+
+Example of erroneous code:
+
+```compile_fail,E0399
+#![feature(associated_type_defaults)]
+
+pub trait Foo {
+    type Assoc = u8;
+    fn bar(&self) {}
+}
+
+impl Foo for i32 {
+    // error - the following trait items need to be reimplemented as
+    //         `Assoc` was overridden: `bar`
+    type Assoc = i32;
+}
+```
+
+To fix this, add an implementation for each default method from the trait:
+
+```
+#![feature(associated_type_defaults)]
+
+pub trait Foo {
+    type Assoc = u8;
+    fn bar(&self) {}
+}
+
+impl Foo for i32 {
+    type Assoc = i32;
+    fn bar(&self) {} // ok!
+}
+```
+"##,
+
+E0436: r##"
+The functional record update syntax is only allowed for structs. (Struct-like
+enum variants don't qualify, for example.)
+
+Erroneous code example:
+
+```compile_fail,E0436
+enum PublicationFrequency {
+    Weekly,
+    SemiMonthly { days: (u8, u8), annual_special: bool },
+}
+
+fn one_up_competitor(competitor_frequency: PublicationFrequency)
+                     -> PublicationFrequency {
+    match competitor_frequency {
+        PublicationFrequency::Weekly => PublicationFrequency::SemiMonthly {
+            days: (1, 15), annual_special: false
+        },
+        c @ PublicationFrequency::SemiMonthly{ .. } =>
+            PublicationFrequency::SemiMonthly {
+                annual_special: true, ..c // error: functional record update
+                                          //        syntax requires a struct
+        }
+    }
+}
+```
+
+Rewrite the expression without functional record update syntax:
+
+```
+enum PublicationFrequency {
+    Weekly,
+    SemiMonthly { days: (u8, u8), annual_special: bool },
+}
+
+fn one_up_competitor(competitor_frequency: PublicationFrequency)
+                     -> PublicationFrequency {
+    match competitor_frequency {
+        PublicationFrequency::Weekly => PublicationFrequency::SemiMonthly {
+            days: (1, 15), annual_special: false
+        },
+        PublicationFrequency::SemiMonthly{ days, .. } =>
+            PublicationFrequency::SemiMonthly {
+                days, annual_special: true // ok!
+        }
+    }
+}
+```
+"##,
+
 E0439: r##"
 The length of the platform-intrinsic function `simd_shuffle`
 wasn't specified. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0439
 #![feature(platform_intrinsics)]
 
 extern "platform-intrinsic" {
@@ -3841,7 +3356,7 @@ E0440: r##"
 A platform-specific intrinsic function has the wrong number of type
 parameters. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0440
 #![feature(repr_simd)]
 #![feature(platform_intrinsics)]
 
@@ -3875,7 +3390,7 @@ E0441: r##"
 An unknown platform-specific intrinsic function was used. Erroneous
 code example:
 
-```compile_fail
+```compile_fail,E0441
 #![feature(repr_simd)]
 #![feature(platform_intrinsics)]
 
@@ -3909,7 +3424,7 @@ E0442: r##"
 Intrinsic argument(s) and/or return value have the wrong type.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0442
 #![feature(repr_simd)]
 #![feature(platform_intrinsics)]
 
@@ -3947,7 +3462,7 @@ E0443: r##"
 Intrinsic argument(s) and/or return value have the wrong type.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0443
 #![feature(repr_simd)]
 #![feature(platform_intrinsics)]
 
@@ -3982,7 +3497,7 @@ E0444: r##"
 A platform-specific intrinsic function has wrong number of arguments.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0444
 #![feature(repr_simd)]
 #![feature(platform_intrinsics)]
 
@@ -4015,7 +3530,7 @@ E0516: r##"
 The `typeof` keyword is currently reserved but unimplemented.
 Erroneous code example:
 
-```compile_fail
+```compile_fail,E0516
 fn main() {
     let x: typeof(92) = 92;
 }
@@ -4034,7 +3549,7 @@ E0520: r##"
 A non-default implementation was already made on this type so it cannot be
 specialized further. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0520
 #![feature(specialization)]
 
 trait SpaceLlama {
@@ -4092,30 +3607,1032 @@ impl SpaceLlama for i32 {
 ```
 "##,
 
+E0527: r##"
+The number of elements in an array or slice pattern differed from the number of
+elements in the array being matched.
+
+Example of erroneous code:
+
+```compile_fail,E0527
+#![feature(slice_patterns)]
+
+let r = &[1, 2, 3, 4];
+match r {
+    &[a, b] => { // error: pattern requires 2 elements but array
+                 //        has 4
+        println!("a={}, b={}", a, b);
+    }
+}
+```
+
+Ensure that the pattern is consistent with the size of the matched
+array. Additional elements can be matched with `..`:
+
+```
+#![feature(slice_patterns)]
+
+let r = &[1, 2, 3, 4];
+match r {
+    &[a, b, ..] => { // ok!
+        println!("a={}, b={}", a, b);
+    }
+}
+```
+"##,
+
+E0528: r##"
+An array or slice pattern required more elements than were present in the
+matched array.
+
+Example of erroneous code:
+
+```compile_fail,E0528
+#![feature(slice_patterns)]
+
+let r = &[1, 2];
+match r {
+    &[a, b, c, rest..] => { // error: pattern requires at least 3
+                            //        elements but array has 2
+        println!("a={}, b={}, c={} rest={:?}", a, b, c, rest);
+    }
+}
+```
+
+Ensure that the matched array has at least as many elements as the pattern
+requires. You can match an arbitrary number of remaining elements with `..`:
+
+```
+#![feature(slice_patterns)]
+
+let r = &[1, 2, 3, 4, 5];
+match r {
+    &[a, b, c, rest..] => { // ok!
+        // prints `a=1, b=2, c=3 rest=[4, 5]`
+        println!("a={}, b={}, c={} rest={:?}", a, b, c, rest);
+    }
+}
+```
+"##,
+
+E0529: r##"
+An array or slice pattern was matched against some other type.
+
+Example of erroneous code:
+
+```compile_fail,E0529
+#![feature(slice_patterns)]
+
+let r: f32 = 1.0;
+match r {
+    [a, b] => { // error: expected an array or slice, found `f32`
+        println!("a={}, b={}", a, b);
+    }
+}
+```
+
+Ensure that the pattern and the expression being matched on are of consistent
+types:
+
+```
+#![feature(slice_patterns)]
+
+let r = [1.0, 2.0];
+match r {
+    [a, b] => { // ok!
+        println!("a={}, b={}", a, b);
+    }
+}
+```
+"##,
+
+E0559: r##"
+An unknown field was specified into an enum's structure variant.
+
+Erroneous code example:
+
+```compile_fail,E0559
+enum Field {
+    Fool { x: u32 },
+}
+
+let s = Field::Fool { joke: 0 };
+// error: struct variant `Field::Fool` has no field named `joke`
+```
+
+Verify you didn't misspell the field's name or that the field exists. Example:
+
+```
+enum Field {
+    Fool { joke: u32 },
+}
+
+let s = Field::Fool { joke: 0 }; // ok!
+```
+"##,
+
+E0560: r##"
+An unknown field was specified into a structure.
+
+Erroneous code example:
+
+```compile_fail,E0560
+struct Simba {
+    mother: u32,
+}
+
+let s = Simba { mother: 1, father: 0 };
+// error: structure `Simba` has no field named `father`
+```
+
+Verify you didn't misspell the field's name or that the field exists. Example:
+
+```
+struct Simba {
+    mother: u32,
+    father: u32,
+}
+
+let s = Simba { mother: 1, father: 0 }; // ok!
+```
+"##,
+
+E0569: r##"
+If an impl has a generic parameter with the `#[may_dangle]` attribute, then
+that impl must be declared as an `unsafe impl.
+
+Erroneous code example:
+
+```compile_fail,E0569
+#![feature(generic_param_attrs)]
+#![feature(dropck_eyepatch)]
+
+struct Foo<X>(X);
+impl<#[may_dangle] X> Drop for Foo<X> {
+    fn drop(&mut self) { }
+}
+```
+
+In this example, we are asserting that the destructor for `Foo` will not
+access any data of type `X`, and require this assertion to be true for
+overall safety in our program. The compiler does not currently attempt to
+verify this assertion; therefore we must tag this `impl` as unsafe.
+"##,
+
+E0570: r##"
+The requested ABI is unsupported by the current target.
+
+The rust compiler maintains for each target a blacklist of ABIs unsupported on
+that target. If an ABI is present in such a list this usually means that the
+target / ABI combination is currently unsupported by llvm.
+
+If necessary, you can circumvent this check using custom target specifications.
+"##,
+
+E0572: r##"
+A return statement was found outside of a function body.
+
+Erroneous code example:
+
+```compile_fail,E0572
+const FOO: u32 = return 0; // error: return statement outside of function body
+
+fn main() {}
+```
+
+To fix this issue, just remove the return keyword or move the expression into a
+function. Example:
+
+```
+const FOO: u32 = 0;
+
+fn some_fn() -> u32 {
+    return FOO;
+}
+
+fn main() {
+    some_fn();
+}
+```
+"##,
+
+E0581: r##"
+In a `fn` type, a lifetime appears only in the return type,
+and not in the arguments types.
+
+Erroneous code example:
+
+```compile_fail,E0581
+fn main() {
+    // Here, `'a` appears only in the return type:
+    let x: for<'a> fn() -> &'a i32;
+}
+```
+
+To fix this issue, either use the lifetime in the arguments, or use
+`'static`. Example:
+
+```
+fn main() {
+    // Here, `'a` appears only in the return type:
+    let x: for<'a> fn(&'a i32) -> &'a i32;
+    let y: fn() -> &'static i32;
+}
+```
+
+Note: The examples above used to be (erroneously) accepted by the
+compiler, but this was since corrected. See [issue #33685] for more
+details.
+
+[issue #33685]: https://github.com/rust-lang/rust/issues/33685
+"##,
+
+E0582: r##"
+A lifetime appears only in an associated-type binding,
+and not in the input types to the trait.
+
+Erroneous code example:
+
+```compile_fail,E0582
+fn bar<F>(t: F)
+    // No type can satisfy this requirement, since `'a` does not
+    // appear in any of the input types (here, `i32`):
+    where F: for<'a> Fn(i32) -> Option<&'a i32>
+{
+}
+
+fn main() { }
+```
+
+To fix this issue, either use the lifetime in the inputs, or use
+`'static`. Example:
+
+```
+fn bar<F, G>(t: F, u: G)
+    where F: for<'a> Fn(&'a i32) -> Option<&'a i32>,
+          G: Fn(i32) -> Option<&'static i32>,
+{
+}
+
+fn main() { }
+```
+
+Note: The examples above used to be (erroneously) accepted by the
+compiler, but this was since corrected. See [issue #33685] for more
+details.
+
+[issue #33685]: https://github.com/rust-lang/rust/issues/33685
+"##,
+
+E0599: r##"
+This error occurs when a method is used on a type which doesn't implement it:
+
+Erroneous code example:
+
+```compile_fail,E0599
+struct Mouth;
+
+let x = Mouth;
+x.chocolate(); // error: no method named `chocolate` found for type `Mouth`
+               //        in the current scope
+```
+"##,
+
+E0600: r##"
+An unary operator was used on a type which doesn't implement it.
+
+Example of erroneous code:
+
+```compile_fail,E0600
+enum Question {
+    Yes,
+    No,
+}
+
+!Question::Yes; // error: cannot apply unary operator `!` to type `Question`
+```
+
+In this case, `Question` would need to implement the `std::ops::Not` trait in
+order to be able to use `!` on it. Let's implement it:
+
+```
+use std::ops::Not;
+
+enum Question {
+    Yes,
+    No,
+}
+
+// We implement the `Not` trait on the enum.
+impl Not for Question {
+    type Output = bool;
+
+    fn not(self) -> bool {
+        match self {
+            Question::Yes => false, // If the `Answer` is `Yes`, then it
+                                    // returns false.
+            Question::No => true, // And here we do the opposite.
+        }
+    }
+}
+
+assert_eq!(!Question::Yes, false);
+assert_eq!(!Question::No, true);
+```
+"##,
+
+E0608: r##"
+An attempt to index into a type which doesn't implement the `std::ops::Index`
+trait was performed.
+
+Erroneous code example:
+
+```compile_fail,E0608
+0u8[2]; // error: cannot index into a value of type `u8`
+```
+
+To be able to index into a type it needs to implement the `std::ops::Index`
+trait. Example:
+
+```
+let v: Vec<u8> = vec![0, 1, 2, 3];
+
+// The `Vec` type implements the `Index` trait so you can do:
+println!("{}", v[2]);
+```
+"##,
+
+E0604: r##"
+A cast to `char` was attempted on a type other than `u8`.
+
+Erroneous code example:
+
+```compile_fail,E0604
+0u32 as char; // error: only `u8` can be cast as `char`, not `u32`
+```
+
+As the error message indicates, only `u8` can be cast into `char`. Example:
+
+```
+let c = 86u8 as char; // ok!
+assert_eq!(c, 'V');
+```
+
+For more information about casts, take a look at The Book:
+https://doc.rust-lang.org/book/first-edition/casting-between-types.html
+"##,
+
+E0605: r##"
+An invalid cast was attempted.
+
+Erroneous code examples:
+
+```compile_fail,E0605
+let x = 0u8;
+x as Vec<u8>; // error: non-primitive cast: `u8` as `std::vec::Vec<u8>`
+
+// Another example
+
+let v = 0 as *const u8; // So here, `v` is a `*const u8`.
+v as &u8; // error: non-primitive cast: `*const u8` as `&u8`
+```
+
+Only primitive types can be cast into each other. Examples:
+
+```
+let x = 0u8;
+x as u32; // ok!
+
+let v = 0 as *const u8;
+v as *const i8; // ok!
+```
+
+For more information about casts, take a look at The Book:
+https://doc.rust-lang.org/book/first-edition/casting-between-types.html
+"##,
+
+E0606: r##"
+An incompatible cast was attempted.
+
+Erroneous code example:
+
+```compile_fail,E0606
+let x = &0u8; // Here, `x` is a `&u8`.
+let y: u32 = x as u32; // error: casting `&u8` as `u32` is invalid
+```
+
+When casting, keep in mind that only primitive types can be cast into each
+other. Example:
+
+```
+let x = &0u8;
+let y: u32 = *x as u32; // We dereference it first and then cast it.
+```
+
+For more information about casts, take a look at The Book:
+https://doc.rust-lang.org/book/first-edition/casting-between-types.html
+"##,
+
+E0607: r##"
+A cast between a thin and a fat pointer was attempted.
+
+Erroneous code example:
+
+```compile_fail,E0607
+let v = 0 as *const u8;
+v as *const [u8];
+```
+
+First: what are thin and fat pointers?
+
+Thin pointers are "simple" pointers: they are purely a reference to a memory
+address.
+
+Fat pointers are pointers referencing Dynamically Sized Types (also called DST).
+DST don't have a statically known size, therefore they can only exist behind
+some kind of pointers that contain additional information. Slices and trait
+objects are DSTs. In the case of slices, the additional information the fat
+pointer holds is their size.
+
+To fix this error, don't try to cast directly between thin and fat pointers.
+
+For more information about casts, take a look at The Book:
+https://doc.rust-lang.org/book/first-edition/casting-between-types.html
+"##,
+
+E0609: r##"
+Attempted to access a non-existent field in a struct.
+
+Erroneous code example:
+
+```compile_fail,E0609
+struct StructWithFields {
+    x: u32,
+}
+
+let s = StructWithFields { x: 0 };
+println!("{}", s.foo); // error: no field `foo` on type `StructWithFields`
+```
+
+To fix this error, check that you didn't misspell the field's name or that the
+field actually exists. Example:
+
+```
+struct StructWithFields {
+    x: u32,
+}
+
+let s = StructWithFields { x: 0 };
+println!("{}", s.x); // ok!
+```
+"##,
+
+E0610: r##"
+Attempted to access a field on a primitive type.
+
+Erroneous code example:
+
+```compile_fail,E0610
+let x: u32 = 0;
+println!("{}", x.foo); // error: `{integer}` is a primitive type, therefore
+                       //        doesn't have fields
+```
+
+Primitive types are the most basic types available in Rust and don't have
+fields. To access data via named fields, struct types are used. Example:
+
+```
+// We declare struct called `Foo` containing two fields:
+struct Foo {
+    x: u32,
+    y: i64,
+}
+
+// We create an instance of this struct:
+let variable = Foo { x: 0, y: -12 };
+// And we can now access its fields:
+println!("x: {}, y: {}", variable.x, variable.y);
+```
+
+For more information about primitives and structs, take a look at The Book:
+https://doc.rust-lang.org/book/first-edition/primitive-types.html
+https://doc.rust-lang.org/book/first-edition/structs.html
+"##,
+
+E0611: r##"
+Attempted to access a private field on a tuple-struct.
+
+Erroneous code example:
+
+```compile_fail,E0611
+mod some_module {
+    pub struct Foo(u32);
+
+    impl Foo {
+        pub fn new() -> Foo { Foo(0) }
+    }
+}
+
+let y = some_module::Foo::new();
+println!("{}", y.0); // error: field `0` of tuple-struct `some_module::Foo`
+                     //        is private
+```
+
+Since the field is private, you have two solutions:
+
+1) Make the field public:
+
+```
+mod some_module {
+    pub struct Foo(pub u32); // The field is now public.
+
+    impl Foo {
+        pub fn new() -> Foo { Foo(0) }
+    }
+}
+
+let y = some_module::Foo::new();
+println!("{}", y.0); // So we can access it directly.
+```
+
+2) Add a getter function to keep the field private but allow for accessing its
+value:
+
+```
+mod some_module {
+    pub struct Foo(u32);
+
+    impl Foo {
+        pub fn new() -> Foo { Foo(0) }
+
+        // We add the getter function.
+        pub fn get(&self) -> &u32 { &self.0 }
+    }
+}
+
+let y = some_module::Foo::new();
+println!("{}", y.get()); // So we can get the value through the function.
+```
+"##,
+
+E0612: r##"
+Attempted out-of-bounds tuple index.
+
+Erroneous code example:
+
+```compile_fail,E0612
+struct Foo(u32);
+
+let y = Foo(0);
+println!("{}", y.1); // error: attempted out-of-bounds tuple index `1`
+                     //        on type `Foo`
+```
+
+If a tuple/tuple-struct type has n fields, you can only try to access these n
+fields from 0 to (n - 1). So in this case, you can only index `0`. Example:
+
+```
+struct Foo(u32);
+
+let y = Foo(0);
+println!("{}", y.0); // ok!
+```
+"##,
+
+E0614: r##"
+Attempted to dereference a variable which cannot be dereferenced.
+
+Erroneous code example:
+
+```compile_fail,E0614
+let y = 0u32;
+*y; // error: type `u32` cannot be dereferenced
+```
+
+Only types implementing `std::ops::Deref` can be dereferenced (such as `&T`).
+Example:
+
+```
+let y = 0u32;
+let x = &y;
+// So here, `x` is a `&u32`, so we can dereference it:
+*x; // ok!
+```
+"##,
+
+E0615: r##"
+Attempted to access a method like a field.
+
+Erroneous code example:
+
+```compile_fail,E0615
+struct Foo {
+    x: u32,
+}
+
+impl Foo {
+    fn method(&self) {}
+}
+
+let f = Foo { x: 0 };
+f.method; // error: attempted to take value of method `method` on type `Foo`
+```
+
+If you want to use a method, add `()` after it:
+
+```
+# struct Foo { x: u32 }
+# impl Foo { fn method(&self) {} }
+# let f = Foo { x: 0 };
+f.method();
+```
+
+However, if you wanted to access a field of a struct check that the field name
+is spelled correctly. Example:
+
+```
+# struct Foo { x: u32 }
+# impl Foo { fn method(&self) {} }
+# let f = Foo { x: 0 };
+println!("{}", f.x);
+```
+"##,
+
+E0616: r##"
+Attempted to access a private field on a struct.
+
+Erroneous code example:
+
+```compile_fail,E0616
+mod some_module {
+    pub struct Foo {
+        x: u32, // So `x` is private in here.
+    }
+
+    impl Foo {
+        pub fn new() -> Foo { Foo { x: 0 } }
+    }
+}
+
+let f = some_module::Foo::new();
+println!("{}", f.x); // error: field `x` of struct `some_module::Foo` is private
+```
+
+If you want to access this field, you have two options:
+
+1) Set the field public:
+
+```
+mod some_module {
+    pub struct Foo {
+        pub x: u32, // `x` is now public.
+    }
+
+    impl Foo {
+        pub fn new() -> Foo { Foo { x: 0 } }
+    }
+}
+
+let f = some_module::Foo::new();
+println!("{}", f.x); // ok!
+```
+
+2) Add a getter function:
+
+```
+mod some_module {
+    pub struct Foo {
+        x: u32, // So `x` is still private in here.
+    }
+
+    impl Foo {
+        pub fn new() -> Foo { Foo { x: 0 } }
+
+        // We create the getter function here:
+        pub fn get_x(&self) -> &u32 { &self.x }
+    }
+}
+
+let f = some_module::Foo::new();
+println!("{}", f.get_x()); // ok!
+```
+"##,
+
+E0617: r##"
+Attempted to pass an invalid type of variable into a variadic function.
+
+Erroneous code example:
+
+```compile_fail,E0617
+extern {
+    fn printf(c: *const i8, ...);
+}
+
+unsafe {
+    printf(::std::ptr::null(), 0f32);
+    // error: can't pass an `f32` to variadic function, cast to `c_double`
+}
+```
+
+Certain Rust types must be cast before passing them to a variadic function,
+because of arcane ABI rules dictated by the C standard. To fix the error,
+cast the value to the type specified by the error message (which you may need
+to import from `std::os::raw`).
+"##,
+
+E0618: r##"
+Attempted to call something which isn't a function nor a method.
+
+Erroneous code examples:
+
+```compile_fail,E0618
+enum X {
+    Entry,
+}
+
+X::Entry(); // error: expected function, found `X::Entry`
+
+// Or even simpler:
+let x = 0i32;
+x(); // error: expected function, found `i32`
+```
+
+Only functions and methods can be called using `()`. Example:
+
+```
+// We declare a function:
+fn i_am_a_function() {}
+
+// And we call it:
+i_am_a_function();
+```
+"##,
+
+E0619: r##"
+The type-checker needed to know the type of an expression, but that type had not
+yet been inferred.
+
+Erroneous code example:
+
+```compile_fail,E0619
+let mut x = vec![];
+match x.pop() {
+    Some(v) => {
+        // Here, the type of `v` is not (yet) known, so we
+        // cannot resolve this method call:
+        v.to_uppercase(); // error: the type of this value must be known in
+                          //        this context
+    }
+    None => {}
+}
+```
+
+Type inference typically proceeds from the top of the function to the bottom,
+figuring out types as it goes. In some cases -- notably method calls and
+overloadable operators like `*` -- the type checker may not have enough
+information *yet* to make progress. This can be true even if the rest of the
+function provides enough context (because the type-checker hasn't looked that
+far ahead yet). In this case, type annotations can be used to help it along.
+
+To fix this error, just specify the type of the variable. Example:
+
+```
+let mut x: Vec<String> = vec![]; // We precise the type of the vec elements.
+match x.pop() {
+    Some(v) => {
+        v.to_uppercase(); // Since rustc now knows the type of the vec elements,
+                          // we can use `v`'s methods.
+    }
+    None => {}
+}
+```
+"##,
+
+E0620: r##"
+A cast to an unsized type was attempted.
+
+Erroneous code example:
+
+```compile_fail,E0620
+let x = &[1_usize, 2] as [usize]; // error: cast to unsized type: `&[usize; 2]`
+                                  //        as `[usize]`
+```
+
+In Rust, some types don't have a known size at compile-time. For example, in a
+slice type like `[u32]`, the number of elements is not known at compile-time and
+hence the overall size cannot be computed. As a result, such types can only be
+manipulated through a reference (e.g., `&T` or `&mut T`) or other pointer-type
+(e.g., `Box` or `Rc`). Try casting to a reference instead:
+
+```
+let x = &[1_usize, 2] as &[usize]; // ok!
+```
+"##,
+
+E0622: r##"
+An intrinsic was declared without being a function.
+
+Erroneous code example:
+
+```compile_fail,E0622
+#![feature(intrinsics)]
+extern "rust-intrinsic" {
+    pub static breakpoint : unsafe extern "rust-intrinsic" fn();
+    // error: intrinsic must be a function
+}
+
+fn main() { unsafe { breakpoint(); } }
+```
+
+An intrinsic is a function available for use in a given programming language
+whose implementation is handled specially by the compiler. In order to fix this
+error, just declare a function.
+"##,
+
+E0624: r##"
+A private item was used outside of its scope.
+
+Erroneous code example:
+
+```compile_fail,E0624
+mod inner {
+    pub struct Foo;
+
+    impl Foo {
+        fn method(&self) {}
+    }
+}
+
+let foo = inner::Foo;
+foo.method(); // error: method `method` is private
+```
+
+Two possibilities are available to solve this issue:
+
+1. Only use the item in the scope it has been defined:
+
+```
+mod inner {
+    pub struct Foo;
+
+    impl Foo {
+        fn method(&self) {}
+    }
+
+    pub fn call_method(foo: &Foo) { // We create a public function.
+        foo.method(); // Which calls the item.
+    }
+}
+
+let foo = inner::Foo;
+inner::call_method(&foo); // And since the function is public, we can call the
+                          // method through it.
+```
+
+2. Make the item public:
+
+```
+mod inner {
+    pub struct Foo;
+
+    impl Foo {
+        pub fn method(&self) {} // It's now public.
+    }
+}
+
+let foo = inner::Foo;
+foo.method(); // Ok!
+```
+"##,
+
+E0638: r##"
+This error indicates that the struct or enum must be matched non-exhaustively
+as it has been marked as `non_exhaustive`.
+
+When applied within a crate, downstream users of the crate will need to use the
+`_` pattern when matching enums and use the `..` pattern when matching structs.
+
+For example, in the below example, since the enum is marked as
+`non_exhaustive`, it is required that downstream crates match non-exhaustively
+on it.
+
+```rust,ignore (pseudo-Rust)
+use std::error::Error as StdError;
+
+#[non_exhaustive] pub enum Error {
+   Message(String),
+   Other,
+}
+
+impl StdError for Error {
+   fn description(&self) -> &str {
+        // This will not error, despite being marked as non_exhaustive, as this
+        // enum is defined within the current crate, it can be matched
+        // exhaustively.
+        match *self {
+           Message(ref s) => s,
+           Other => "other or unknown error",
+        }
+   }
+}
+```
+
+An example of matching non-exhaustively on the above enum is provided below:
+
+```rust,ignore (pseudo-Rust)
+use mycrate::Error;
+
+// This will not error as the non_exhaustive Error enum has been matched with a
+// wildcard.
+match error {
+   Message(ref s) => ...,
+   Other => ...,
+   _ => ...,
+}
+```
+
+Similarly, for structs, match with `..` to avoid this error.
+"##,
+
+E0639: r##"
+This error indicates that the struct or enum cannot be instantiated from
+outside of the defining crate as it has been marked as `non_exhaustive` and as
+such more fields/variants may be added in future that could cause adverse side
+effects for this code.
+
+It is recommended that you look for a `new` function or equivalent in the
+crate's documentation.
+"##,
+
+E0643: r##"
+This error indicates that there is a mismatch between generic parameters and
+impl Trait parameters in a trait declaration versus its impl.
+
+```compile_fail,E0643
+#![feature(universal_impl_trait)]
+trait Foo {
+    fn foo(&self, _: &impl Iterator);
+}
+impl Foo for () {
+    fn foo<U: Iterator>(&self, _: &U) { } // error method `foo` has incompatible
+                                          // signature for trait
+}
+```
+"##,
+
+E0689: r##"
+This error indicates that the numeric value for the method being passed exists
+but the type of the numeric value or binding could not be identified.
+
+The error happens on numeric literals:
+
+```compile_fail,E0689
+2.0.powi(2);
+```
+
+and on numeric bindings without an identified concrete type:
+
+```compile_fail,E0689
+let x = 2.0;
+x.powi(2);  // same error as above
+```
+
+Because of this, you must give the numeric literal or binding a type:
+
+```
+let _ = 2.0_f32.powi(2);
+let x: f32 = 2.0;
+let _ = x.powi(2);
+let _ = (2.0 as f32).powi(2);
+```
+"##,
 }
 
 register_diagnostics! {
+//  E0035, merged into E0087/E0089
+//  E0036, merged into E0087/E0089
 //  E0068,
 //  E0085,
 //  E0086,
-    E0090,
-    E0103, // @GuillaumeGomez: I was unable to get this error, try your best!
-    E0104,
+//  E0103,
+//  E0104,
 //  E0123,
 //  E0127,
 //  E0129,
 //  E0141,
 //  E0159, // use of trait `{}` as struct constructor
-    E0167,
+//  E0163, // merged into E0071
+//  E0167,
 //  E0168,
+//  E0172, // non-trait found in a type sum, moved to resolve
 //  E0173, // manual implementations of unboxed closure traits are experimental
-    E0182,
+//  E0174,
+//  E0182, // merged into E0229
     E0183,
 //  E0187, // can't infer the kind of the closure
 //  E0188, // can not cast an immutable reference to a mutable pointer
 //  E0189, // deprecated: can only cast a boxed pointer to a boxed object
 //  E0190, // deprecated: can only cast a &-pointer to an &-object
-    E0196, // cannot determine a type for this closure
+//  E0196, // cannot determine a type for this closure
     E0203, // type parameter has more than one relaxed default bound,
            // and only one is supported
     E0208,
@@ -4127,20 +4644,17 @@ register_diagnostics! {
 //  E0217, // ambiguous associated type, defined in multiple supertraits
 //  E0218, // no associated type defined
 //  E0219, // associated type defined in higher-ranked supertrait
-//  E0222, // Error code E0045 (variadic function must have C calling
+//  E0222, // Error code E0045 (variadic function must have C or cdecl calling
            // convention) duplicate
     E0224, // at least one non-builtin train is required for an object type
-    E0226, // only a single explicit lifetime bound is permitted
     E0227, // ambiguous lifetime bound, explicit lifetime bound required
     E0228, // explicit lifetime bound required
-    E0230, // there is no type parameter on trait
-    E0231, // only named substitution parameters are allowed
 //  E0233,
 //  E0234,
 //  E0235, // structure constructor specifies a structure of type but
 //  E0236, // no lang item for range syntax
 //  E0237, // no lang item for range syntax
-    E0238, // parenthesized parameters may only be used with a trait
+//  E0238, // parenthesized parameters may only be used with a trait
 //  E0239, // `next` method of `Iterator` trait has unexpected type
 //  E0240,
 //  E0241,
@@ -4148,18 +4662,25 @@ register_diagnostics! {
     E0245, // not a trait
 //  E0246, // invalid recursive type
 //  E0247,
+//  E0248, // value used as a type, now reported earlier during resolution as E0412
+//  E0249,
+    E0307, // invalid method `self` type
 //  E0319, // trait impls for defaulted traits allowed just for structs/enums
-    E0320, // recursive overflow during dropck
-    E0328, // cannot implement Unsize explicitly
 //  E0372, // coherence not object safe
     E0377, // the trait `CoerceUnsized` may only be implemented for a coercion
            // between structures with the same definition
-    E0399, // trait items need to be implemented because the associated
-           // type `{}` was overridden
-    E0436, // functional record update requires a struct
-    E0513, // no type for local variable ..
-    E0521, // redundant default implementations of trait
-    E0527, // expected {} elements, found {}
-    E0528, // expected at least {} elements, found {}
-    E0529, // slice pattern expects array or slice, not `{}`
+    E0533, // `{}` does not name a unit variant, unit struct or a constant
+//  E0563, // cannot determine a type for this `impl Trait`: {} // removed in 6383de15
+    E0564, // only named lifetimes are allowed in `impl Trait`,
+           // but `{}` was found in the type `{}`
+    E0587, // struct has conflicting packed and align representation hints
+    E0588, // packed struct cannot transitively contain a `[repr(align)]` struct
+    E0592, // duplicate definitions with name `{}`
+//  E0613, // Removed (merged with E0609)
+    E0640, // infer outlives
+    E0627, // yield statement outside of generator literal
+    E0632, // cannot provide explicit type parameters when `impl Trait` is used in
+           // argument position.
+    E0641, // cannot cast to/from a pointer with an unknown kind
+    E0645, // trait aliases not finished
 }

@@ -1,3 +1,5 @@
+## Variance of type and lifetime parameters
+
 This file infers the variance of type and lifetime parameters. The
 algorithm is taken from Section 4 of the paper "Taming the Wildcards:
 Combining Definition- and Use-Site Variance" published in PLDI'11 and
@@ -52,11 +54,11 @@ These indicate that (1) the variance of A must be at most covariant;
 variance of C must be at most covariant *and* contravariant. All of these
 results are based on a variance lattice defined as follows:
 
-      *      Top (bivariant)
-   -     +
-      o      Bottom (invariant)
+       *      Top (bivariant)
+    -     +
+       o      Bottom (invariant)
 
-Based on this lattice, the solution V(A)=+, V(B)=-, V(C)=o is the
+Based on this lattice, the solution `V(A)=+`, `V(B)=-`, `V(C)=o` is the
 optimal solution. Note that there is always a naive solution which
 just declares all variables to be invariant.
 
@@ -68,11 +70,11 @@ take the form:
     V(X) <= Term
     Term := + | - | * | o | V(X) | Term x Term
 
-Here the notation V(X) indicates the variance of a type/region
+Here the notation `V(X)` indicates the variance of a type/region
 parameter `X` with respect to its defining class. `Term x Term`
 represents the "variance transform" as defined in the paper:
 
-  If the variance of a type variable `X` in type expression `E` is `V2`
+>  If the variance of a type variable `X` in type expression `E` is `V2`
   and the definition-site variance of the [corresponding] type parameter
   of a class `C` is `V1`, then the variance of `X` in the type expression
   `C<E>` is `V3 = V1.xform(V2)`.
@@ -95,51 +97,23 @@ types involved before considering variance.
 
 #### Dependency graph management
 
-Because variance works in two phases, if we are not careful, we wind
-up with a muddled mess of a dep-graph. Basically, when gathering up
-the constraints, things are fairly well-structured, but then we do a
-fixed-point iteration and write the results back where they
-belong. You can't give this fixed-point iteration a single task
-because it reads from (and writes to) the variance of all types in the
-crate. In principle, we *could* switch the "current task" in a very
-fine-grained way while propagating constraints in the fixed-point
-iteration and everything would be automatically tracked, but that
-would add some overhead and isn't really necessary anyway.
+Because variance is a whole-crate inference, its dependency graph
+can become quite muddled if we are not careful. To resolve this, we refactor
+into two queries:
 
-Instead what we do is to add edges into the dependency graph as we
-construct the constraint set: so, if computing the constraints for
-node `X` requires loading the inference variables from node `Y`, then
-we can add an edge `Y -> X`, since the variance we ultimately infer
-for `Y` will affect the variance we ultimately infer for `X`.
+- `crate_variances` computes the variance for all items in the current crate.
+- `variances_of` accesses the variance for an individual reading; it
+  works by requesting `crate_variances` and extracting the relevant data.
 
-At this point, we've basically mirrored the inference graph in the
-dependency graph. This means we can just completely ignore the
-fixed-point iteration, since it is just shuffling values along this
-graph. In other words, if we added the fine-grained switching of tasks
-I described earlier, all it would show is that we repeatedly read the
-values described by the constraints, but those edges were already
-added when building the constraints in the first place.
+If you limit yourself to reading `variances_of`, your code will only
+depend then on the inference inferred for that particular item.
 
-Here is how this is implemented (at least as of the time of this
-writing). The associated `DepNode` for the variance map is (at least
-presently) `Signature(DefId)`. This means that, in `constraints.rs`,
-when we visit an item to load up its constraints, we set
-`Signature(DefId)` as the current task (the "memoization" pattern
-described in the `dep-graph` README). Then whenever we find an
-embedded type or trait, we add a synthetic read of `Signature(DefId)`,
-which covers the variances we will compute for all of its
-parameters. This read is synthetic (i.e., we call
-`variance_map.read()`) because, in fact, the final variance is not yet
-computed -- the read *will* occur (repeatedly) during the fixed-point
-iteration phase.
-
-In fact, we don't really *need* this synthetic read. That's because we
-do wind up looking up the `TypeScheme` or `TraitDef` for all
-references types/traits, and those reads add an edge from
-`Signature(DefId)` (that is, they share the same dep node as
-variance). However, I've kept the synthetic reads in place anyway,
-just for future-proofing (in case we change the dep-nodes in the
-future), and because it makes the intention a bit clearer I think.
+Ultimately, this setup relies on the red-green algorithm.
+In particular, every variance query ultimately depends on -- effectively --
+all type definitions in the entire crate (through `crate_variances`),
+but since most changes will not result in a change
+to the actual results from variance inference,
+the `variances_of` query will wind up being considered green after it is re-evaluated.
 
 ### Addendum: Variance on traits
 
@@ -267,7 +241,7 @@ expressions -- must be invariant with respect to all of their
 inputs. To see why this makes sense, consider what subtyping for a
 trait reference means:
 
-   <T as Trait> <: <U as Trait>
+    <T as Trait> <: <U as Trait>
 
 means that if I know that `T as Trait`, I also know that `U as
 Trait`. Moreover, if you think of it as dictionary passing style,
@@ -291,9 +265,9 @@ impl<T> Identity for T { type Out = T; ... }
 Now if I have `<&'static () as Identity>::Out`, this can be
 validly derived as `&'a ()` for any `'a`:
 
-   <&'a () as Identity> <: <&'static () as Identity>
-   if &'static () < : &'a ()   -- Identity is contravariant in Self
-   if 'static : 'a             -- Subtyping rules for relations
+    <&'a () as Identity> <: <&'static () as Identity>
+    if &'static () < : &'a ()   -- Identity is contravariant in Self
+    if 'static : 'a             -- Subtyping rules for relations
 
 This change otoh means that `<'static () as Identity>::Out` is
 always `&'static ()` (which might then be upcast to `'a ()`,

@@ -18,7 +18,8 @@ use alloc::boxed::Box;
 
 use core::any::Any;
 use core::intrinsics;
-use dwarf::eh;
+use core::ptr;
+use dwarf::eh::{EHContext, EHAction, find_eh_action};
 use windows as c;
 
 // Define our exception codes:
@@ -50,7 +51,7 @@ pub unsafe fn panic(data: Box<Any + Send>) -> u32 {
 }
 
 pub fn payload() -> *mut u8 {
-    0 as *mut u8
+    ptr::null_mut()
 }
 
 pub unsafe fn cleanup(ptr: *mut u8) -> Box<Any + Send> {
@@ -79,19 +80,6 @@ pub unsafe fn cleanup(ptr: *mut u8) -> Box<Any + Send> {
 // landing pads (and, thus, destructors!) for anything other than RUST_PANICs.
 // This is considered acceptable, because the behavior of throwing exceptions
 // through a C ABI boundary is undefined.
-
-#[lang = "eh_personality_catch"]
-#[cfg(not(test))]
-unsafe extern "C" fn rust_eh_personality_catch(exceptionRecord: *mut c::EXCEPTION_RECORD,
-                                               establisherFrame: c::LPVOID,
-                                               contextRecord: *mut c::CONTEXT,
-                                               dispatcherContext: *mut c::DISPATCHER_CONTEXT)
-                                               -> c::EXCEPTION_DISPOSITION {
-    rust_eh_personality(exceptionRecord,
-                        establisherFrame,
-                        contextRecord,
-                        dispatcherContext)
-}
 
 #[lang = "eh_personality"]
 #[cfg(not(test))]
@@ -131,11 +119,19 @@ unsafe extern "C" fn rust_eh_unwind_resume(panic_ctx: c::LPVOID) -> ! {
 }
 
 unsafe fn find_landing_pad(dc: &c::DISPATCHER_CONTEXT) -> Option<usize> {
-    let eh_ctx = eh::EHContext {
-        ip: dc.ControlPc as usize,
+    let eh_ctx = EHContext {
+        // The return address points 1 byte past the call instruction,
+        // which could be in the next IP range in LSDA range table.
+        ip: dc.ControlPc as usize - 1,
         func_start: dc.ImageBase as usize + (*dc.FunctionEntry).BeginAddress as usize,
-        text_start: dc.ImageBase as usize,
-        data_start: 0,
+        get_text_start: &|| dc.ImageBase as usize,
+        get_data_start: &|| unimplemented!(),
     };
-    eh::find_landing_pad(dc.HandlerData, &eh_ctx)
+    match find_eh_action(dc.HandlerData, &eh_ctx) {
+        Err(_) |
+        Ok(EHAction::None) => None,
+        Ok(EHAction::Cleanup(lpad)) |
+        Ok(EHAction::Catch(lpad)) => Some(lpad),
+        Ok(EHAction::Terminate) => intrinsics::abort(),
+    }
 }

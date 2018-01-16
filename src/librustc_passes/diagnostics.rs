@@ -11,7 +11,7 @@
 #![allow(non_snake_case)]
 
 register_long_diagnostics! {
-
+/*
 E0014: r##"
 Constants can only be initialized by a constant value or, in a future
 version of Rust, a call to a const function. This error indicates the use
@@ -30,7 +30,7 @@ const FOO: i32 = { const X : i32 = 0; X };
 const FOO2: i32 = { 0 }; // but brackets are useless here
 ```
 "##,
-
+*/
 E0030: r##"
 When matching against a range, the compiler verifies that the range is
 non-empty.  Range patterns include both end-points, so this is equivalent to
@@ -49,37 +49,83 @@ match 5u32 {
 ```
 "##,
 
-E0161: r##"
-A value was moved. However, its size was not known at compile time, and only
-values of a known size can be moved.
-
+E0130: r##"
+You declared a pattern as an argument in a foreign function declaration.
 Erroneous code example:
 
 ```compile_fail
-#![feature(box_syntax)]
-
-fn main() {
-    let array: &[isize] = &[1, 2, 3];
-    let _x: Box<[isize]> = box *array;
-    // error: cannot move a value of type [isize]: the size of [isize] cannot
-    //        be statically determined
+extern {
+    fn foo((a, b): (u32, u32)); // error: patterns aren't allowed in foreign
+                                //        function declarations
 }
 ```
 
-In Rust, you can only move a value when its size is known at compile time.
-
-To work around this restriction, consider "hiding" the value behind a reference:
-either `&x` or `&mut x`. Since a reference has a fixed size, this lets you move
-it around as usual. Example:
+Please replace the pattern argument with a regular one. Example:
 
 ```
-#![feature(box_syntax)]
+struct SomeStruct {
+    a: u32,
+    b: u32,
+}
 
-fn main() {
-    let array: &[isize] = &[1, 2, 3];
-    let _x: Box<&[isize]> = box array; // ok!
+extern {
+    fn foo(s: SomeStruct); // ok!
 }
 ```
+
+Or:
+
+```
+extern {
+    fn foo(a: (u32, u32)); // ok!
+}
+```
+"##,
+
+E0197: r##"
+Inherent implementations (one that do not implement a trait but provide
+methods associated with a type) are always safe because they are not
+implementing an unsafe trait. Removing the `unsafe` keyword from the inherent
+implementation will resolve this error.
+
+```compile_fail,E0197
+struct Foo;
+
+// this will cause this error
+unsafe impl Foo { }
+// converting it to this will fix it
+impl Foo { }
+```
+"##,
+
+E0198: r##"
+A negative implementation is one that excludes a type from implementing a
+particular trait. Not being able to use a trait is always a safe operation,
+so negative implementations are always safe and never need to be marked as
+unsafe.
+
+```compile_fail
+#![feature(optin_builtin_traits)]
+
+struct Foo;
+
+// unsafe is unnecessary
+unsafe impl !Clone for Foo { }
+```
+
+This will compile:
+
+```ignore (ignore auto_trait future compatibility warning)
+#![feature(optin_builtin_traits)]
+
+struct Foo;
+
+auto trait Enterprise {}
+
+impl !Enterprise for Foo { }
+```
+
+Please note that negative impls are only allowed for auto traits.
 "##,
 
 E0265: r##"
@@ -88,11 +134,11 @@ All statics and constants need to resolve to a value in an acyclic manner.
 
 For example, neither of the following can be sensibly compiled:
 
-```compile_fail
+```compile_fail,E0265
 const X: u32 = X;
 ```
 
-```compile_fail
+```compile_fail,E0265
 const X: u32 = Y;
 const Y: u32 = X;
 ```
@@ -102,7 +148,7 @@ E0267: r##"
 This error indicates the use of a loop keyword (`break` or `continue`) inside a
 closure but outside of any loop. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0267
 let w = || { break; }; // error: `break` inside of a closure
 ```
 
@@ -126,7 +172,7 @@ This error indicates the use of a loop keyword (`break` or `continue`) outside
 of a loop. Without a loop to break out of or continue in, no sensible action can
 be taken. Erroneous code example:
 
-```compile_fail
+```compile_fail,E0268
 fn some_func() {
     break; // error: `break` outside of loop
 }
@@ -143,11 +189,25 @@ fn some_func() {
 ```
 "##,
 
+E0379: r##"
+Trait methods cannot be declared `const` by design. For more information, see
+[RFC 911].
+
+[RFC 911]: https://github.com/rust-lang/rfcs/pull/911
+"##,
+
+E0380: r##"
+Auto traits cannot have methods or associated items.
+For more information see the [opt-in builtin traits RFC][RFC 19].
+
+[RFC 19]: https://github.com/rust-lang/rfcs/blob/master/text/0019-opt-in-builtin-traits.md
+"##,
+
 E0449: r##"
 A visibility qualifier was used when it was unnecessary. Erroneous code
 examples:
 
-```compile_fail
+```compile_fail,E0449
 struct Bar;
 
 trait Foo {
@@ -164,7 +224,7 @@ pub impl Foo for Bar { // error: unnecessary visibility qualifier
 To fix this error, please remove the visibility qualifier when it is not
 required. Example:
 
-```ignore
+```
 struct Bar;
 
 trait Foo {
@@ -177,14 +237,87 @@ impl Bar {}
 
 // Trait methods share the visibility of the trait, so `pub` is
 // unnecessary in either case
-pub impl Foo for Bar {
-    pub fn foo() {}
+impl Foo for Bar {
+    fn foo() {}
 }
 ```
 "##,
 
+
+E0579: r##"
+When matching against an exclusive range, the compiler verifies that the range
+is non-empty. Exclusive range patterns include the start point but not the end
+point, so this is equivalent to requiring the start of the range to be less
+than the end of the range.
+
+For example:
+
+```compile_fail
+match 5u32 {
+    // This range is ok, albeit pointless.
+    1 .. 2 => {}
+    // This range is empty, and the compiler can tell.
+    5 .. 5 => {}
+}
+```
+"##,
+
+E0590: r##"
+`break` or `continue` must include a label when used in the condition of a
+`while` loop.
+
+Example of erroneous code:
+
+```compile_fail
+while break {}
+```
+
+To fix this, add a label specifying which loop is being broken out of:
+```
+'foo: while break 'foo {}
+```
+"##,
+
+E0571: r##"
+A `break` statement with an argument appeared in a non-`loop` loop.
+
+Example of erroneous code:
+
+```compile_fail,E0571
+# let mut i = 1;
+# fn satisfied(n: usize) -> bool { n % 23 == 0 }
+let result = while true {
+    if satisfied(i) {
+        break 2*i; // error: `break` with value from a `while` loop
+    }
+    i += 1;
+};
+```
+
+The `break` statement can take an argument (which will be the value of the loop
+expression if the `break` statement is executed) in `loop` loops, but not
+`for`, `while`, or `while let` loops.
+
+Make sure `break value;` statements only occur in `loop` loops:
+
+```
+# let mut i = 1;
+# fn satisfied(n: usize) -> bool { n % 23 == 0 }
+let result = loop { // ok!
+    if satisfied(i) {
+        break 2*i;
+    }
+    i += 1;
+};
+```
+"##
 }
 
 register_diagnostics! {
+    E0226, // only a single explicit lifetime bound is permitted
     E0472, // asm! is unsupported on this target
+    E0561, // patterns aren't allowed in function pointer types
+    E0567, // auto traits can not have generic parameters
+    E0568, // auto traits can not have super traits
+    E0642, // patterns aren't allowed in methods without bodies
 }

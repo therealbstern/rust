@@ -8,6 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// ignore-cloudabi no processes
+// ignore-emscripten no processes
+
 fn check_for_no_backtrace(test: std::process::Output) {
     assert!(!test.status.success());
     let err = String::from_utf8_lossy(&test.stderr);

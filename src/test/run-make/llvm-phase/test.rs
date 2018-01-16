@@ -13,13 +13,16 @@
 extern crate rustc;
 extern crate rustc_driver;
 extern crate rustc_llvm;
+extern crate rustc_trans;
 #[macro_use] extern crate syntax;
 extern crate getopts;
 
 use rustc_driver::{CompilerCalls, Compilation};
 use rustc_driver::driver::CompileController;
+use rustc_trans::ModuleSource;
 use rustc::session::Session;
 use syntax::codemap::FileLoader;
+use std::env;
 use std::io;
 use std::path::{PathBuf, Path};
 
@@ -51,8 +54,7 @@ impl<'a> CompilerCalls<'a> for JitCalls {
             state.session.abort_if_errors();
             let trans = state.trans.unwrap();
             assert_eq!(trans.modules.len(), 1);
-            let rs_llmod = trans.modules[0].llmod;
-            unsafe { rustc_llvm::LLVMDumpModule(rs_llmod) };
+            println!("name of compiled module = {}", trans.modules[0].name);
         });
         cc
     }
@@ -70,13 +72,16 @@ fn main() {
     path.pop();
     path.pop();
 
-    let args: Vec<String> =
+    let mut args: Vec<String> =
         format!("_ _ --sysroot {} --crate-type dylib", path.to_str().unwrap())
         .split(' ').map(|s| s.to_string()).collect();
+    args.push("--out-dir".to_string());
+    args.push(env::var("TMPDIR").unwrap());
+    args.push("-Ccodegen-units=1".to_string());
 
-    let (result, _) = rustc_driver::run_compiler_with_file_loader(
-        &args, &mut JitCalls, box JitLoader);
+    let (result, _) = rustc_driver::run_compiler(
+        &args, &mut JitCalls, Some(box JitLoader), None);
     if let Err(n) = result {
-        panic!("Error {}", n);
+        panic!("Error {:?}", n);
     }
 }

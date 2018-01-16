@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-
 use cell::Cell;
 use ptr;
 use sync::Arc;
@@ -29,7 +27,7 @@ impl<T: Send + Sync + 'static> Lazy<T> {
         Lazy {
             lock: Mutex::new(),
             ptr: Cell::new(ptr::null_mut()),
-            init: init
+            init,
         }
     }
 

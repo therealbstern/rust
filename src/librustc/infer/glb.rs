@@ -13,31 +13,33 @@ use super::InferCtxt;
 use super::lattice::{self, LatticeDir};
 use super::Subtype;
 
+use traits::ObligationCause;
 use ty::{self, Ty, TyCtxt};
+use ty::error::TypeError;
 use ty::relate::{Relate, RelateResult, TypeRelation};
-use traits::PredicateObligations;
 
 /// "Greatest lower bound" (common subtype)
-pub struct Glb<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
-    fields: CombineFields<'a, 'gcx, 'tcx>
+pub struct Glb<'combine, 'infcx: 'combine, 'gcx: 'infcx+'tcx, 'tcx: 'infcx> {
+    fields: &'combine mut CombineFields<'infcx, 'gcx, 'tcx>,
+    a_is_expected: bool,
 }
 
-impl<'a, 'gcx, 'tcx> Glb<'a, 'gcx, 'tcx> {
-    pub fn new(fields: CombineFields<'a, 'gcx, 'tcx>) -> Glb<'a, 'gcx, 'tcx> {
-        Glb { fields: fields }
-    }
-
-    pub fn obligations(self) -> PredicateObligations<'tcx> {
-        self.fields.obligations
+impl<'combine, 'infcx, 'gcx, 'tcx> Glb<'combine, 'infcx, 'gcx, 'tcx> {
+    pub fn new(fields: &'combine mut CombineFields<'infcx, 'gcx, 'tcx>, a_is_expected: bool)
+        -> Glb<'combine, 'infcx, 'gcx, 'tcx>
+    {
+        Glb { fields: fields, a_is_expected: a_is_expected }
     }
 }
 
-impl<'a, 'gcx, 'tcx> TypeRelation<'a, 'gcx, 'tcx> for Glb<'a, 'gcx, 'tcx> {
+impl<'combine, 'infcx, 'gcx, 'tcx> TypeRelation<'infcx, 'gcx, 'tcx>
+    for Glb<'combine, 'infcx, 'gcx, 'tcx>
+{
     fn tag(&self) -> &'static str { "Glb" }
 
-    fn tcx(&self) -> TyCtxt<'a, 'gcx, 'tcx> { self.fields.tcx() }
+    fn tcx(&self) -> TyCtxt<'infcx, 'gcx, 'tcx> { self.fields.tcx() }
 
-    fn a_is_expected(&self) -> bool { self.fields.a_is_expected }
+    fn a_is_expected(&self) -> bool { self.a_is_expected }
 
     fn relate_with_variance<T: Relate<'tcx>>(&mut self,
                                              variance: ty::Variance,
@@ -46,10 +48,11 @@ impl<'a, 'gcx, 'tcx> TypeRelation<'a, 'gcx, 'tcx> for Glb<'a, 'gcx, 'tcx> {
                                              -> RelateResult<'tcx, T>
     {
         match variance {
-            ty::Invariant => self.fields.equate().relate(a, b),
+            ty::Invariant => self.fields.equate(self.a_is_expected).relate(a, b),
             ty::Covariant => self.relate(a, b),
-            ty::Bivariant => self.fields.bivariate().relate(a, b),
-            ty::Contravariant => self.fields.lub().relate(a, b),
+            // FIXME(#41044) -- not correct, need test
+            ty::Bivariant => Ok(a.clone()),
+            ty::Contravariant => self.fields.lub(self.a_is_expected).relate(a, b),
         }
     }
 
@@ -57,31 +60,63 @@ impl<'a, 'gcx, 'tcx> TypeRelation<'a, 'gcx, 'tcx> for Glb<'a, 'gcx, 'tcx> {
         lattice::super_lattice_tys(self, a, b)
     }
 
-    fn regions(&mut self, a: ty::Region, b: ty::Region) -> RelateResult<'tcx, ty::Region> {
+    fn regions(&mut self, a: ty::Region<'tcx>, b: ty::Region<'tcx>)
+               -> RelateResult<'tcx, ty::Region<'tcx>> {
         debug!("{}.regions({:?}, {:?})",
                self.tag(),
                a,
                b);
 
         let origin = Subtype(self.fields.trace.clone());
-        Ok(self.fields.infcx.region_vars.glb_regions(origin, a, b))
+        Ok(self.fields.infcx.borrow_region_constraints().glb_regions(self.tcx(), origin, a, b))
     }
 
     fn binders<T>(&mut self, a: &ty::Binder<T>, b: &ty::Binder<T>)
                   -> RelateResult<'tcx, ty::Binder<T>>
         where T: Relate<'tcx>
     {
-        self.fields.higher_ranked_glb(a, b)
+        debug!("binders(a={:?}, b={:?})", a, b);
+        let was_error = self.infcx().probe(|_snapshot| {
+            // Subtle: use a fresh combine-fields here because we recover
+            // from Err. Doing otherwise could propagate obligations out
+            // through our `self.obligations` field.
+            self.infcx()
+                .combine_fields(self.fields.trace.clone(), self.fields.param_env)
+                .higher_ranked_glb(a, b, self.a_is_expected)
+                .is_err()
+        });
+        debug!("binders: was_error={:?}", was_error);
+
+        // When higher-ranked types are involved, computing the LUB is
+        // very challenging, switch to invariance. This is obviously
+        // overly conservative but works ok in practice.
+        match self.relate_with_variance(ty::Variance::Invariant, a, b) {
+            Ok(_) => Ok(a.clone()),
+            Err(err) => {
+                debug!("binders: error occurred, was_error={:?}", was_error);
+                if !was_error {
+                    Err(TypeError::OldStyleLUB(Box::new(err)))
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 }
 
-impl<'a, 'gcx, 'tcx> LatticeDir<'a, 'gcx, 'tcx> for Glb<'a, 'gcx, 'tcx> {
-    fn infcx(&self) -> &'a InferCtxt<'a, 'gcx, 'tcx> {
+impl<'combine, 'infcx, 'gcx, 'tcx> LatticeDir<'infcx, 'gcx, 'tcx>
+    for Glb<'combine, 'infcx, 'gcx, 'tcx>
+{
+    fn infcx(&self) -> &'infcx InferCtxt<'infcx, 'gcx, 'tcx> {
         self.fields.infcx
     }
 
-    fn relate_bound(&self, v: Ty<'tcx>, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, ()> {
-        let mut sub = self.fields.sub();
+    fn cause(&self) -> &ObligationCause<'tcx> {
+        &self.fields.trace.cause
+    }
+
+    fn relate_bound(&mut self, v: Ty<'tcx>, a: Ty<'tcx>, b: Ty<'tcx>) -> RelateResult<'tcx, ()> {
+        let mut sub = self.fields.sub(self.a_is_expected);
         sub.relate(&v, &a)?;
         sub.relate(&v, &b)?;
         Ok(())

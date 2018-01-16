@@ -14,17 +14,17 @@ fn main() {
     // (separate lines to ensure the spans are accurate)
 
      let &_ //~  ERROR mismatched types
-            //~| expected type `&mut _`
+            //~| expected type `&mut {integer}`
             //~| found type `&_`
-            //~| values differ in mutability
+            //~| types differ in mutability
         = foo;
     let &mut _ = foo;
 
     let bar = &1;
     let &_ = bar;
     let &mut _ //~  ERROR mismatched types
-               //~| expected type `&_`
+               //~| expected type `&{integer}`
                //~| found type `&mut _`
-               //~| values differ in mutability
+               //~| types differ in mutability
          = bar;
 }

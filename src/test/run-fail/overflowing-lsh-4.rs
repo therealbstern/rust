@@ -8,9 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// ignore-pretty : (#23623) problems when  ending with // comments
-
-// error-pattern:thread 'main' panicked at 'attempted to shift left with overflow'
+// error-pattern:thread 'main' panicked at 'attempt to shift left with overflow'
 // compile-flags: -C debug-assertions
 
 // This function is checking that our automatic truncation does not

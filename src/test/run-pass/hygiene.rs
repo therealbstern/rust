@@ -22,23 +22,23 @@ fn f() {
 
 fn g() {
     let x = 0;
-    macro_rules! m { ($x:ident) => {
-        macro_rules! m2 { () => { ($x, x) } }
+    macro_rules! m { ($m1:ident, $m2:ident, $x:ident) => {
+        macro_rules! $m1 { () => { ($x, x) } }
         let x = 1;
-        macro_rules! m3 { () => { ($x, x) } }
+        macro_rules! $m2 { () => { ($x, x) } }
     } }
 
     let x = 2;
-    m!(x);
+    m!(m2, m3, x);
 
     let x = 3;
     assert_eq!(m2!(), (2, 0));
     assert_eq!(m3!(), (2, 1));
 
     let x = 4;
-    m!(x);
-    assert_eq!(m2!(), (4, 0));
-    assert_eq!(m3!(), (4, 1));
+    m!(m4, m5, x);
+    assert_eq!(m4!(), (4, 0));
+    assert_eq!(m5!(), (4, 1));
 }
 
 mod foo {
@@ -104,6 +104,13 @@ fn match_hygiene() {
 
     let x = 2;
     m!(Ok(x), x);
+}
+
+fn label_hygiene() {
+    'a: loop {
+        macro_rules! m { () => { break 'a; } }
+        m!();
+    }
 }
 
 fn main() {

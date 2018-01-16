@@ -14,4 +14,5 @@
 fn foo() {}
 
 #[main]
-fn f() {} //~ ERROR E0137
+fn f() {}
+//~^ ERROR E0137

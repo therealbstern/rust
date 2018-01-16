@@ -10,3 +10,5 @@ crate-type = ["dylib"]
 
 [dependencies]
 serialize = { path = "../libserialize" }
+rustc_data_structures = { path = "../librustc_data_structures" }
+unicode-width = "0.1.4"

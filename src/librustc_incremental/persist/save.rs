@@ -8,50 +8,103 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rbml::opaque::Encoder;
-use rustc::dep_graph::DepNode;
-use rustc::middle::cstore::LOCAL_CRATE;
+use rustc::dep_graph::{DepGraph, DepKind};
+use rustc::session::Session;
 use rustc::ty::TyCtxt;
-use rustc_serialize::{Encodable as RustcEncodable};
-use std::hash::{Hasher, SipHasher};
-use std::io::{self, Cursor, Write};
-use std::fs::{self, File};
+use rustc::util::common::time;
+use rustc_data_structures::fx::FxHashMap;
+use rustc_serialize::Encodable as RustcEncodable;
+use rustc_serialize::opaque::Encoder;
+use std::io::{self, Cursor};
+use std::fs;
 use std::path::PathBuf;
 
 use super::data::*;
-use super::directory::*;
-use super::hash::*;
-use super::util::*;
+use super::fs::*;
+use super::dirty_clean;
+use super::file_format;
+use super::work_product;
 
 pub fn save_dep_graph<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
-    let _ignore = tcx.dep_graph.in_ignore();
-    let mut hcx = HashContext::new(tcx);
-    save_in(&mut hcx, dep_graph_path(tcx), encode_dep_graph);
-    save_in(&mut hcx, metadata_hash_path(tcx, LOCAL_CRATE), encode_metadata_hashes);
+    debug!("save_dep_graph()");
+    tcx.dep_graph.with_ignore(|| {
+        let sess = tcx.sess;
+        if sess.opts.incremental.is_none() {
+            return;
+        }
+
+        time(sess.time_passes(), "persist query result cache", || {
+            save_in(sess,
+                    query_cache_path(sess),
+                    |e| encode_query_cache(tcx, e));
+        });
+
+        if tcx.sess.opts.debugging_opts.incremental_queries {
+            time(sess.time_passes(), "persist dep-graph", || {
+                save_in(sess,
+                        dep_graph_path(sess),
+                        |e| encode_dep_graph(tcx, e));
+            });
+        }
+
+        dirty_clean::check_dirty_clean_annotations(tcx);
+    })
 }
 
-fn save_in<'a, 'tcx, F>(hcx: &mut HashContext<'a, 'tcx>,
-                        opt_path_buf: Option<PathBuf>,
-                        encode: F)
-    where F: FnOnce(&mut HashContext<'a, 'tcx>, &mut Encoder) -> io::Result<()>
+pub fn save_work_products(sess: &Session, dep_graph: &DepGraph) {
+    if sess.opts.incremental.is_none() {
+        return;
+    }
+
+    debug!("save_work_products()");
+    dep_graph.assert_ignored();
+    let path = work_products_path(sess);
+    save_in(sess, path, |e| encode_work_products(dep_graph, e));
+
+    // We also need to clean out old work-products, as not all of them are
+    // deleted during invalidation. Some object files don't change their
+    // content, they are just not needed anymore.
+    let new_work_products = dep_graph.work_products();
+    let previous_work_products = dep_graph.previous_work_products();
+
+    for (id, wp) in previous_work_products.iter() {
+        if !new_work_products.contains_key(id) {
+            work_product::delete_workproduct_files(sess, wp);
+            debug_assert!(wp.saved_files.iter().all(|&(_, ref file_name)| {
+                !in_incr_comp_dir_sess(sess, file_name).exists()
+            }));
+        }
+    }
+
+    // Check that we did not delete one of the current work-products:
+    debug_assert!({
+        new_work_products.iter()
+                         .flat_map(|(_, wp)| wp.saved_files
+                                               .iter()
+                                               .map(|&(_, ref name)| name))
+                         .map(|name| in_incr_comp_dir_sess(sess, name))
+                         .all(|path| path.exists())
+    });
+}
+
+fn save_in<F>(sess: &Session, path_buf: PathBuf, encode: F)
+    where F: FnOnce(&mut Encoder) -> io::Result<()>
 {
-    let tcx = hcx.tcx;
-
-    let path_buf = match opt_path_buf {
-        Some(p) => p,
-        None => return
-    };
-
-    // FIXME(#32754) lock file?
+    debug!("save: storing data in {}", path_buf.display());
 
     // delete the old dep-graph, if any
+    // Note: It's important that we actually delete the old file and not just
+    // truncate and overwrite it, since it might be a shared hard-link, the
+    // underlying data of which we don't want to modify
     if path_buf.exists() {
         match fs::remove_file(&path_buf) {
-            Ok(()) => { }
+            Ok(()) => {
+                debug!("save: remove old file");
+            }
             Err(err) => {
-                tcx.sess.err(
-                    &format!("unable to delete old dep-graph at `{}`: {}",
-                             path_buf.display(), err));
+                sess.err(&format!("unable to delete old dep-graph at `{}`: {}",
+                                  path_buf.display(),
+                                  err));
                 return;
             }
         }
@@ -59,136 +112,138 @@ fn save_in<'a, 'tcx, F>(hcx: &mut HashContext<'a, 'tcx>,
 
     // generate the data in a memory buffer
     let mut wr = Cursor::new(Vec::new());
-    match encode(hcx, &mut Encoder::new(&mut wr)) {
-        Ok(()) => { }
+    file_format::write_file_header(&mut wr).unwrap();
+    match encode(&mut Encoder::new(&mut wr)) {
+        Ok(()) => {}
         Err(err) => {
-            tcx.sess.err(
-                &format!("could not encode dep-graph to `{}`: {}",
-                         path_buf.display(), err));
+            sess.err(&format!("could not encode dep-graph to `{}`: {}",
+                              path_buf.display(),
+                              err));
             return;
         }
     }
 
     // write the data out
     let data = wr.into_inner();
-    match
-        File::create(&path_buf)
-        .and_then(|mut file| file.write_all(&data))
-    {
-        Ok(_) => { }
+    match fs::write(&path_buf, data) {
+        Ok(_) => {
+            debug!("save: data written to disk successfully");
+        }
         Err(err) => {
-            tcx.sess.err(
-                &format!("failed to write dep-graph to `{}`: {}",
-                         path_buf.display(), err));
+            sess.err(&format!("failed to write dep-graph to `{}`: {}",
+                              path_buf.display(),
+                              err));
             return;
         }
     }
 }
 
-pub fn encode_dep_graph<'a, 'tcx>(hcx: &mut HashContext<'a, 'tcx>,
-                                  encoder: &mut Encoder)
-                                  -> io::Result<()>
-{
-    let tcx = hcx.tcx;
-    let query = tcx.dep_graph.query();
+fn encode_dep_graph(tcx: TyCtxt,
+                    encoder: &mut Encoder)
+                    -> io::Result<()> {
+    // First encode the commandline arguments hash
+    tcx.sess.opts.dep_tracking_hash().encode(encoder)?;
 
-    let mut builder = DefIdDirectoryBuilder::new(tcx);
+    // Encode the graph data.
+    let serialized_graph = tcx.dep_graph.serialize();
 
-    // Create hashes for inputs.
-    let hashes =
-        query.nodes()
-             .into_iter()
-             .filter_map(|dep_node| {
-                 hcx.hash(&dep_node)
-                    .map(|hash| {
-                        let node = builder.map(dep_node);
-                        SerializedHash { node: node, hash: hash }
-                    })
-             })
-             .collect();
+    if tcx.sess.opts.debugging_opts.incremental_info {
+        #[derive(Clone)]
+        struct Stat {
+            kind: DepKind,
+            node_counter: u64,
+            edge_counter: u64,
+        }
 
-    // Create the serialized dep-graph.
-    let graph = SerializedDepGraph {
-        nodes: query.nodes().into_iter()
-                            .map(|node| builder.map(node))
-                            .collect(),
-        edges: query.edges().into_iter()
-                            .map(|(source_node, target_node)| {
-                                let source = builder.map(source_node);
-                                let target = builder.map(target_node);
-                                (source, target)
-                            })
-                            .collect(),
-        hashes: hashes,
-    };
+        let total_node_count = serialized_graph.nodes.len();
+        let total_edge_count = serialized_graph.edge_list_data.len();
+        let (total_edge_reads, total_duplicate_edge_reads) =
+            tcx.dep_graph.edge_deduplication_data();
 
-    debug!("graph = {:#?}", graph);
+        let mut counts: FxHashMap<_, Stat> = FxHashMap();
 
-    // Encode the directory and then the graph data.
-    let directory = builder.into_directory();
-    try!(directory.encode(encoder));
-    try!(graph.encode(encoder));
+        for (i, &(node, _)) in serialized_graph.nodes.iter_enumerated() {
+            let stat = counts.entry(node.kind).or_insert(Stat {
+                kind: node.kind,
+                node_counter: 0,
+                edge_counter: 0,
+            });
+
+            stat.node_counter += 1;
+            let (edge_start, edge_end) = serialized_graph.edge_list_indices[i];
+            stat.edge_counter += (edge_end - edge_start) as u64;
+        }
+
+        let mut counts: Vec<_> = counts.values().cloned().collect();
+        counts.sort_by_key(|s| -(s.node_counter as i64));
+
+        let percentage_of_all_nodes: Vec<f64> = counts.iter().map(|s| {
+            (100.0 * (s.node_counter as f64)) / (total_node_count as f64)
+        }).collect();
+
+        let average_edges_per_kind: Vec<f64> = counts.iter().map(|s| {
+            (s.edge_counter as f64) / (s.node_counter as f64)
+        }).collect();
+
+        println!("[incremental]");
+        println!("[incremental] DepGraph Statistics");
+
+        const SEPARATOR: &str = "[incremental] --------------------------------\
+                                 ----------------------------------------------\
+                                 ------------";
+
+        println!("{}", SEPARATOR);
+        println!("[incremental]");
+        println!("[incremental] Total Node Count: {}", total_node_count);
+        println!("[incremental] Total Edge Count: {}", total_edge_count);
+        println!("[incremental] Total Edge Reads: {}", total_edge_reads);
+        println!("[incremental] Total Duplicate Edge Reads: {}", total_duplicate_edge_reads);
+        println!("[incremental]");
+        println!("[incremental]  {:<36}| {:<17}| {:<12}| {:<17}|",
+                 "Node Kind",
+                 "Node Frequency",
+                 "Node Count",
+                 "Avg. Edge Count");
+        println!("[incremental] -------------------------------------\
+                  |------------------\
+                  |-------------\
+                  |------------------|");
+
+        for (i, stat) in counts.iter().enumerate() {
+            println!("[incremental]  {:<36}|{:>16.1}% |{:>12} |{:>17.1} |",
+                format!("{:?}", stat.kind),
+                percentage_of_all_nodes[i],
+                stat.node_counter,
+                average_edges_per_kind[i]);
+        }
+
+        println!("{}", SEPARATOR);
+        println!("[incremental]");
+    }
+
+    serialized_graph.encode(encoder)?;
 
     Ok(())
 }
 
-pub fn encode_metadata_hashes<'a, 'tcx>(hcx: &mut HashContext<'a, 'tcx>,
-                                        encoder: &mut Encoder)
-                                        -> io::Result<()>
-{
-    let tcx = hcx.tcx;
-    let query = tcx.dep_graph.query();
+fn encode_work_products(dep_graph: &DepGraph,
+                        encoder: &mut Encoder) -> io::Result<()> {
+    let work_products: Vec<_> = dep_graph
+        .work_products()
+        .iter()
+        .map(|(id, work_product)| {
+            SerializedWorkProduct {
+                id: id.clone(),
+                work_product: work_product.clone(),
+            }
+        })
+        .collect();
 
-    let serialized_hashes = {
-        // Identify the `MetaData(X)` nodes where `X` is local. These are
-        // the metadata items we export. Downstream crates will want to
-        // see a hash that tells them whether we might have changed the
-        // metadata for a given item since they last compiled.
-        let meta_data_def_ids =
-            query.nodes()
-                 .into_iter()
-                 .filter_map(|dep_node| match *dep_node {
-                     DepNode::MetaData(def_id) if def_id.is_local() => Some(def_id),
-                     _ => None,
-                 });
+    work_products.encode(encoder)
+}
 
-        // To create the hash for each item `X`, we don't hash the raw
-        // bytes of the metadata (though in principle we
-        // could). Instead, we walk the predecessors of `MetaData(X)`
-        // from the dep-graph. This corresponds to all the inputs that
-        // were read to construct the metadata. To create the hash for
-        // the metadata, we hash (the hash of) all of those inputs.
-        let hashes =
-            meta_data_def_ids
-            .map(|def_id| {
-                assert!(def_id.is_local());
-                let dep_node = DepNode::MetaData(def_id);
-                let mut state = SipHasher::new();
-                debug!("save: computing metadata hash for {:?}", dep_node);
-                for node in query.transitive_predecessors(&dep_node) {
-                    if let Some(hash) = hcx.hash(&node) {
-                        debug!("save: predecessor {:?} has hash {}", node, hash);
-                        state.write_u64(hash.to_le());
-                    } else {
-                        debug!("save: predecessor {:?} cannot be hashed", node);
-                    }
-                }
-                let hash = state.finish();
-                debug!("save: metadata hash for {:?} is {}", dep_node, hash);
-                SerializedMetadataHash {
-                    def_index: def_id.index,
-                    hash: hash,
-                }
-            });
-
-        // Collect these up into a vector.
-        SerializedMetadataHashes {
-            hashes: hashes.collect()
-        }
-    };
-
-    // Encode everything.
-    try!(serialized_hashes.encode(encoder));
-
-    Ok(())
+fn encode_query_cache(tcx: TyCtxt,
+                      encoder: &mut Encoder)
+                      -> io::Result<()> {
+    tcx.serialize_query_result_cache(encoder)
 }

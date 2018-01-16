@@ -15,44 +15,44 @@
 //! paths etc in all kinds of annoying scenarios.
 
 use rustc::hir;
-use rustc::hir::intravisit::{self, Visitor};
+use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
+use rustc::ty::TyCtxt;
 use syntax::ast;
-use syntax::attr::AttrMetaMethods;
 
-use common::SharedCrateContext;
 use monomorphize::Instance;
 
 const SYMBOL_NAME: &'static str = "rustc_symbol_name";
 const ITEM_PATH: &'static str = "rustc_item_path";
 
-pub fn report_symbol_names(scx: &SharedCrateContext) {
+pub fn report_symbol_names<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
     // if the `rustc_attrs` feature is not enabled, then the
     // attributes we are interested in cannot be present anyway, so
     // skip the walk.
-    let tcx = scx.tcx();
     if !tcx.sess.features.borrow().rustc_attrs {
         return;
     }
 
-    let _ignore = tcx.dep_graph.in_ignore();
-    let mut visitor = SymbolNamesTest { scx: scx };
-    tcx.map.krate().visit_all_items(&mut visitor);
+    tcx.dep_graph.with_ignore(|| {
+        let mut visitor = SymbolNamesTest { tcx: tcx };
+        // FIXME(#37712) could use ItemLikeVisitor if trait items were item-like
+        tcx.hir.krate().visit_all_item_likes(&mut visitor.as_deep_visitor());
+    })
 }
 
 struct SymbolNamesTest<'a, 'tcx:'a> {
-    scx: &'a SharedCrateContext<'a, 'tcx>,
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
 }
 
 impl<'a, 'tcx> SymbolNamesTest<'a, 'tcx> {
     fn process_attrs(&mut self,
                      node_id: ast::NodeId) {
-        let tcx = self.scx.tcx();
-        let def_id = tcx.map.local_def_id(node_id);
+        let tcx = self.tcx;
+        let def_id = tcx.hir.local_def_id(node_id);
         for attr in tcx.get_attrs(def_id).iter() {
             if attr.check_name(SYMBOL_NAME) {
                 // for now, can only use on monomorphic names
-                let instance = Instance::mono(self.scx, def_id);
-                let name = instance.symbol_name(self.scx);
+                let instance = Instance::mono(tcx, def_id);
+                let name = self.tcx.symbol_name(instance);
                 tcx.sess.span_err(attr.span, &format!("symbol-name({})", name));
             } else if attr.check_name(ITEM_PATH) {
                 let path = tcx.item_path_str(def_id);
@@ -67,6 +67,10 @@ impl<'a, 'tcx> SymbolNamesTest<'a, 'tcx> {
 }
 
 impl<'a, 'tcx> Visitor<'tcx> for SymbolNamesTest<'a, 'tcx> {
+    fn nested_visit_map<'this>(&'this mut self) -> NestedVisitorMap<'this, 'tcx> {
+        NestedVisitorMap::None
+    }
+
     fn visit_item(&mut self, item: &'tcx hir::Item) {
         self.process_attrs(item.id);
         intravisit::walk_item(self, item);
@@ -82,4 +86,3 @@ impl<'a, 'tcx> Visitor<'tcx> for SymbolNamesTest<'a, 'tcx> {
         intravisit::walk_impl_item(self, ii)
     }
 }
-

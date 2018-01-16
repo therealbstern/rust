@@ -14,7 +14,6 @@ enum Foo {
 
 fn main() {
     match Foo::Bar(1) {
-        Foo { i } => () //~ ERROR expected variant, struct or type alias, found enum `Foo`
-        //~^ ERROR `Foo` does not name a struct or a struct variant
+        Foo { i } => () //~ ERROR expected struct, variant or union type, found enum `Foo`
     }
 }

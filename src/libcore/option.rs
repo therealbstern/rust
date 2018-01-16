@@ -10,9 +10,9 @@
 
 //! Optional values.
 //!
-//! Type `Option` represents an optional value: every `Option`
-//! is either `Some` and contains a value, or `None`, and
-//! does not. `Option` types are very common in Rust code, as
+//! Type [`Option`] represents an optional value: every [`Option`]
+//! is either [`Some`] and contains a value, or [`None`], and
+//! does not. [`Option`] types are very common in Rust code, as
 //! they have a number of uses:
 //!
 //! * Initial values
@@ -26,8 +26,8 @@
 //! * Nullable pointers
 //! * Swapping things out of difficult situations
 //!
-//! Options are commonly paired with pattern matching to query the presence
-//! of a value and take action, always accounting for the `None` case.
+//! [`Option`]s are commonly paired with pattern matching to query the presence
+//! of a value and take action, always accounting for the [`None`] case.
 //!
 //! ```
 //! fn divide(numerator: f64, denominator: f64) -> Option<f64> {
@@ -57,37 +57,37 @@
 //!
 //! Rust's pointer types must always point to a valid location; there are
 //! no "null" pointers. Instead, Rust has *optional* pointers, like
-//! the optional owned box, `Option<Box<T>>`.
+//! the optional owned box, [`Option`]`<`[`Box<T>`]`>`.
 //!
-//! The following example uses `Option` to create an optional box of
-//! `i32`. Notice that in order to use the inner `i32` value first the
+//! The following example uses [`Option`] to create an optional box of
+//! [`i32`]. Notice that in order to use the inner [`i32`] value first, the
 //! `check_optional` function needs to use pattern matching to
-//! determine whether the box has a value (i.e. it is `Some(...)`) or
-//! not (`None`).
+//! determine whether the box has a value (i.e. it is [`Some(...)`][`Some`]) or
+//! not ([`None`]).
 //!
 //! ```
-//! let optional: Option<Box<i32>> = None;
-//! check_optional(&optional);
+//! let optional = None;
+//! check_optional(optional);
 //!
-//! let optional: Option<Box<i32>> = Some(Box::new(9000));
-//! check_optional(&optional);
+//! let optional = Some(Box::new(9000));
+//! check_optional(optional);
 //!
-//! fn check_optional(optional: &Option<Box<i32>>) {
-//!     match *optional {
-//!         Some(ref p) => println!("have value {}", p),
-//!         None => println!("have no value"),
+//! fn check_optional(optional: Option<Box<i32>>) {
+//!     match optional {
+//!         Some(ref p) => println!("has value {}", p),
+//!         None => println!("has no value"),
 //!     }
 //! }
 //! ```
 //!
-//! This usage of `Option` to create safe nullable pointers is so
+//! This usage of [`Option`] to create safe nullable pointers is so
 //! common that Rust does special optimizations to make the
-//! representation of `Option<Box<T>>` a single pointer. Optional pointers
+//! representation of [`Option`]`<`[`Box<T>`]`>` a single pointer. Optional pointers
 //! in Rust are stored as efficiently as any other pointer type.
 //!
 //! # Examples
 //!
-//! Basic pattern matching on `Option`:
+//! Basic pattern matching on [`Option`]:
 //!
 //! ```
 //! let msg = Some("howdy");
@@ -101,7 +101,7 @@
 //! let unwrapped_msg = msg.unwrap_or("default message");
 //! ```
 //!
-//! Initialize a result to `None` before a loop:
+//! Initialize a result to [`None`] before a loop:
 //!
 //! ```
 //! enum Kingdom { Plant(u32, &'static str), Animal(u32, &'static str) }
@@ -136,19 +136,17 @@
 //!     None => println!("there are no animals :("),
 //! }
 //! ```
+//!
+//! [`Option`]: enum.Option.html
+//! [`Some`]: enum.Option.html#variant.Some
+//! [`None`]: enum.Option.html#variant.None
+//! [`Box<T>`]: ../../std/boxed/struct.Box.html
+//! [`i32`]: ../../std/primitive.i32.html
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use self::Option::*;
-
-use clone::Clone;
-use default::Default;
-use iter::ExactSizeIterator;
-use iter::{Iterator, DoubleEndedIterator, FromIterator, IntoIterator};
-use mem;
-use ops::FnOnce;
-use result::Result::{Ok, Err};
-use result::Result;
+use iter::{FromIterator, FusedIterator, TrustedLen};
+use {mem, ops};
 
 // Note that this is not a lang item per se, but it has a hidden dependency on
 // `Iterator`, which is one. The compiler assumes that the `next` method of
@@ -164,7 +162,7 @@ pub enum Option<T> {
     None,
     /// Some value `T`
     #[stable(feature = "rust1", since = "1.0.0")]
-    Some(#[stable(feature = "rust1", since = "1.0.0")] T)
+    Some(#[stable(feature = "rust1", since = "1.0.0")] T),
 }
 
 /////////////////////////////////////////////////////////////////////////////
@@ -176,7 +174,7 @@ impl<T> Option<T> {
     // Querying the contained values
     /////////////////////////////////////////////////////////////////////////
 
-    /// Returns `true` if the option is a `Some` value
+    /// Returns `true` if the option is a [`Some`] value.
     ///
     /// # Examples
     ///
@@ -187,6 +185,8 @@ impl<T> Option<T> {
     /// let x: Option<u32> = None;
     /// assert_eq!(x.is_some(), false);
     /// ```
+    ///
+    /// [`Some`]: #variant.Some
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn is_some(&self) -> bool {
@@ -196,7 +196,7 @@ impl<T> Option<T> {
         }
     }
 
-    /// Returns `true` if the option is a `None` value
+    /// Returns `true` if the option is a [`None`] value.
     ///
     /// # Examples
     ///
@@ -207,6 +207,8 @@ impl<T> Option<T> {
     /// let x: Option<u32> = None;
     /// assert_eq!(x.is_none(), true);
     /// ```
+    ///
+    /// [`None`]: #variant.None
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn is_none(&self) -> bool {
@@ -217,14 +219,18 @@ impl<T> Option<T> {
     // Adapter for working with references
     /////////////////////////////////////////////////////////////////////////
 
-    /// Converts from `Option<T>` to `Option<&T>`
+    /// Converts from `Option<T>` to `Option<&T>`.
     ///
     /// # Examples
     ///
-    /// Convert an `Option<String>` into an `Option<usize>`, preserving the original.
-    /// The `map` method takes the `self` argument by value, consuming the original,
+    /// Convert an `Option<`[`String`]`>` into an `Option<`[`usize`]`>`, preserving the original.
+    /// The [`map`] method takes the `self` argument by value, consuming the original,
     /// so this technique uses `as_ref` to first take an `Option` to a reference
     /// to the value inside the original.
+    ///
+    /// [`map`]: enum.Option.html#method.map
+    /// [`String`]: ../../std/string/struct.String.html
+    /// [`usize`]: ../../std/primitive.usize.html
     ///
     /// ```
     /// let num_as_str: Option<String> = Some("10".to_string());
@@ -242,7 +248,7 @@ impl<T> Option<T> {
         }
     }
 
-    /// Converts from `Option<T>` to `Option<&mut T>`
+    /// Converts from `Option<T>` to `Option<&mut T>`.
     ///
     /// # Examples
     ///
@@ -267,12 +273,15 @@ impl<T> Option<T> {
     // Getting to contained values
     /////////////////////////////////////////////////////////////////////////
 
-    /// Unwraps an option, yielding the content of a `Some`.
+    /// Unwraps an option, yielding the content of a [`Some`].
     ///
     /// # Panics
     ///
-    /// Panics if the value is a `None` with a custom panic message provided by
+    /// Panics if the value is a [`None`] with a custom panic message provided by
     /// `msg`.
+    ///
+    /// [`Some`]: #variant.Some
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -294,17 +303,18 @@ impl<T> Option<T> {
         }
     }
 
-    /// Moves the value `v` out of the `Option<T>` if it is `Some(v)`.
+    /// Moves the value `v` out of the `Option<T>` if it is [`Some(v)`].
+    ///
+    /// In general, because this function may panic, its use is discouraged.
+    /// Instead, prefer to use pattern matching and handle the [`None`]
+    /// case explicitly.
     ///
     /// # Panics
     ///
-    /// Panics if the self value equals `None`.
+    /// Panics if the self value equals [`None`].
     ///
-    /// # Safety note
-    ///
-    /// In general, because this function may panic, its use is discouraged.
-    /// Instead, prefer to use pattern matching and handle the `None`
-    /// case explicitly.
+    /// [`Some(v)`]: #variant.Some
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -327,6 +337,12 @@ impl<T> Option<T> {
     }
 
     /// Returns the contained value or a default.
+    ///
+    /// Arguments passed to `unwrap_or` are eagerly evaluated; if you are passing
+    /// the result of a function call, it is recommended to use [`unwrap_or_else`],
+    /// which is lazily evaluated.
+    ///
+    /// [`unwrap_or_else`]: #method.unwrap_or_else
     ///
     /// # Examples
     ///
@@ -365,11 +381,14 @@ impl<T> Option<T> {
     // Transforming contained values
     /////////////////////////////////////////////////////////////////////////
 
-    /// Maps an `Option<T>` to `Option<U>` by applying a function to a contained value
+    /// Maps an `Option<T>` to `Option<U>` by applying a function to a contained value.
     ///
     /// # Examples
     ///
-    /// Convert an `Option<String>` into an `Option<usize>`, consuming the original:
+    /// Convert an `Option<`[`String`]`>` into an `Option<`[`usize`]`>`, consuming the original:
+    ///
+    /// [`String`]: ../../std/string/struct.String.html
+    /// [`usize`]: ../../std/primitive.usize.html
     ///
     /// ```
     /// let maybe_some_string = Some(String::from("Hello, World!"));
@@ -388,7 +407,9 @@ impl<T> Option<T> {
     }
 
     /// Applies a function to the contained value (if any),
-    /// or returns a `default` (if not).
+    /// or returns a [`default`][] (if not).
+    ///
+    /// [`default`]: ../default/trait.Default.html#tymethod.default
     ///
     /// # Examples
     ///
@@ -409,7 +430,9 @@ impl<T> Option<T> {
     }
 
     /// Applies a function to the contained value (if any),
-    /// or computes a `default` (if not).
+    /// or computes a [`default`][] (if not).
+    ///
+    /// [`default`]: ../default/trait.Default.html#tymethod.default
     ///
     /// # Examples
     ///
@@ -431,8 +454,19 @@ impl<T> Option<T> {
         }
     }
 
-    /// Transforms the `Option<T>` into a `Result<T, E>`, mapping `Some(v)` to
-    /// `Ok(v)` and `None` to `Err(err)`.
+    /// Transforms the `Option<T>` into a [`Result<T, E>`], mapping [`Some(v)`] to
+    /// [`Ok(v)`] and [`None`] to [`Err(err)`].
+    ///
+    /// Arguments passed to `ok_or` are eagerly evaluated; if you are passing the
+    /// result of a function call, it is recommended to use [`ok_or_else`], which is
+    /// lazily evaluated.
+    ///
+    /// [`Result<T, E>`]: ../../std/result/enum.Result.html
+    /// [`Ok(v)`]: ../../std/result/enum.Result.html#variant.Ok
+    /// [`Err(err)`]: ../../std/result/enum.Result.html#variant.Err
+    /// [`None`]: #variant.None
+    /// [`Some(v)`]: #variant.Some
+    /// [`ok_or_else`]: #method.ok_or_else
     ///
     /// # Examples
     ///
@@ -452,8 +486,14 @@ impl<T> Option<T> {
         }
     }
 
-    /// Transforms the `Option<T>` into a `Result<T, E>`, mapping `Some(v)` to
-    /// `Ok(v)` and `None` to `Err(err())`.
+    /// Transforms the `Option<T>` into a [`Result<T, E>`], mapping [`Some(v)`] to
+    /// [`Ok(v)`] and [`None`] to [`Err(err())`].
+    ///
+    /// [`Result<T, E>`]: ../../std/result/enum.Result.html
+    /// [`Ok(v)`]: ../../std/result/enum.Result.html#variant.Ok
+    /// [`Err(err())`]: ../../std/result/enum.Result.html#variant.Err
+    /// [`None`]: #variant.None
+    /// [`Some(v)`]: #variant.Some
     ///
     /// # Examples
     ///
@@ -519,7 +559,9 @@ impl<T> Option<T> {
     // Boolean operations on the values, eager and lazy
     /////////////////////////////////////////////////////////////////////////
 
-    /// Returns `None` if the option is `None`, otherwise returns `optb`.
+    /// Returns [`None`] if the option is [`None`], otherwise returns `optb`.
+    ///
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -549,10 +591,12 @@ impl<T> Option<T> {
         }
     }
 
-    /// Returns `None` if the option is `None`, otherwise calls `f` with the
+    /// Returns [`None`] if the option is [`None`], otherwise calls `f` with the
     /// wrapped value and returns the result.
     ///
     /// Some languages call this operation flatmap.
+    ///
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -574,7 +618,48 @@ impl<T> Option<T> {
         }
     }
 
+    /// Returns `None` if the option is `None`, otherwise calls `predicate`
+    /// with the wrapped value and returns:
+    ///
+    /// - `Some(t)` if `predicate` returns `true` (where `t` is the wrapped
+    ///   value), and
+    /// - `None` if `predicate` returns `false`.
+    ///
+    /// This function works similar to `Iterator::filter()`. You can imagine
+    /// the `Option<T>` being an iterator over one or zero elements. `filter()`
+    /// lets you decide which elements to keep.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// #![feature(option_filter)]
+    ///
+    /// fn is_even(n: &i32) -> bool {
+    ///     n % 2 == 0
+    /// }
+    ///
+    /// assert_eq!(None.filter(is_even), None);
+    /// assert_eq!(Some(3).filter(is_even), None);
+    /// assert_eq!(Some(4).filter(is_even), Some(4));
+    /// ```
+    #[inline]
+    #[unstable(feature = "option_filter", issue = "45860")]
+    pub fn filter<P: FnOnce(&T) -> bool>(self, predicate: P) -> Self {
+        if let Some(x) = self {
+            if predicate(&x) {
+                return Some(x)
+            }
+        }
+        None
+    }
+
     /// Returns the option if it contains a value, otherwise returns `optb`.
+    ///
+    /// Arguments passed to `or` are eagerly evaluated; if you are passing the
+    /// result of a function call, it is recommended to use [`or_else`], which is
+    /// lazily evaluated.
+    ///
+    /// [`or_else`]: #method.or_else
     ///
     /// # Examples
     ///
@@ -627,10 +712,82 @@ impl<T> Option<T> {
     }
 
     /////////////////////////////////////////////////////////////////////////
+    // Entry-like operations to insert if None and return a reference
+    /////////////////////////////////////////////////////////////////////////
+
+    /// Inserts `v` into the option if it is [`None`], then
+    /// returns a mutable reference to the contained value.
+    ///
+    /// [`None`]: #variant.None
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut x = None;
+    ///
+    /// {
+    ///     let y: &mut u32 = x.get_or_insert(5);
+    ///     assert_eq!(y, &5);
+    ///
+    ///     *y = 7;
+    /// }
+    ///
+    /// assert_eq!(x, Some(7));
+    /// ```
+    #[inline]
+    #[stable(feature = "option_entry", since = "1.20.0")]
+    pub fn get_or_insert(&mut self, v: T) -> &mut T {
+        match *self {
+            None => *self = Some(v),
+            _ => (),
+        }
+
+        match *self {
+            Some(ref mut v) => v,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Inserts a value computed from `f` into the option if it is [`None`], then
+    /// returns a mutable reference to the contained value.
+    ///
+    /// [`None`]: #variant.None
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let mut x = None;
+    ///
+    /// {
+    ///     let y: &mut u32 = x.get_or_insert_with(|| 5);
+    ///     assert_eq!(y, &5);
+    ///
+    ///     *y = 7;
+    /// }
+    ///
+    /// assert_eq!(x, Some(7));
+    /// ```
+    #[inline]
+    #[stable(feature = "option_entry", since = "1.20.0")]
+    pub fn get_or_insert_with<F: FnOnce() -> T>(&mut self, f: F) -> &mut T {
+        match *self {
+            None => *self = Some(f()),
+            _ => (),
+        }
+
+        match *self {
+            Some(ref mut v) => v,
+            _ => unreachable!(),
+        }
+    }
+
+    /////////////////////////////////////////////////////////////////////////
     // Misc
     /////////////////////////////////////////////////////////////////////////
 
-    /// Takes the value out of the option, leaving a `None` in its place.
+    /// Takes the value out of the option, leaving a [`None`] in its place.
+    ///
+    /// [`None`]: #variant.None
     ///
     /// # Examples
     ///
@@ -653,7 +810,37 @@ impl<T> Option<T> {
 impl<'a, T: Clone> Option<&'a T> {
     /// Maps an `Option<&T>` to an `Option<T>` by cloning the contents of the
     /// option.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let x = 12;
+    /// let opt_x = Some(&x);
+    /// assert_eq!(opt_x, Some(&12));
+    /// let cloned = opt_x.cloned();
+    /// assert_eq!(cloned, Some(12));
+    /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    pub fn cloned(self) -> Option<T> {
+        self.map(|t| t.clone())
+    }
+}
+
+impl<'a, T: Clone> Option<&'a mut T> {
+    /// Maps an `Option<&mut T>` to an `Option<T>` by cloning the contents of the
+    /// option.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(option_ref_mut_cloned)]
+    /// let mut x = 12;
+    /// let opt_x = Some(&mut x);
+    /// assert_eq!(opt_x, Some(&mut 12));
+    /// let cloned = opt_x.cloned();
+    /// assert_eq!(cloned, Some(12));
+    /// ```
+    #[unstable(feature = "option_ref_mut_cloned", issue = "43738")]
     pub fn cloned(self) -> Option<T> {
         self.map(|t| t.clone())
     }
@@ -662,16 +849,16 @@ impl<'a, T: Clone> Option<&'a T> {
 impl<T: Default> Option<T> {
     /// Returns the contained value or a default
     ///
-    /// Consumes the `self` argument then, if `Some`, returns the contained
-    /// value, otherwise if `None`, returns the default value for that
+    /// Consumes the `self` argument then, if [`Some`], returns the contained
+    /// value, otherwise if [`None`], returns the default value for that
     /// type.
     ///
     /// # Examples
     ///
     /// Convert a string to an integer, turning poorly-formed strings
-    /// into 0 (the default value for integers). `parse` converts
-    /// a string to any other type that implements `FromStr`, returning
-    /// `None` on error.
+    /// into 0 (the default value for integers). [`parse`] converts
+    /// a string to any other type that implements [`FromStr`], returning
+    /// [`None`] on error.
     ///
     /// ```
     /// let good_year_from_input = "1909";
@@ -682,6 +869,11 @@ impl<T: Default> Option<T> {
     /// assert_eq!(1909, good_year);
     /// assert_eq!(0, bad_year);
     /// ```
+    ///
+    /// [`Some`]: #variant.Some
+    /// [`None`]: #variant.None
+    /// [`parse`]: ../../std/primitive.str.html#method.parse
+    /// [`FromStr`]: ../../std/str/trait.FromStr.html
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn unwrap_or_default(self) -> T {
@@ -706,6 +898,9 @@ fn expect_failed(msg: &str) -> ! {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> Default for Option<T> {
+    /// Returns [`None`].
+    ///
+    /// [`None`]: #variant.None
     #[inline]
     fn default() -> Option<T> { None }
 }
@@ -749,8 +944,15 @@ impl<'a, T> IntoIterator for &'a mut Option<T> {
     type Item = &'a mut T;
     type IntoIter = IterMut<'a, T>;
 
-    fn into_iter(mut self) -> IterMut<'a, T> {
+    fn into_iter(self) -> IterMut<'a, T> {
         self.iter_mut()
+    }
+}
+
+#[stable(since = "1.12.0", feature = "option_from")]
+impl<T> From<T> for Option<T> {
+    fn from(val: T) -> Option<T> {
+        Some(val)
     }
 }
 
@@ -788,8 +990,18 @@ impl<A> DoubleEndedIterator for Item<A> {
 }
 
 impl<A> ExactSizeIterator for Item<A> {}
+impl<A> FusedIterator for Item<A> {}
+unsafe impl<A> TrustedLen for Item<A> {}
 
-/// An iterator over a reference of the contained item in an Option.
+/// An iterator over a reference to the [`Some`] variant of an [`Option`].
+///
+/// The iterator yields one value if the [`Option`] is a [`Some`], otherwise none.
+///
+/// This `struct` is created by the [`Option::iter`] function.
+///
+/// [`Option`]: enum.Option.html
+/// [`Some`]: enum.Option.html#variant.Some
+/// [`Option::iter`]: enum.Option.html#method.iter
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug)]
 pub struct Iter<'a, A: 'a> { inner: Item<&'a A> }
@@ -813,6 +1025,12 @@ impl<'a, A> DoubleEndedIterator for Iter<'a, A> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, A> ExactSizeIterator for Iter<'a, A> {}
 
+#[unstable(feature = "fused", issue = "35602")]
+impl<'a, A> FusedIterator for Iter<'a, A> {}
+
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, A> TrustedLen for Iter<'a, A> {}
+
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, A> Clone for Iter<'a, A> {
     fn clone(&self) -> Iter<'a, A> {
@@ -820,7 +1038,15 @@ impl<'a, A> Clone for Iter<'a, A> {
     }
 }
 
-/// An iterator over a mutable reference of the contained item in an Option.
+/// An iterator over a mutable reference to the [`Some`] variant of an [`Option`].
+///
+/// The iterator yields one value if the [`Option`] is a [`Some`], otherwise none.
+///
+/// This `struct` is created by the [`Option::iter_mut`] function.
+///
+/// [`Option`]: enum.Option.html
+/// [`Some`]: enum.Option.html#variant.Some
+/// [`Option::iter_mut`]: enum.Option.html#method.iter_mut
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Debug)]
 pub struct IterMut<'a, A: 'a> { inner: Item<&'a mut A> }
@@ -844,7 +1070,20 @@ impl<'a, A> DoubleEndedIterator for IterMut<'a, A> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, A> ExactSizeIterator for IterMut<'a, A> {}
 
-/// An iterator over the item contained inside an Option.
+#[unstable(feature = "fused", issue = "35602")]
+impl<'a, A> FusedIterator for IterMut<'a, A> {}
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<'a, A> TrustedLen for IterMut<'a, A> {}
+
+/// An iterator over the value in [`Some`] variant of an [`Option`].
+///
+/// The iterator yields one value if the [`Option`] is a [`Some`], otherwise none.
+///
+/// This `struct` is created by the [`Option::into_iter`] function.
+///
+/// [`Option`]: enum.Option.html
+/// [`Some`]: enum.Option.html#variant.Some
+/// [`Option::into_iter`]: enum.Option.html#method.into_iter
 #[derive(Clone, Debug)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IntoIter<A> { inner: Item<A> }
@@ -868,14 +1107,20 @@ impl<A> DoubleEndedIterator for IntoIter<A> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A> ExactSizeIterator for IntoIter<A> {}
 
+#[unstable(feature = "fused", issue = "35602")]
+impl<A> FusedIterator for IntoIter<A> {}
+
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<A> TrustedLen for IntoIter<A> {}
+
 /////////////////////////////////////////////////////////////////////////////
 // FromIterator
 /////////////////////////////////////////////////////////////////////////////
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
-    /// Takes each element in the `Iterator`: if it is `None`, no further
-    /// elements are taken, and the `None` is returned. Should no `None` occur, a
+    /// Takes each element in the [`Iterator`]: if it is [`None`], no further
+    /// elements are taken, and the [`None`] is returned. Should no [`None`] occur, a
     /// container with the values of each `Option` is returned.
     ///
     /// Here is an example which increments every integer in a vector,
@@ -884,13 +1129,16 @@ impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
     /// ```
     /// use std::u16;
     ///
-    /// let v = vec!(1, 2);
+    /// let v = vec![1, 2];
     /// let res: Option<Vec<u16>> = v.iter().map(|&x: &u16|
     ///     if x == u16::MAX { None }
     ///     else { Some(x + 1) }
     /// ).collect();
-    /// assert!(res == Some(vec!(2, 3)));
+    /// assert!(res == Some(vec![2, 3]));
     /// ```
+    ///
+    /// [`Iterator`]: ../iter/trait.Iterator.html
+    /// [`None`]: enum.Option.html#variant.None
     #[inline]
     fn from_iter<I: IntoIterator<Item=Option<A>>>(iter: I) -> Option<V> {
         // FIXME(#11084): This could be replaced with Iterator::scan when this
@@ -925,5 +1173,31 @@ impl<A, V: FromIterator<A>> FromIterator<Option<A>> for Option<V> {
         } else {
             Some(v)
         }
+    }
+}
+
+/// The error type that results from applying the try operator (`?`) to a `None` value. If you wish
+/// to allow `x?` (where `x` is an `Option<T>`) to be converted into your error type, you can
+/// implement `impl From<NoneError>` for `YourErrorType`. In that case, `x?` within a function that
+/// returns `Result<_, YourErrorType>` will translate a `None` value into an `Err` result.
+#[unstable(feature = "try_trait", issue = "42327")]
+#[derive(Clone, Copy, PartialEq, PartialOrd, Eq, Ord, Debug, Hash)]
+pub struct NoneError;
+
+#[unstable(feature = "try_trait", issue = "42327")]
+impl<T> ops::Try for Option<T> {
+    type Ok = T;
+    type Error = NoneError;
+
+    fn into_result(self) -> Result<T, NoneError> {
+        self.ok_or(NoneError)
+    }
+
+    fn from_ok(v: T) -> Self {
+        Some(v)
+    }
+
+    fn from_error(_: NoneError) -> Self {
+        None
     }
 }

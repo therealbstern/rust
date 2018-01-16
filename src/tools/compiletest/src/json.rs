@@ -12,7 +12,7 @@ use errors::{Error, ErrorKind};
 use rustc_serialize::json;
 use std::str::FromStr;
 use std::path::Path;
-use runtest::{ProcRes};
+use runtest::ProcRes;
 
 // These structs are a subset of the ones found in
 // `syntax::json`.
@@ -36,6 +36,7 @@ struct DiagnosticSpan {
     column_end: usize,
     is_primary: bool,
     label: Option<String>,
+    suggested_replacement: Option<String>,
     expansion: Option<Box<DiagnosticSpanMacroExpansion>>,
 }
 
@@ -56,16 +57,35 @@ struct DiagnosticCode {
     explanation: Option<String>,
 }
 
+pub fn extract_rendered(output: &str, proc_res: &ProcRes) -> String {
+    output.lines()
+        .filter_map(|line| if line.starts_with('{') {
+            match json::decode::<Diagnostic>(line) {
+                Ok(diagnostic) => diagnostic.rendered,
+                Err(error) => {
+                    proc_res.fatal(Some(&format!("failed to decode compiler output as json: \
+                                                `{}`\noutput: {}\nline: {}",
+                                                error,
+                                                line,
+                                                output)));
+                }
+            }
+        } else {
+            None
+        })
+        .collect()
+}
+
 pub fn parse_output(file_name: &str, output: &str, proc_res: &ProcRes) -> Vec<Error> {
     output.lines()
-          .flat_map(|line| parse_line(file_name, line, output, proc_res))
-          .collect()
+        .flat_map(|line| parse_line(file_name, line, output, proc_res))
+        .collect()
 }
 
 fn parse_line(file_name: &str, line: &str, output: &str, proc_res: &ProcRes) -> Vec<Error> {
     // The compiler sometimes intermingles non-JSON stuff into the
     // output.  This hack just skips over such lines. Yuck.
-    if line.chars().next() == Some('{') {
+    if line.starts_with('{') {
         match json::decode::<Diagnostic>(line) {
             Ok(diagnostic) => {
                 let mut expected_errors = vec![];
@@ -73,9 +93,11 @@ fn parse_line(file_name: &str, line: &str, output: &str, proc_res: &ProcRes) -> 
                 expected_errors
             }
             Err(error) => {
-                proc_res.fatal(Some(&format!(
-                    "failed to decode compiler output as json: `{}`\noutput: {}\nline: {}",
-                    error, line, output)));
+                proc_res.fatal(Some(&format!("failed to decode compiler output as json: \
+                                              `{}`\noutput: {}\nline: {}",
+                                             error,
+                                             line,
+                                             output)));
             }
         }
     } else {
@@ -87,16 +109,16 @@ fn push_expected_errors(expected_errors: &mut Vec<Error>,
                         diagnostic: &Diagnostic,
                         default_spans: &[&DiagnosticSpan],
                         file_name: &str) {
-    let spans_in_this_file: Vec<_> =
-        diagnostic.spans.iter()
-                        .filter(|span| Path::new(&span.file_name) == Path::new(&file_name))
-                        .collect();
+    let spans_in_this_file: Vec<_> = diagnostic.spans
+        .iter()
+        .filter(|span| Path::new(&span.file_name) == Path::new(&file_name))
+        .collect();
 
-    let primary_spans: Vec<_> =
-        spans_in_this_file.iter()
-                          .cloned()
-                          .filter(|span| span.is_primary)
-                          .collect();
+    let primary_spans: Vec<_> = spans_in_this_file.iter()
+        .cloned()
+        .filter(|span| span.is_primary)
+        .take(1) // sometimes we have more than one showing up in the json; pick first
+        .collect();
     let primary_spans = if primary_spans.is_empty() {
         // subdiagnostics often don't have a span of their own;
         // inherit the span from the parent in that case
@@ -144,59 +166,50 @@ fn push_expected_errors(expected_errors: &mut Vec<Error>,
         for span in primary_spans {
             let msg = with_code(span, first_line);
             let kind = ErrorKind::from_str(&diagnostic.level).ok();
-            expected_errors.push(
-                Error {
-                    line_num: span.line_start,
-                    kind: kind,
-                    msg: msg,
-                }
-            );
+            expected_errors.push(Error {
+                line_num: span.line_start,
+                kind,
+                msg,
+            });
         }
     }
     for next_line in message_lines {
         for span in primary_spans {
-            expected_errors.push(
-                Error {
-                    line_num: span.line_start,
-                    kind: None,
-                    msg: with_code(span, next_line),
-                }
-            );
+            expected_errors.push(Error {
+                line_num: span.line_start,
+                kind: None,
+                msg: with_code(span, next_line),
+            });
         }
     }
 
     // If the message has a suggestion, register that.
-    if let Some(ref rendered) = diagnostic.rendered {
-        let start_line = primary_spans.iter().map(|s| s.line_start).min().expect("\
-            every suggestion should have at least one span");
-        for (index, line) in rendered.lines().enumerate() {
-            expected_errors.push(
-                Error {
-                    line_num: start_line + index,
+    for span in primary_spans {
+        if let Some(ref suggested_replacement) = span.suggested_replacement {
+            for (index, line) in suggested_replacement.lines().enumerate() {
+                expected_errors.push(Error {
+                    line_num: span.line_start + index,
                     kind: Some(ErrorKind::Suggestion),
-                    msg: line.to_string()
-                }
-            );
+                    msg: line.to_string(),
+                });
+            }
         }
     }
 
     // Add notes for the backtrace
     for span in primary_spans {
         for frame in &span.expansion {
-            push_backtrace(expected_errors,
-                           frame,
-                           file_name);
+            push_backtrace(expected_errors, frame, file_name);
         }
     }
 
     // Add notes for any labels that appear in the message.
     for span in spans_in_this_file.iter()
-                                  .filter(|span| span.label.is_some())
-    {
+        .filter(|span| span.label.is_some()) {
         expected_errors.push(Error {
             line_num: span.line_start,
             kind: Some(ErrorKind::Note),
-            msg: span.label.clone().unwrap()
+            msg: span.label.clone().unwrap(),
         });
     }
 
@@ -210,13 +223,11 @@ fn push_backtrace(expected_errors: &mut Vec<Error>,
                   expansion: &DiagnosticSpanMacroExpansion,
                   file_name: &str) {
     if Path::new(&expansion.span.file_name) == Path::new(&file_name) {
-        expected_errors.push(
-            Error {
-                line_num: expansion.span.line_start,
-                kind: Some(ErrorKind::Note),
-                msg: format!("in this expansion of {}", expansion.macro_decl_name),
-            }
-        );
+        expected_errors.push(Error {
+            line_num: expansion.span.line_start,
+            kind: Some(ErrorKind::Note),
+            msg: format!("in this expansion of {}", expansion.macro_decl_name),
+        });
     }
 
     for previous_expansion in &expansion.span.expansion {

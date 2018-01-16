@@ -10,33 +10,38 @@
 
 //! Support for serializing the dep-graph and reloading it.
 
-#![crate_name = "rustc_incremental"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
       html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![cfg_attr(not(stage0), deny(warnings))]
+#![deny(warnings)]
 
-#![feature(rustc_private)]
-#![feature(staged_api)]
+#![feature(conservative_impl_trait)]
+#![feature(fs_read_write)]
+#![feature(i128_type)]
+#![feature(inclusive_range_syntax)]
+#![feature(specialization)]
 
 extern crate graphviz;
-extern crate rbml;
 #[macro_use] extern crate rustc;
 extern crate rustc_data_structures;
 extern crate serialize as rustc_serialize;
+extern crate rand;
 
 #[macro_use] extern crate log;
-#[macro_use] extern crate syntax;
+extern crate syntax;
 extern crate syntax_pos;
 
 mod assert_dep_graph;
-mod calculate_svh;
 mod persist;
 
 pub use assert_dep_graph::assert_dep_graph;
-pub use calculate_svh::SvhCalculate;
+pub use persist::dep_graph_tcx_init;
 pub use persist::load_dep_graph;
+pub use persist::load_query_result_cache;
 pub use persist::save_dep_graph;
+pub use persist::save_trans_partition;
+pub use persist::save_work_products;
+pub use persist::in_incr_comp_dir;
+pub use persist::prepare_session_directory;
+pub use persist::finalize_session_directory;
+pub use persist::delete_workproduct_files;

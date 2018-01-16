@@ -8,6 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+#![feature(libc)]
+
 extern crate libc;
 
 fn main() {
@@ -15,6 +17,5 @@ fn main() {
     let _: &mut Fn() = unsafe {
         &mut *(ptr as *mut Fn())
         //~^ ERROR `(): std::ops::Fn<()>` is not satisfied
-        //~| ERROR `(): std::ops::FnOnce<()>` is not satisfied
     };
 }

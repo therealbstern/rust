@@ -27,7 +27,7 @@ mod tests;
 ///
 /// Clients are expected to provide implementations of this trait; you
 /// can see some examples in the `test` module.
-pub trait UnifyKey : Copy + Clone + Debug + PartialEq {
+pub trait UnifyKey: Copy + Clone + Debug + PartialEq {
     type Value: Clone + PartialEq + Debug;
 
     fn index(&self) -> u32;
@@ -87,8 +87,8 @@ impl<K: UnifyKey> VarValue<K> {
     fn new(parent: K, value: K::Value, rank: u32) -> VarValue<K> {
         VarValue {
             parent: parent, // this is a root
-            value: value,
-            rank: rank,
+            value,
+            rank,
         }
     }
 
@@ -98,8 +98,8 @@ impl<K: UnifyKey> VarValue<K> {
 
     fn root(self, rank: u32, value: K::Value) -> VarValue<K> {
         VarValue {
-            rank: rank,
-            value: value,
+            rank,
+            value,
             ..self
         }
     }
@@ -115,18 +115,14 @@ impl<K: UnifyKey> VarValue<K> {
     }
 
     fn if_not_self(&self, key: K, self_key: K) -> Option<K> {
-        if key == self_key {
-            None
-        } else {
-            Some(key)
-        }
+        if key == self_key { None } else { Some(key) }
     }
 }
 
-// We can't use V:LatticeValue, much as I would like to,
-// because frequently the pattern is that V=Option<U> for some
-// other type parameter U, and we have no way to say
-// Option<U>:LatticeValue.
+/// We can't use V:LatticeValue, much as I would like to,
+/// because frequently the pattern is that V=Option<U> for some
+/// other type parameter U, and we have no way to say
+/// Option<U>:LatticeValue.
 
 impl<K: UnifyKey> UnificationTable<K> {
     pub fn new() -> UnificationTable<K> {
@@ -236,7 +232,8 @@ impl<K: UnifyKey> UnificationTable<K> {
                      new_rank: u32,
                      old_root: VarValue<K>,
                      new_root: VarValue<K>,
-                     new_value: K::Value) -> K {
+                     new_value: K::Value)
+                     -> K {
         let old_root_key = old_root.key();
         let new_root_key = new_root.key();
         self.set(old_root_key, old_root.redirect(new_root_key));
@@ -252,7 +249,7 @@ impl<K: UnifyKey> sv::SnapshotVecDelegate for Delegate<K> {
     fn reverse(_: &mut Vec<VarValue<K>>, _: ()) {}
 }
 
-// # Base union-find algorithm, where we are just making sets
+/// # Base union-find algorithm, where we are just making sets
 
 impl<'tcx, K: UnifyKey> UnificationTable<K>
     where K::Value: Combine
@@ -278,16 +275,17 @@ impl<'tcx, K: UnifyKey> UnificationTable<K>
         self.get(id).value
     }
 
-    pub fn unioned(&mut self, a_id: K, b_id: K) -> bool {
+    #[cfg(test)]
+    fn unioned(&mut self, a_id: K, b_id: K) -> bool {
         self.find(a_id) == self.find(b_id)
     }
 }
 
-// # Non-subtyping unification
-//
-// Code to handle keys which carry a value, like ints,
-// floats---anything that doesn't have a subtyping relationship we
-// need to worry about.
+/// # Non-subtyping unification
+///
+/// Code to handle keys which carry a value, like ints,
+/// floats---anything that doesn't have a subtyping relationship we
+/// need to worry about.
 
 impl<'tcx, K, V> UnificationTable<K>
     where K: UnifyKey<Value = Option<V>>,
@@ -306,7 +304,8 @@ impl<'tcx, K, V> UnificationTable<K>
         let combined = {
             match (&node_a.value, &node_b.value) {
                 (&None, &None) => None,
-                (&Some(ref v), &None) | (&None, &Some(ref v)) => Some(v.clone()),
+                (&Some(ref v), &None) |
+                (&None, &Some(ref v)) => Some(v.clone()),
                 (&Some(ref v1), &Some(ref v2)) => {
                     if *v1 != *v2 {
                         return Err((v1.clone(), v2.clone()));
@@ -346,7 +345,7 @@ impl<'tcx, K, V> UnificationTable<K>
     }
 
     pub fn probe(&mut self, a_id: K) -> Option<V> {
-        self.get(a_id).value.clone()
+        self.get(a_id).value
     }
 
     pub fn unsolved_variables(&mut self) -> Vec<K> {

@@ -8,9 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use ty::subst;
+use middle::const_val::{ConstVal, ConstAggregate};
+use ty::subst::Substs;
 use ty::{self, Ty, TypeFlags, TypeFoldable};
 
+#[derive(Debug)]
 pub struct FlagComputation {
     pub flags: TypeFlags,
 
@@ -60,7 +62,9 @@ impl FlagComputation {
             &ty::TyInt(_) |
             &ty::TyFloat(_) |
             &ty::TyUint(_) |
-            &ty::TyStr => {
+            &ty::TyNever |
+            &ty::TyStr |
+            &ty::TyForeign(..) => {
             }
 
             // You might think that we could just return TyError for
@@ -76,18 +80,24 @@ impl FlagComputation {
 
             &ty::TyParam(ref p) => {
                 self.add_flags(TypeFlags::HAS_LOCAL_NAMES);
-                if p.space == subst::SelfSpace {
+                if p.is_self() {
                     self.add_flags(TypeFlags::HAS_SELF);
                 } else {
                     self.add_flags(TypeFlags::HAS_PARAMS);
                 }
             }
 
+            &ty::TyGenerator(_, ref substs, ref interior) => {
+                self.add_flags(TypeFlags::HAS_TY_CLOSURE);
+                self.add_flags(TypeFlags::HAS_LOCAL_NAMES);
+                self.add_substs(&substs.substs);
+                self.add_ty(interior.witness);
+            }
+
             &ty::TyClosure(_, ref substs) => {
                 self.add_flags(TypeFlags::HAS_TY_CLOSURE);
                 self.add_flags(TypeFlags::HAS_LOCAL_NAMES);
-                self.add_substs(&substs.func_substs);
-                self.add_tys(&substs.upvar_tys);
+                self.add_substs(&substs.substs);
             }
 
             &ty::TyInfer(infer) => {
@@ -101,29 +111,48 @@ impl FlagComputation {
                 }
             }
 
-            &ty::TyEnum(_, substs) | &ty::TyStruct(_, substs) => {
+            &ty::TyAdt(_, substs) => {
                 self.add_substs(substs);
             }
 
             &ty::TyProjection(ref data) => {
+                // currently we can't normalize projections that
+                // include bound regions, so track those separately.
+                if !data.has_escaping_regions() {
+                    self.add_flags(TypeFlags::HAS_NORMALIZABLE_PROJECTION);
+                }
                 self.add_flags(TypeFlags::HAS_PROJECTION);
                 self.add_projection_ty(data);
             }
 
-            &ty::TyTrait(box ty::TraitTy { ref principal, ref bounds }) => {
-                let mut computation = FlagComputation::new();
-                computation.add_substs(principal.0.substs);
-                for projection_bound in &bounds.projection_bounds {
-                    let mut proj_computation = FlagComputation::new();
-                    proj_computation.add_projection_predicate(&projection_bound.0);
-                    self.add_bound_computation(&proj_computation);
-                }
-                self.add_bound_computation(&computation);
-
-                self.add_bounds(bounds);
+            &ty::TyAnon(_, substs) => {
+                self.add_flags(TypeFlags::HAS_PROJECTION);
+                self.add_substs(substs);
             }
 
-            &ty::TyBox(tt) | &ty::TyArray(tt, _) | &ty::TySlice(tt) => {
+            &ty::TyDynamic(ref obj, r) => {
+                let mut computation = FlagComputation::new();
+                for predicate in obj.skip_binder().iter() {
+                    match *predicate {
+                        ty::ExistentialPredicate::Trait(tr) => computation.add_substs(tr.substs),
+                        ty::ExistentialPredicate::Projection(p) => {
+                            let mut proj_computation = FlagComputation::new();
+                            proj_computation.add_existential_projection(&p);
+                            self.add_bound_computation(&proj_computation);
+                        }
+                        ty::ExistentialPredicate::AutoTrait(_) => {}
+                    }
+                }
+                self.add_bound_computation(&computation);
+                self.add_region(r);
+            }
+
+            &ty::TyArray(tt, len) => {
+                self.add_ty(tt);
+                self.add_const(len);
+            }
+
+            &ty::TySlice(tt) => {
                 self.add_ty(tt)
             }
 
@@ -132,27 +161,29 @@ impl FlagComputation {
             }
 
             &ty::TyRef(r, ref m) => {
-                self.add_region(*r);
+                self.add_region(r);
                 self.add_ty(m.ty);
             }
 
-            &ty::TyTuple(ref ts) => {
+            &ty::TyTuple(ref ts, is_default) => {
+                if is_default {
+                    self.add_flags(TypeFlags::KEEP_IN_LOCAL_TCX);
+                }
                 self.add_tys(&ts[..]);
             }
 
-            &ty::TyFnDef(_, substs, ref f) => {
+            &ty::TyFnDef(_, substs) => {
                 self.add_substs(substs);
-                self.add_fn_sig(&f.sig);
             }
 
-            &ty::TyFnPtr(ref f) => {
-                self.add_fn_sig(&f.sig);
+            &ty::TyFnPtr(f) => {
+                self.add_fn_sig(f);
             }
         }
     }
 
     fn add_ty(&mut self, ty: Ty) {
-        self.add_flags(ty.flags.get());
+        self.add_flags(ty.flags);
         self.add_depth(ty.region_depth);
     }
 
@@ -162,57 +193,72 @@ impl FlagComputation {
         }
     }
 
-    fn add_fn_sig(&mut self, fn_sig: &ty::PolyFnSig) {
+    fn add_fn_sig(&mut self, fn_sig: ty::PolyFnSig) {
         let mut computation = FlagComputation::new();
 
-        computation.add_tys(&fn_sig.0.inputs);
-
-        if let ty::FnConverging(output) = fn_sig.0.output {
-            computation.add_ty(output);
-        }
+        computation.add_tys(fn_sig.skip_binder().inputs());
+        computation.add_ty(fn_sig.skip_binder().output());
 
         self.add_bound_computation(&computation);
     }
 
     fn add_region(&mut self, r: ty::Region) {
-        match r {
-            ty::ReVar(..) => {
-                self.add_flags(TypeFlags::HAS_RE_INFER);
-                self.add_flags(TypeFlags::KEEP_IN_LOCAL_TCX);
-            }
-            ty::ReSkolemized(..) => {
-                self.add_flags(TypeFlags::HAS_RE_INFER);
-                self.add_flags(TypeFlags::HAS_RE_SKOL);
-                self.add_flags(TypeFlags::KEEP_IN_LOCAL_TCX);
-            }
-            ty::ReLateBound(debruijn, _) => { self.add_depth(debruijn.depth); }
-            ty::ReEarlyBound(..) => { self.add_flags(TypeFlags::HAS_RE_EARLY_BOUND); }
-            ty::ReStatic | ty::ReErased => {}
-            _ => { self.add_flags(TypeFlags::HAS_FREE_REGIONS); }
-        }
-
-        if !r.is_global() {
-            self.add_flags(TypeFlags::HAS_LOCAL_NAMES);
+        self.add_flags(r.type_flags());
+        if let ty::ReLateBound(debruijn, _) = *r {
+            self.add_depth(debruijn.depth);
         }
     }
 
-    fn add_projection_predicate(&mut self, projection_predicate: &ty::ProjectionPredicate) {
-        self.add_projection_ty(&projection_predicate.projection_ty);
-        self.add_ty(projection_predicate.ty);
+    fn add_const(&mut self, constant: &ty::Const) {
+        self.add_ty(constant.ty);
+        match constant.val {
+            ConstVal::Integral(_) |
+            ConstVal::Float(_) |
+            ConstVal::Str(_) |
+            ConstVal::ByteStr(_) |
+            ConstVal::Bool(_) |
+            ConstVal::Char(_) |
+            ConstVal::Variant(_) => {}
+            ConstVal::Function(_, substs) => {
+                self.add_substs(substs);
+            }
+            ConstVal::Aggregate(ConstAggregate::Struct(fields)) => {
+                for &(_, v) in fields {
+                    self.add_const(v);
+                }
+            }
+            ConstVal::Aggregate(ConstAggregate::Tuple(fields)) |
+            ConstVal::Aggregate(ConstAggregate::Array(fields)) => {
+                for v in fields {
+                    self.add_const(v);
+                }
+            }
+            ConstVal::Aggregate(ConstAggregate::Repeat(v, _)) => {
+                self.add_const(v);
+            }
+            ConstVal::Unevaluated(_, substs) => {
+                self.add_flags(TypeFlags::HAS_PROJECTION);
+                self.add_substs(substs);
+            }
+        }
+    }
+
+    fn add_existential_projection(&mut self, projection: &ty::ExistentialProjection) {
+        self.add_substs(projection.substs);
+        self.add_ty(projection.ty);
     }
 
     fn add_projection_ty(&mut self, projection_ty: &ty::ProjectionTy) {
-        self.add_substs(projection_ty.trait_ref.substs);
+        self.add_substs(projection_ty.substs);
     }
 
-    fn add_substs(&mut self, substs: &subst::Substs) {
-        self.add_tys(substs.types.as_slice());
-        for &r in &substs.regions {
+    fn add_substs(&mut self, substs: &Substs) {
+        for ty in substs.types() {
+            self.add_ty(ty);
+        }
+
+        for r in substs.regions() {
             self.add_region(r);
         }
-    }
-
-    fn add_bounds(&mut self, bounds: &ty::ExistentialBounds) {
-        self.add_region(bounds.region_bound);
     }
 }

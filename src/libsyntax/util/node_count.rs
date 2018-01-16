@@ -26,12 +26,12 @@ impl NodeCounter {
     }
 }
 
-impl Visitor for NodeCounter {
+impl<'ast> Visitor<'ast> for NodeCounter {
     fn visit_ident(&mut self, span: Span, ident: Ident) {
         self.count += 1;
         walk_ident(self, span, ident);
     }
-    fn visit_mod(&mut self, m: &Mod, _s: Span, _n: NodeId) {
+    fn visit_mod(&mut self, m: &Mod, _s: Span, _a: &[Attribute], _n: NodeId) {
         self.count += 1;
         walk_mod(self, m)
     }
@@ -71,13 +71,17 @@ impl Visitor for NodeCounter {
         self.count += 1;
         walk_ty(self, t)
     }
+    fn visit_generic_param(&mut self, param: &GenericParam) {
+        self.count += 1;
+        walk_generic_param(self, param)
+    }
     fn visit_generics(&mut self, g: &Generics) {
         self.count += 1;
         walk_generics(self, g)
     }
-    fn visit_fn(&mut self, fk: FnKind, fd: &FnDecl, b: &Block, s: Span, _: NodeId) {
+    fn visit_fn(&mut self, fk: FnKind, fd: &FnDecl, s: Span, _: NodeId) {
         self.count += 1;
-        walk_fn(self, fk, fd, b, s)
+        walk_fn(self, fk, fd, s)
     }
     fn visit_trait_item(&mut self, ti: &TraitItem) {
         self.count += 1;
@@ -121,10 +125,6 @@ impl Visitor for NodeCounter {
         self.count += 1;
         walk_lifetime(self, lifetime)
     }
-    fn visit_lifetime_def(&mut self, lifetime: &LifetimeDef) {
-        self.count += 1;
-        walk_lifetime_def(self, lifetime)
-    }
     fn visit_mac(&mut self, _mac: &Mac) {
         self.count += 1;
         walk_mac(self, _mac)
@@ -133,9 +133,9 @@ impl Visitor for NodeCounter {
         self.count += 1;
         walk_path(self, path)
     }
-    fn visit_path_list_item(&mut self, prefix: &Path, item: &PathListItem) {
+    fn visit_use_tree(&mut self, use_tree: &UseTree, id: NodeId, _nested: bool) {
         self.count += 1;
-        walk_path_list_item(self, prefix, item)
+        walk_use_tree(self, use_tree, id)
     }
     fn visit_path_parameters(&mut self, path_span: Span, path_parameters: &PathParameters) {
         self.count += 1;
@@ -148,9 +148,4 @@ impl Visitor for NodeCounter {
     fn visit_attribute(&mut self, _attr: &Attribute) {
         self.count += 1;
     }
-    fn visit_macro_def(&mut self, macro_def: &MacroDef) {
-        self.count += 1;
-        walk_macro_def(self, macro_def)
-    }
-
 }

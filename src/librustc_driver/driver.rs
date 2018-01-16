@@ -8,70 +8,76 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc::hir;
-use rustc::hir::{map as hir_map, FreevarMap, TraitMap};
-use rustc::hir::def::DefMap;
+use rustc::dep_graph::DepGraph;
+use rustc::hir::{self, map as hir_map};
 use rustc::hir::lowering::lower_crate;
+use rustc::ich::Fingerprint;
+use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_mir as mir;
-use rustc::mir::mir_map::MirMap;
-use rustc::session::{Session, CompileResult, compile_result_from_err_count};
+use rustc::session::{Session, CompileResult, CrateDisambiguator};
+use rustc::session::CompileIncomplete;
 use rustc::session::config::{self, Input, OutputFilenames, OutputType};
 use rustc::session::search_paths::PathKind;
 use rustc::lint;
-use rustc::middle::{self, dependency_format, stability, reachable};
+use rustc::middle::{self, stability, reachable, resolve_lifetime};
+use rustc::middle::cstore::CrateStore;
 use rustc::middle::privacy::AccessLevels;
-use rustc::ty::{self, TyCtxt};
-use rustc::util::common::time;
-use rustc::util::nodemap::NodeSet;
-use rustc_back::sha2::{Sha256, Digest};
+use rustc::ty::{self, TyCtxt, Resolutions, AllArenas};
+use rustc::traits;
+use rustc::util::common::{ErrorReported, time};
+use rustc_allocator as allocator;
 use rustc_borrowck as borrowck;
 use rustc_incremental;
 use rustc_resolve::{MakeGlobMap, Resolver};
-use rustc_metadata::macro_import;
-use rustc_metadata::creader::read_local_crates;
-use rustc_metadata::cstore::CStore;
-use rustc_trans::back::{link, write};
+use rustc_metadata::creader::CrateLoader;
+use rustc_metadata::cstore::{self, CStore};
 use rustc_trans as trans;
+use rustc_trans_utils::trans_crate::TransCrate;
 use rustc_typeck as typeck;
 use rustc_privacy;
 use rustc_plugin::registry::Registry;
 use rustc_plugin as plugin;
-use rustc_passes::{ast_validation, no_asm, loops, consts, rvalues, static_recursion};
-use rustc_const_eval::check_match;
+use rustc_passes::{self, ast_validation, loops, consts, static_recursion, hir_stats};
+use rustc_const_eval::{self, check_match};
 use super::Compilation;
+use ::DefaultTransCrate;
 
 use serialize::json;
 
-use std::collections::HashMap;
+use std::any::Any;
 use std::env;
 use std::ffi::{OsString, OsStr};
 use std::fs;
 use std::io::{self, Write};
+use std::iter;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::mpsc;
 use syntax::{ast, diagnostics, visit};
-use syntax::attr::{self, AttrMetaMethods};
+use syntax::attr;
+use syntax::ext::base::ExtCtxt;
 use syntax::fold::Folder;
-use syntax::parse::{self, PResult, token};
+use syntax::parse::{self, PResult};
 use syntax::util::node_count::NodeCounter;
+use syntax_pos::FileName;
 use syntax;
 use syntax_ext;
 
-#[derive(Clone)]
-pub struct Resolutions {
-    pub def_map: DefMap,
-    pub freevars: FreevarMap,
-    pub trait_map: TraitMap,
-    pub maybe_unused_trait_imports: NodeSet,
-}
+use derive_registrar;
+use pretty::ReplaceBodyWithLoop;
+
+use profile;
 
 pub fn compile_input(sess: &Session,
                      cstore: &CStore,
-                     cfg: ast::CrateConfig,
+                     input_path: &Option<PathBuf>,
                      input: &Input,
                      outdir: &Option<PathBuf>,
                      output: &Option<PathBuf>,
                      addl_plugins: Option<Vec<String>>,
                      control: &CompileController) -> CompileResult {
+    use rustc::session::config::CrateType;
+
     macro_rules! controller_entry_point {
         ($point: ident, $tsess: expr, $make_state: expr, $phase_result: expr) => {{
             let state = &mut $make_state;
@@ -81,24 +87,46 @@ pub fn compile_input(sess: &Session,
             }
 
             if control.$point.stop == Compilation::Stop {
-                return compile_result_from_err_count($tsess.err_count());
+                // FIXME: shouldn't this return Err(CompileIncomplete::Stopped)
+                // if there are no errors?
+                return $tsess.compile_status();
             }
         }}
+    }
+
+    if cfg!(not(feature="llvm")) {
+        for cty in sess.opts.crate_types.iter() {
+            match *cty {
+                CrateType::CrateTypeRlib | CrateType::CrateTypeDylib |
+                CrateType::CrateTypeExecutable => {},
+                _ => {
+                    sess.parse_sess.span_diagnostic.warn(
+                        &format!("LLVM unsupported, so output type {} is not supported", cty)
+                    );
+                },
+            }
+        }
+
+        sess.abort_if_errors();
+    }
+
+    if sess.profile_queries() {
+        profile::begin();
     }
 
     // We need nested scopes here, because the intermediate results can keep
     // large chunks of memory alive and we want to free them as soon as
     // possible to keep the peak memory usage low
-    let (outputs, trans) = {
-        let krate = match phase_1_parse_input(sess, cfg, input) {
+    let (outputs, trans, dep_graph) = {
+        let krate = match phase_1_parse_input(control, sess, input) {
             Ok(krate) => krate,
             Err(mut parse_error) => {
                 parse_error.emit();
-                return Err(1);
+                return Err(CompileIncomplete::Errored(ErrorReported));
             }
         };
 
-        let krate = {
+        let (krate, registry) = {
             let mut compile_state = CompileState::state_after_parse(input,
                                                                     sess,
                                                                     outdir,
@@ -110,17 +138,38 @@ pub fn compile_input(sess: &Session,
                                     compile_state,
                                     Ok(()));
 
-            compile_state.krate.unwrap()
+            (compile_state.krate.unwrap(), compile_state.registry)
         };
 
         let outputs = build_output_filenames(input, outdir, output, &krate.attrs, sess);
-        let id = link::find_crate_name(Some(sess), &krate.attrs, input);
+
+        // Ensure the source file isn't accidentally overwritten during compilation.
+        match *input_path {
+            Some(ref input_path) => {
+                if outputs.contains_path(input_path) && sess.opts.will_create_output_file() {
+                    sess.err(&format!(
+                        "the input file \"{}\" would be overwritten by the generated executable",
+                        input_path.display()));
+                    return Err(CompileIncomplete::Stopped);
+                }
+            },
+            None => {}
+        }
+
+        let crate_name =
+            ::rustc_trans_utils::link::find_crate_name(Some(sess), &krate.attrs, input);
         let ExpansionResult { expanded_crate, defs, analysis, resolutions, mut hir_forest } = {
             phase_2_configure_and_expand(
-                sess, &cstore, krate, &id, addl_plugins, control.make_glob_map,
+                sess,
+                &cstore,
+                krate,
+                registry,
+                &crate_name,
+                addl_plugins,
+                control.make_glob_map,
                 |expanded_crate| {
                     let mut state = CompileState::state_after_expand(
-                        input, sess, outdir, output, &cstore, expanded_crate, &id,
+                        input, sess, outdir, output, &cstore, expanded_crate, &crate_name,
                     );
                     controller_entry_point!(after_expand, sess, state, Ok(()));
                     Ok(())
@@ -128,17 +177,21 @@ pub fn compile_input(sess: &Session,
             )?
         };
 
-        write_out_deps(sess, &outputs, &id);
+        write_out_deps(sess, &outputs, &crate_name);
+        if sess.opts.output_types.contains_key(&OutputType::DepInfo) &&
+            sess.opts.output_types.keys().count() == 1 {
+            return Ok(())
+        }
 
-        let arenas = ty::CtxtArenas::new();
+        let arenas = AllArenas::new();
 
         // Construct the HIR map
         let hir_map = time(sess.time_passes(),
                            "indexing hir",
-                           || hir_map::map_crate(&mut hir_forest, defs));
+                           || hir_map::map_crate(sess, cstore, &mut hir_forest, &defs));
 
         {
-            let _ignore = hir_map.dep_graph.in_ignore();
+            hir_map.dep_graph.assert_ignored();
             controller_entry_point!(after_hir_lowering,
                                     sess,
                                     CompileState::state_after_hir_lowering(input,
@@ -152,72 +205,79 @@ pub fn compile_input(sess: &Session,
                                                                   &resolutions,
                                                                   &expanded_crate,
                                                                   &hir_map.krate(),
-                                                                  &id),
+                                                                  &outputs,
+                                                                  &crate_name),
                                     Ok(()));
         }
 
-        time(sess.time_passes(), "attribute checking", || {
-            hir::check_attr::check_crate(sess, &expanded_crate);
-        });
-
-        let opt_crate = if keep_ast(sess) {
+        let opt_crate = if control.keep_ast {
             Some(&expanded_crate)
         } else {
             drop(expanded_crate);
             None
         };
 
-        phase_3_run_analysis_passes(sess,
+        phase_3_run_analysis_passes(control,
+                                    sess,
+                                    cstore,
                                     hir_map,
                                     analysis,
                                     resolutions,
                                     &arenas,
-                                    &id,
-                                    |tcx, mir_map, analysis, result| {
+                                    &crate_name,
+                                    &outputs,
+                                    |tcx, analysis, rx, result| {
             {
                 // Eventually, we will want to track plugins.
-                let _ignore = tcx.dep_graph.in_ignore();
-
-                let mut state = CompileState::state_after_analysis(input,
-                                                                   sess,
-                                                                   outdir,
-                                                                   output,
-                                                                   opt_crate,
-                                                                   tcx.map.krate(),
-                                                                   &analysis,
-                                                                   mir_map.as_ref(),
-                                                                   tcx,
-                                                                   &id);
-                (control.after_analysis.callback)(&mut state);
+                tcx.dep_graph.with_ignore(|| {
+                    let mut state = CompileState::state_after_analysis(input,
+                                                                       sess,
+                                                                       outdir,
+                                                                       output,
+                                                                       opt_crate,
+                                                                       tcx.hir.krate(),
+                                                                       &analysis,
+                                                                       tcx,
+                                                                       &crate_name);
+                    (control.after_analysis.callback)(&mut state);
+                });
 
                 if control.after_analysis.stop == Compilation::Stop {
-                    return result.and_then(|_| Err(0usize));
+                    return result.and_then(|_| Err(CompileIncomplete::Stopped));
                 }
             }
 
             result?;
 
-            if log_enabled!(::log::INFO) {
+            if log_enabled!(::log::Level::Info) {
                 println!("Pre-trans");
                 tcx.print_debug_stats();
             }
-            let trans = phase_4_translate_to_llvm(tcx,
-                                                  mir_map.unwrap(),
-                                                  analysis);
 
-            if log_enabled!(::log::INFO) {
+            let trans = phase_4_translate_to_llvm::<DefaultTransCrate>(tcx, rx);
+
+            if log_enabled!(::log::Level::Info) {
                 println!("Post-trans");
                 tcx.print_debug_stats();
             }
 
-            // Discard interned strings as they are no longer required.
-            token::get_ident_interner().clear();
+            if tcx.sess.opts.output_types.contains_key(&OutputType::Mir) {
+                if let Err(e) = mir::transform::dump_mir::emit_mir(tcx, &outputs) {
+                    sess.err(&format!("could not emit MIR: {}", e));
+                    sess.abort_if_errors();
+                }
+            }
 
-            Ok((outputs, trans))
+            Ok((outputs.clone(), trans, tcx.dep_graph.clone()))
         })??
     };
 
-    let phase5_result = phase_5_run_llvm_passes(sess, &trans, &outputs);
+    if sess.opts.debugging_opts.print_type_sizes {
+        sess.code_stats.borrow().print_type_sizes();
+    }
+
+    let (phase5_result, trans) =
+        phase_5_run_llvm_passes::<DefaultTransCrate>(sess, &dep_graph, trans);
 
     controller_entry_point!(after_llvm,
                             sess,
@@ -225,43 +285,43 @@ pub fn compile_input(sess: &Session,
                             phase5_result);
     phase5_result?;
 
-    write::cleanup_llvm(&trans);
+    // Run the linker on any artifacts that resulted from the LLVM run.
+    // This should produce either a finished executable or library.
+    time(sess.time_passes(), "linking", || {
+        DefaultTransCrate::link_binary(sess, &trans, &outputs)
+    });
 
-    phase_6_link_output(sess, &trans, &outputs);
+    // Now that we won't touch anything in the incremental compilation directory
+    // any more, we can finalize it (which involves renaming it)
+    #[cfg(feature="llvm")]
+    rustc_incremental::finalize_session_directory(sess, trans.link.crate_hash);
 
-    controller_entry_point!(compilation_done,
-                            sess,
-                            CompileState::state_when_compilation_done(input, sess, outdir, output),
-                            Ok(()));
+    if sess.opts.debugging_opts.perf_stats {
+        sess.print_perf_stats();
+    }
+
+    controller_entry_point!(
+        compilation_done,
+        sess,
+        CompileState::state_when_compilation_done(input, sess, outdir, output),
+        Ok(())
+    );
 
     Ok(())
 }
 
-fn keep_mtwt_tables(sess: &Session) -> bool {
-    sess.opts.debugging_opts.keep_mtwt_tables
+fn keep_hygiene_data(sess: &Session) -> bool {
+    sess.opts.debugging_opts.keep_hygiene_data
 }
 
-fn keep_ast(sess: &Session) -> bool {
-    sess.opts.debugging_opts.keep_ast ||
-    sess.opts.debugging_opts.save_analysis ||
-    sess.opts.debugging_opts.save_analysis_csv
-}
-
-/// The name used for source code that doesn't originate in a file
-/// (e.g. source from stdin or a string)
-pub fn anon_src() -> String {
-    "<anon>".to_string()
-}
-
-pub fn source_name(input: &Input) -> String {
+pub fn source_name(input: &Input) -> FileName {
     match *input {
-        // FIXME (#9639): This needs to handle non-utf8 paths
-        Input::File(ref ifile) => ifile.to_str().unwrap().to_string(),
+        Input::File(ref ifile) => ifile.clone().into(),
         Input::Str { ref name, .. } => name.clone(),
     }
 }
 
-/// CompileController is used to customise compilation, it allows compilation to
+/// CompileController is used to customize compilation, it allows compilation to
 /// be stopped and/or to call arbitrary code at various points in compilation.
 /// It also allows for various flags to be set to influence what information gets
 /// collected during compilation.
@@ -269,7 +329,7 @@ pub fn source_name(input: &Input) -> String {
 /// This is a somewhat higher level controller than a Session - the Session
 /// controls what happens in each phase, whereas the CompileController controls
 /// whether a phase is run at all and whether other code (from outside the
-/// the compiler) is run between phases.
+/// compiler) is run between phases.
 ///
 /// Note that if compilation is set to stop and a callback is provided for a
 /// given entry point, the callback is called before compilation is stopped.
@@ -283,7 +343,20 @@ pub struct CompileController<'a> {
     pub after_llvm: PhaseController<'a>,
     pub compilation_done: PhaseController<'a>,
 
+    // FIXME we probably want to group the below options together and offer a
+    // better API, rather than this ad-hoc approach.
     pub make_glob_map: MakeGlobMap,
+    // Whether the compiler should keep the ast beyond parsing.
+    pub keep_ast: bool,
+    // -Zcontinue-parse-after-error
+    pub continue_parse_after_error: bool,
+
+    /// Allows overriding default rustc query providers,
+    /// after `default_provide` has installed them.
+    pub provide: Box<Fn(&mut ty::maps::Providers) + 'a>,
+    /// Same as `provide`, but only for non-local crates,
+    /// applied after `default_provide_extern`.
+    pub provide_extern: Box<Fn(&mut ty::maps::Providers) + 'a>,
 }
 
 impl<'a> CompileController<'a> {
@@ -296,6 +369,10 @@ impl<'a> CompileController<'a> {
             after_llvm: PhaseController::basic(),
             compilation_done: PhaseController::basic(),
             make_glob_map: MakeGlobMap::No,
+            keep_ast: false,
+            continue_parse_after_error: false,
+            provide: box |_| {},
+            provide_extern: box |_| {},
         }
     }
 }
@@ -321,60 +398,62 @@ impl<'a> PhaseController<'a> {
 /// State that is passed to a callback. What state is available depends on when
 /// during compilation the callback is made. See the various constructor methods
 /// (`state_*`) in the impl to see which data is provided for any given entry point.
-pub struct CompileState<'a, 'b, 'ast: 'a, 'tcx: 'b> where 'ast: 'tcx {
+pub struct CompileState<'a, 'tcx: 'a> {
     pub input: &'a Input,
-    pub session: &'ast Session,
+    pub session: &'tcx Session,
     pub krate: Option<ast::Crate>,
-    pub cstore: Option<&'a CStore>,
+    pub registry: Option<Registry<'a>>,
+    pub cstore: Option<&'tcx CStore>,
     pub crate_name: Option<&'a str>,
     pub output_filenames: Option<&'a OutputFilenames>,
     pub out_dir: Option<&'a Path>,
     pub out_file: Option<&'a Path>,
-    pub arenas: Option<&'ast ty::CtxtArenas<'ast>>,
+    pub arenas: Option<&'tcx AllArenas<'tcx>>,
     pub expanded_crate: Option<&'a ast::Crate>,
     pub hir_crate: Option<&'a hir::Crate>,
-    pub ast_map: Option<&'a hir_map::Map<'ast>>,
+    pub hir_map: Option<&'a hir_map::Map<'tcx>>,
     pub resolutions: Option<&'a Resolutions>,
-    pub mir_map: Option<&'b MirMap<'tcx>>,
-    pub analysis: Option<&'a ty::CrateAnalysis<'a>>,
-    pub tcx: Option<TyCtxt<'b, 'tcx, 'tcx>>,
+    pub analysis: Option<&'a ty::CrateAnalysis>,
+    pub tcx: Option<TyCtxt<'a, 'tcx, 'tcx>>,
     pub trans: Option<&'a trans::CrateTranslation>,
 }
 
-impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
+impl<'a, 'tcx> CompileState<'a, 'tcx> {
     fn empty(input: &'a Input,
-             session: &'ast Session,
+             session: &'tcx Session,
              out_dir: &'a Option<PathBuf>)
-             -> CompileState<'a, 'b, 'ast, 'tcx> {
+             -> Self {
         CompileState {
-            input: input,
-            session: session,
+            input,
+            session,
             out_dir: out_dir.as_ref().map(|s| &**s),
             out_file: None,
             arenas: None,
             krate: None,
+            registry: None,
             cstore: None,
             crate_name: None,
             output_filenames: None,
             expanded_crate: None,
             hir_crate: None,
-            ast_map: None,
+            hir_map: None,
             resolutions: None,
             analysis: None,
-            mir_map: None,
             tcx: None,
             trans: None,
         }
     }
 
     fn state_after_parse(input: &'a Input,
-                         session: &'ast Session,
+                         session: &'tcx Session,
                          out_dir: &'a Option<PathBuf>,
                          out_file: &'a Option<PathBuf>,
                          krate: ast::Crate,
-                         cstore: &'a CStore)
-                         -> CompileState<'a, 'b, 'ast, 'tcx> {
+                         cstore: &'tcx CStore)
+                         -> Self {
         CompileState {
+            // Initialize the registry before moving `krate`
+            registry: Some(Registry::new(&session, krate.span)),
             krate: Some(krate),
             cstore: Some(cstore),
             out_file: out_file.as_ref().map(|s| &**s),
@@ -383,13 +462,13 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
     }
 
     fn state_after_expand(input: &'a Input,
-                          session: &'ast Session,
+                          session: &'tcx Session,
                           out_dir: &'a Option<PathBuf>,
                           out_file: &'a Option<PathBuf>,
-                          cstore: &'a CStore,
+                          cstore: &'tcx CStore,
                           expanded_crate: &'a ast::Crate,
                           crate_name: &'a str)
-                          -> CompileState<'a, 'b, 'ast, 'tcx> {
+                          -> Self {
         CompileState {
             crate_name: Some(crate_name),
             cstore: Some(cstore),
@@ -400,46 +479,46 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
     }
 
     fn state_after_hir_lowering(input: &'a Input,
-                                session: &'ast Session,
+                                session: &'tcx Session,
                                 out_dir: &'a Option<PathBuf>,
                                 out_file: &'a Option<PathBuf>,
-                                arenas: &'ast ty::CtxtArenas<'ast>,
-                                cstore: &'a CStore,
-                                hir_map: &'a hir_map::Map<'ast>,
+                                arenas: &'tcx AllArenas<'tcx>,
+                                cstore: &'tcx CStore,
+                                hir_map: &'a hir_map::Map<'tcx>,
                                 analysis: &'a ty::CrateAnalysis,
                                 resolutions: &'a Resolutions,
                                 krate: &'a ast::Crate,
                                 hir_crate: &'a hir::Crate,
+                                output_filenames: &'a OutputFilenames,
                                 crate_name: &'a str)
-                                -> CompileState<'a, 'b, 'ast, 'tcx> {
+                                -> Self {
         CompileState {
             crate_name: Some(crate_name),
             arenas: Some(arenas),
             cstore: Some(cstore),
-            ast_map: Some(hir_map),
+            hir_map: Some(hir_map),
             analysis: Some(analysis),
             resolutions: Some(resolutions),
             expanded_crate: Some(krate),
             hir_crate: Some(hir_crate),
+            output_filenames: Some(output_filenames),
             out_file: out_file.as_ref().map(|s| &**s),
             ..CompileState::empty(input, session, out_dir)
         }
     }
 
     fn state_after_analysis(input: &'a Input,
-                            session: &'ast Session,
+                            session: &'tcx Session,
                             out_dir: &'a Option<PathBuf>,
                             out_file: &'a Option<PathBuf>,
                             krate: Option<&'a ast::Crate>,
                             hir_crate: &'a hir::Crate,
-                            analysis: &'a ty::CrateAnalysis<'a>,
-                            mir_map: Option<&'b MirMap<'tcx>>,
-                            tcx: TyCtxt<'b, 'tcx, 'tcx>,
+                            analysis: &'a ty::CrateAnalysis,
+                            tcx: TyCtxt<'a, 'tcx, 'tcx>,
                             crate_name: &'a str)
-                            -> CompileState<'a, 'b, 'ast, 'tcx> {
+                            -> Self {
         CompileState {
             analysis: Some(analysis),
-            mir_map: mir_map,
             tcx: Some(tcx),
             expanded_crate: krate,
             hir_crate: Some(hir_crate),
@@ -449,13 +528,12 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
         }
     }
 
-
     fn state_after_llvm(input: &'a Input,
-                        session: &'ast Session,
+                        session: &'tcx Session,
                         out_dir: &'a Option<PathBuf>,
                         out_file: &'a Option<PathBuf>,
                         trans: &'a trans::CrateTranslation)
-                        -> CompileState<'a, 'b, 'ast, 'tcx> {
+                        -> Self {
         CompileState {
             trans: Some(trans),
             out_file: out_file.as_ref().map(|s| &**s),
@@ -464,10 +542,10 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
     }
 
     fn state_when_compilation_done(input: &'a Input,
-                                    session: &'ast Session,
-                                    out_dir: &'a Option<PathBuf>,
-                                    out_file: &'a Option<PathBuf>)
-                                    -> CompileState<'a, 'b, 'ast, 'tcx> {
+                                   session: &'tcx Session,
+                                   out_dir: &'a Option<PathBuf>,
+                                   out_file: &'a Option<PathBuf>)
+                                   -> Self {
         CompileState {
             out_file: out_file.as_ref().map(|s| &**s),
             ..CompileState::empty(input, session, out_dir)
@@ -475,27 +553,24 @@ impl<'a, 'b, 'ast, 'tcx> CompileState<'a, 'b, 'ast, 'tcx> {
     }
 }
 
-pub fn phase_1_parse_input<'a>(sess: &'a Session,
-                               cfg: ast::CrateConfig,
+pub fn phase_1_parse_input<'a>(control: &CompileController,
+                               sess: &'a Session,
                                input: &Input)
                                -> PResult<'a, ast::Crate> {
-    // These may be left in an incoherent state after a previous compile.
-    // `clear_tables` and `get_ident_interner().clear()` can be used to free
-    // memory, but they do not restore the initial state.
-    syntax::ext::mtwt::reset_tables();
-    token::reset_ident_interner();
-    let continue_after_error = sess.opts.continue_parse_after_error;
-    sess.diagnostic().set_continue_after_error(continue_after_error);
+    sess.diagnostic().set_continue_after_error(control.continue_parse_after_error);
+
+    if sess.profile_queries() {
+        profile::begin();
+    }
 
     let krate = time(sess.time_passes(), "parsing", || {
         match *input {
             Input::File(ref file) => {
-                parse::parse_crate_from_file(file, cfg.clone(), &sess.parse_sess)
+                parse::parse_crate_from_file(file, &sess.parse_sess)
             }
             Input::Str { ref input, ref name } => {
                 parse::parse_crate_from_source_str(name.clone(),
                                                    input.clone(),
-                                                   cfg.clone(),
                                                    &sess.parse_sess)
             }
         }
@@ -516,6 +591,10 @@ pub fn phase_1_parse_input<'a>(sess: &'a Session,
         syntax::show_span::run(sess.diagnostic(), s, &krate);
     }
 
+    if sess.opts.debugging_opts.hir_stats {
+        hir_stats::print_ast_stats(&krate, "PRE EXPANSION AST STATS");
+    }
+
     Ok(krate)
 }
 
@@ -528,10 +607,10 @@ fn count_nodes(krate: &ast::Crate) -> usize {
 // For continuing compilation after a parsed crate has been
 // modified
 
-pub struct ExpansionResult<'a> {
+pub struct ExpansionResult {
     pub expanded_crate: ast::Crate,
     pub defs: hir_map::Definitions,
-    pub analysis: ty::CrateAnalysis<'a>,
+    pub analysis: ty::CrateAnalysis,
     pub resolutions: Resolutions,
     pub hir_forest: hir_map::Forest,
 }
@@ -543,44 +622,47 @@ pub struct ExpansionResult<'a> {
 /// standard library and prelude, and name resolution.
 ///
 /// Returns `None` if we're aborting after handling -W help.
-pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
-                                           cstore: &CStore,
-                                           mut krate: ast::Crate,
-                                           crate_name: &'a str,
-                                           addl_plugins: Option<Vec<String>>,
-                                           make_glob_map: MakeGlobMap,
-                                           after_expand: F)
-                                           -> Result<ExpansionResult<'a>, usize>
+pub fn phase_2_configure_and_expand<F>(sess: &Session,
+                                       cstore: &CStore,
+                                       krate: ast::Crate,
+                                       registry: Option<Registry>,
+                                       crate_name: &str,
+                                       addl_plugins: Option<Vec<String>>,
+                                       make_glob_map: MakeGlobMap,
+                                       after_expand: F)
+                                       -> Result<ExpansionResult, CompileIncomplete>
     where F: FnOnce(&ast::Crate) -> CompileResult,
 {
     let time_passes = sess.time_passes();
 
-    // strip before anything else because crate metadata may use #[cfg_attr]
-    // and so macros can depend on configuration variables, such as
-    //
-    //   #[macro_use] #[cfg(foo)]
-    //   mod bar { macro_rules! baz!(() => {{}}) }
-    //
-    // baz! should not use this definition unless foo is enabled.
-
-    krate = time(time_passes, "configuration", || {
-        let (krate, features) =
-            syntax::config::strip_unconfigured_items(krate, &sess.parse_sess, sess.opts.test);
-        // these need to be set "early" so that expansion sees `quote` if enabled.
-        *sess.features.borrow_mut() = features;
-        krate
-    });
+    let (mut krate, features) = syntax::config::features(krate, &sess.parse_sess, sess.opts.test);
+    // these need to be set "early" so that expansion sees `quote` if enabled.
+    *sess.features.borrow_mut() = features;
 
     *sess.crate_types.borrow_mut() = collect_crate_types(sess, &krate.attrs);
-    sess.crate_disambiguator.set(token::intern(&compute_crate_disambiguator(sess)));
+
+    let disambiguator = compute_crate_disambiguator(sess);
+    *sess.crate_disambiguator.borrow_mut() = Some(disambiguator);
+    rustc_incremental::prepare_session_directory(
+        sess,
+        &crate_name,
+        disambiguator,
+    );
+
+    // If necessary, compute the dependency graph (in the background).
+    let future_dep_graph = if sess.opts.build_dep_graph() {
+        Some(rustc_incremental::load_dep_graph(sess, time_passes))
+    } else {
+        None
+    };
 
     time(time_passes, "recursion limit", || {
-        middle::recursion_limit::update_recursion_limit(sess, &krate);
+        middle::recursion_limit::update_limits(sess, &krate);
     });
 
     krate = time(time_passes, "crate injection", || {
         let alt_std_name = sess.opts.alt_std_name.clone();
-        syntax::std_inject::maybe_inject_crates_ref(&sess.parse_sess, krate, alt_std_name)
+        syntax::std_inject::maybe_inject_crates_ref(krate, alt_std_name)
     });
 
     let mut addl_plugins = Some(addl_plugins);
@@ -592,7 +674,7 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
                                    addl_plugins.take().unwrap())
     });
 
-    let mut registry = Registry::new(sess, &krate);
+    let mut registry = registry.unwrap_or(Registry::new(sess, krate.span));
 
     time(time_passes, "plugin registration", || {
         if sess.features.borrow().rustc_diagnostic_macros {
@@ -610,8 +692,9 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
         }
     });
 
+    let whitelisted_legacy_custom_derives = registry.take_whitelisted_custom_derives();
     let Registry { syntax_exts, early_lint_passes, late_lint_passes, lint_groups,
-                   llvm_passes, attributes, mir_passes, .. } = registry;
+                   llvm_passes, attributes, .. } = registry;
 
     sess.track_errors(|| {
         let mut ls = sess.lint_store.borrow_mut();
@@ -627,16 +710,31 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
         }
 
         *sess.plugin_llvm_passes.borrow_mut() = llvm_passes;
-        sess.mir_passes.borrow_mut().extend(mir_passes);
         *sess.plugin_attributes.borrow_mut() = attributes.clone();
     })?;
 
     // Lint plugins are registered; now we can process command line flags.
     if sess.opts.describe_lints {
         super::describe_lints(&sess.lint_store.borrow(), true);
-        return Err(0);
+        return Err(CompileIncomplete::Stopped);
     }
-    sess.track_errors(|| sess.lint_store.borrow_mut().process_command_line(sess))?;
+
+    // Currently, we ignore the name resolution data structures for the purposes of dependency
+    // tracking. Instead we will run name resolution and include its output in the hash of each
+    // item, much like we do for macro expansion. In other words, the hash reflects not just
+    // its contents but the results of name resolution on those contents. Hopefully we'll push
+    // this back at some point.
+    let mut crate_loader = CrateLoader::new(sess, &cstore, crate_name);
+    let resolver_arenas = Resolver::arenas();
+    let mut resolver = Resolver::new(sess,
+                                     cstore,
+                                     &krate,
+                                     crate_name,
+                                     make_glob_map,
+                                     &mut crate_loader,
+                                     &resolver_arenas);
+    resolver.whitelisted_legacy_custom_derives = whitelisted_legacy_custom_derives;
+    syntax_ext::register_builtins(&mut resolver, syntax_exts, sess.features.borrow().quote);
 
     krate = time(time_passes, "expansion", || {
         // Windows dlls do not have rpaths, so they don't know how to find their
@@ -662,42 +760,110 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
                     new_path.push(path);
                 }
             }
-            env::set_var("PATH", &env::join_paths(new_path).unwrap());
+            env::set_var("PATH",
+                &env::join_paths(new_path.iter()
+                                         .filter(|p| env::join_paths(iter::once(p)).is_ok()))
+                     .unwrap());
         }
         let features = sess.features.borrow();
         let cfg = syntax::ext::expand::ExpansionConfig {
-            crate_name: crate_name.to_string(),
             features: Some(&features),
             recursion_limit: sess.recursion_limit.get(),
             trace_mac: sess.opts.debugging_opts.trace_macros,
             should_test: sess.opts.test,
+            ..syntax::ext::expand::ExpansionConfig::default(crate_name.to_string())
         };
-        let mut loader = macro_import::MacroLoader::new(sess, &cstore, crate_name);
-        let mut ecx = syntax::ext::base::ExtCtxt::new(&sess.parse_sess,
-                                                      krate.config.clone(),
-                                                      cfg,
-                                                      &mut loader);
-        syntax_ext::register_builtins(&mut ecx.syntax_env);
-        let (ret, macro_names) = syntax::ext::expand::expand_crate(ecx,
-                                                                   syntax_exts,
-                                                                   krate);
+
+        let mut ecx = ExtCtxt::new(&sess.parse_sess, cfg, &mut resolver);
+        let err_count = ecx.parse_sess.span_diagnostic.err_count();
+
+        let krate = ecx.monotonic_expander().expand_crate(krate);
+
+        ecx.check_unused_macros();
+
+        let mut missing_fragment_specifiers: Vec<_> =
+            ecx.parse_sess.missing_fragment_specifiers.borrow().iter().cloned().collect();
+        missing_fragment_specifiers.sort();
+        for span in missing_fragment_specifiers {
+            let lint = lint::builtin::MISSING_FRAGMENT_SPECIFIER;
+            let msg = "missing fragment specifier";
+            sess.buffer_lint(lint, ast::CRATE_NODE_ID, span, msg);
+        }
+        if ecx.parse_sess.span_diagnostic.err_count() - ecx.resolve_err_count > err_count {
+            ecx.parse_sess.span_diagnostic.abort_if_errors();
+        }
         if cfg!(windows) {
             env::set_var("PATH", &old_path);
         }
-        *sess.available_macros.borrow_mut() = macro_names;
-        ret
+        krate
     });
 
     krate = time(time_passes, "maybe building test harness", || {
         syntax::test::modify_for_testing(&sess.parse_sess,
+                                         &mut resolver,
                                          sess.opts.test,
                                          krate,
                                          sess.diagnostic())
     });
 
+    // If we're actually rustdoc then there's no need to actually compile
+    // anything, so switch everything to just looping
+    if sess.opts.actually_rustdoc {
+        krate = ReplaceBodyWithLoop::new(sess).fold_crate(krate);
+    }
+
+    // If we're in rustdoc we're always compiling as an rlib, but that'll trip a
+    // bunch of checks in the `modify` function below. For now just skip this
+    // step entirely if we're rustdoc as it's not too useful anyway.
+    if !sess.opts.actually_rustdoc {
+        krate = time(time_passes, "maybe creating a macro crate", || {
+            let crate_types = sess.crate_types.borrow();
+            let num_crate_types = crate_types.len();
+            let is_proc_macro_crate = crate_types.contains(&config::CrateTypeProcMacro);
+            let is_test_crate = sess.opts.test;
+            syntax_ext::proc_macro_registrar::modify(&sess.parse_sess,
+                                                     &mut resolver,
+                                                     krate,
+                                                     is_proc_macro_crate,
+                                                     is_test_crate,
+                                                     num_crate_types,
+                                                     sess.diagnostic())
+        });
+    }
+
+    krate = time(time_passes, "creating allocators", || {
+        allocator::expand::modify(&sess.parse_sess,
+                                  &mut resolver,
+                                  krate,
+                                  sess.diagnostic())
+    });
+
+    after_expand(&krate)?;
+
+    if sess.opts.debugging_opts.input_stats {
+        println!("Post-expansion node count: {}", count_nodes(&krate));
+    }
+
+    if sess.opts.debugging_opts.hir_stats {
+        hir_stats::print_ast_stats(&krate, "POST EXPANSION AST STATS");
+    }
+
+    if sess.opts.debugging_opts.ast_json {
+        println!("{}", json::as_json(&krate));
+    }
+
     time(time_passes,
-         "checking for inline asm in case the target doesn't support it",
-         || no_asm::check_crate(sess, &krate));
+         "AST validation",
+         || ast_validation::check_crate(sess, &krate));
+
+    time(time_passes, "name resolution", || -> CompileResult {
+        resolver.resolve_crate(&krate);
+        Ok(())
+    })?;
+
+    if resolver.found_unresolved_macro {
+        sess.parse_sess.span_diagnostic.abort_if_errors();
+    }
 
     // Needs to go *after* expansion to be able to check the results of macro expansion.
     time(time_passes, "complete gated feature checking", || {
@@ -710,148 +876,105 @@ pub fn phase_2_configure_and_expand<'a, F>(sess: &Session,
         })
     })?;
 
-    if sess.opts.debugging_opts.input_stats {
-        println!("Post-expansion node count: {}", count_nodes(&krate));
-    }
+    // Lower ast -> hir.
+    // First, we need to collect the dep_graph.
+    let dep_graph = match future_dep_graph {
+        None => DepGraph::new_disabled(),
+        Some(future) => {
+            let prev_graph = time(time_passes, "blocked while dep-graph loading finishes", || {
+                future.open()
+                      .expect("Could not join with background dep_graph thread")
+                      .open(sess)
+            });
+            DepGraph::new(prev_graph)
+        }
+    };
+    let hir_forest = time(time_passes, "lowering ast -> hir", || {
+        let hir_crate = lower_crate(sess, cstore, &dep_graph, &krate, &mut resolver);
 
-    krate = assign_node_ids(sess, krate);
+        if sess.opts.debugging_opts.hir_stats {
+            hir_stats::print_hir_stats(&hir_crate);
+        }
 
-    let resolver_arenas = Resolver::arenas();
-    let mut resolver = Resolver::new(sess, make_glob_map, &resolver_arenas);
-
-    // Collect defintions for def ids.
-    time(sess.time_passes(), "collecting defs", || resolver.definitions.collect(&krate));
-
-    time(sess.time_passes(), "external crate/lib resolution", || {
-        let defs = &resolver.definitions;
-        read_local_crates(sess, &cstore, defs, &krate, crate_name, &sess.dep_graph)
+        hir_map::Forest::new(hir_crate, &dep_graph)
     });
 
-    time(sess.time_passes(),
+    time(time_passes,
          "early lint checks",
          || lint::check_ast_crate(sess, &krate));
 
-    time(sess.time_passes(),
-         "AST validation",
-         || ast_validation::check_crate(sess, &krate));
-
-    time(sess.time_passes(), "name resolution", || -> CompileResult {
-        // Currently, we ignore the name resolution data structures for the purposes of dependency
-        // tracking. Instead we will run name resolution and include its output in the hash of each
-        // item, much like we do for macro expansion. In other words, the hash reflects not just
-        // its contents but the results of name resolution on those contents. Hopefully we'll push
-        // this back at some point.
-        let _ignore = sess.dep_graph.in_ignore();
-        resolver.build_reduced_graph(&krate);
-        resolver.resolve_imports();
-
-        // Since import resolution will eventually happen in expansion,
-        // don't perform `after_expand` until after import resolution.
-        after_expand(&krate)?;
-
-        resolver.resolve_crate(&krate);
-        Ok(())
-    })?;
-
-    // Lower ast -> hir.
-    let hir_forest = time(sess.time_passes(), "lowering ast -> hir", || {
-        hir_map::Forest::new(lower_crate(sess, &krate, &mut resolver), &sess.dep_graph)
-    });
-
-    // Discard MTWT tables that aren't required past lowering to HIR.
-    if !keep_mtwt_tables(sess) {
-        syntax::ext::mtwt::clear_tables();
+    // Discard hygiene data, which isn't required after lowering to HIR.
+    if !keep_hygiene_data(sess) {
+        syntax::ext::hygiene::clear_markings();
     }
 
     Ok(ExpansionResult {
         expanded_crate: krate,
         defs: resolver.definitions,
         analysis: ty::CrateAnalysis {
-            export_map: resolver.export_map,
-            access_levels: AccessLevels::default(),
-            reachable: NodeSet(),
-            name: crate_name,
+            access_levels: Rc::new(AccessLevels::default()),
+            name: crate_name.to_string(),
             glob_map: if resolver.make_glob_map { Some(resolver.glob_map) } else { None },
         },
         resolutions: Resolutions {
-            def_map: resolver.def_map,
             freevars: resolver.freevars,
+            export_map: resolver.export_map,
             trait_map: resolver.trait_map,
             maybe_unused_trait_imports: resolver.maybe_unused_trait_imports,
+            maybe_unused_extern_crates: resolver.maybe_unused_extern_crates,
         },
-        hir_forest: hir_forest
+        hir_forest,
     })
 }
 
-pub fn assign_node_ids(sess: &Session, krate: ast::Crate) -> ast::Crate {
-    use syntax::ptr::P;
-    use syntax::util::move_map::MoveMap;
+pub fn default_provide(providers: &mut ty::maps::Providers) {
+    borrowck::provide(providers);
+    mir::provide(providers);
+    reachable::provide(providers);
+    resolve_lifetime::provide(providers);
+    rustc_privacy::provide(providers);
+    DefaultTransCrate::provide(providers);
+    typeck::provide(providers);
+    ty::provide(providers);
+    traits::provide(providers);
+    reachable::provide(providers);
+    rustc_const_eval::provide(providers);
+    rustc_passes::provide(providers);
+    middle::region::provide(providers);
+    cstore::provide(providers);
+    lint::provide(providers);
+}
 
-    struct NodeIdAssigner<'a> {
-        sess: &'a Session,
-    }
-
-    impl<'a> Folder for NodeIdAssigner<'a> {
-        fn new_id(&mut self, old_id: ast::NodeId) -> ast::NodeId {
-            assert_eq!(old_id, ast::DUMMY_NODE_ID);
-            self.sess.next_node_id()
-        }
-
-        fn fold_block(&mut self, block: P<ast::Block>) -> P<ast::Block> {
-            block.map(|mut block| {
-                block.id = self.new_id(block.id);
-
-                let stmt = block.stmts.pop();
-                block.stmts = block.stmts.move_flat_map(|s| self.fold_stmt(s).into_iter());
-                if let Some(ast::Stmt { node: ast::StmtKind::Expr(expr), span, .. }) = stmt {
-                    let expr = self.fold_expr(expr);
-                    block.stmts.push(ast::Stmt {
-                        id: expr.id,
-                        node: ast::StmtKind::Expr(expr),
-                        span: span,
-                    });
-                } else if let Some(stmt) = stmt {
-                    block.stmts.extend(self.fold_stmt(stmt));
-                }
-
-                block
-            })
-        }
-    }
-
-    let krate = time(sess.time_passes(),
-                     "assigning node ids",
-                     || NodeIdAssigner { sess: sess }.fold_crate(krate));
-
-    if sess.opts.debugging_opts.ast_json {
-        println!("{}", json::as_json(&krate));
-    }
-
-    krate
+pub fn default_provide_extern(providers: &mut ty::maps::Providers) {
+    cstore::provide_extern(providers);
+    DefaultTransCrate::provide_extern(providers);
 }
 
 /// Run the resolution, typechecking, region checking and other
 /// miscellaneous analysis passes on the crate. Return various
 /// structures carrying the results of the analysis.
-pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
+pub fn phase_3_run_analysis_passes<'tcx, F, R>(control: &CompileController,
+                                               sess: &'tcx Session,
+                                               cstore: &'tcx CrateStore,
                                                hir_map: hir_map::Map<'tcx>,
                                                mut analysis: ty::CrateAnalysis,
                                                resolutions: Resolutions,
-                                               arenas: &'tcx ty::CtxtArenas<'tcx>,
+                                               arenas: &'tcx AllArenas<'tcx>,
                                                name: &str,
+                                               output_filenames: &OutputFilenames,
                                                f: F)
-                                               -> Result<R, usize>
+                                               -> Result<R, CompileIncomplete>
     where F: for<'a> FnOnce(TyCtxt<'a, 'tcx, 'tcx>,
-                            Option<MirMap<'tcx>>,
                             ty::CrateAnalysis,
+                            mpsc::Receiver<Box<Any + Send>>,
                             CompileResult) -> R
 {
     macro_rules! try_with_f {
-        ($e: expr, ($t: expr, $m: expr, $a: expr)) => {
+        ($e: expr, ($($t:tt)*)) => {
             match $e {
                 Ok(x) => x,
                 Err(x) => {
-                    f($t, $m, $a, Err(x));
+                    f($($t)*, Err(x));
                     return Err(x);
                 }
             }
@@ -860,17 +983,9 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
 
     let time_passes = sess.time_passes();
 
-    let lang_items = time(time_passes, "language item collection", || {
-        sess.track_errors(|| {
-            middle::lang_items::collect_language_items(&sess, &hir_map)
-        })
-    })?;
-
-    let named_region_map = time(time_passes,
-                                "lifetime resolution",
-                                || middle::resolve_lifetime::krate(sess,
-                                                                   &hir_map,
-                                                                   &resolutions.def_map))?;
+    let query_result_on_disk_cache = time(time_passes,
+        "load query result cache",
+        || rustc_incremental::load_query_result_cache(sess));
 
     time(time_passes,
          "looking for entry point",
@@ -879,10 +994,7 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
     sess.plugin_registrar_fn.set(time(time_passes, "looking for plugin registrar", || {
         plugin::build::find_plugin_registrar(sess.diagnostic(), &hir_map)
     }));
-
-    let region_map = time(time_passes,
-                          "region resolution",
-                          || middle::region::resolve_crate(sess, &hir_map));
+    sess.derive_registrar_fn.set(derive_registrar::find(&hir_map));
 
     time(time_passes,
          "loop checking",
@@ -890,51 +1002,55 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
 
     time(time_passes,
               "static item recursion checking",
-              || static_recursion::check_crate(sess, &resolutions.def_map, &hir_map))?;
+              || static_recursion::check_crate(sess, &hir_map))?;
 
-    let index = stability::Index::new(&hir_map);
+    let mut local_providers = ty::maps::Providers::default();
+    default_provide(&mut local_providers);
+    (control.provide)(&mut local_providers);
 
-    let trait_map = resolutions.trait_map;
+    let mut extern_providers = local_providers;
+    default_provide_extern(&mut extern_providers);
+    (control.provide_extern)(&mut extern_providers);
+
+    let (tx, rx) = mpsc::channel();
+
     TyCtxt::create_and_enter(sess,
+                             cstore,
+                             local_providers,
+                             extern_providers,
                              arenas,
-                             resolutions.def_map,
-                             named_region_map,
+                             resolutions,
                              hir_map,
-                             resolutions.freevars,
-                             resolutions.maybe_unused_trait_imports,
-                             region_map,
-                             lang_items,
-                             index,
+                             query_result_on_disk_cache,
                              name,
+                             tx,
+                             output_filenames,
                              |tcx| {
+        // Do some initialization of the DepGraph that can only be done with the
+        // tcx available.
+        rustc_incremental::dep_graph_tcx_init(tcx);
+
+        time(sess.time_passes(), "attribute checking", || {
+            hir::check_attr::check_crate(tcx)
+        });
+
         time(time_passes,
-             "load_dep_graph",
-             || rustc_incremental::load_dep_graph(tcx));
+             "stability checking",
+             || stability::check_unstable_api_usage(tcx));
 
         // passes are timed inside typeck
-        try_with_f!(typeck::check_crate(tcx, trait_map), (tcx, None, analysis));
+        try_with_f!(typeck::check_crate(tcx), (tcx, analysis, rx));
 
         time(time_passes,
              "const checking",
              || consts::check_crate(tcx));
 
         analysis.access_levels =
-            time(time_passes, "privacy checking", || {
-                rustc_privacy::check_crate(tcx, &analysis.export_map)
-            });
-
-        // Do not move this check past lint
-        time(time_passes, "stability index", || {
-            tcx.stability.borrow_mut().build(tcx, &analysis.access_levels)
-        });
+            time(time_passes, "privacy checking", || rustc_privacy::check_crate(tcx));
 
         time(time_passes,
              "intrinsic checking",
              || middle::intrinsicck::check_crate(tcx));
-
-        time(time_passes,
-             "effect checking",
-             || middle::effect::check_crate(tcx));
 
         time(time_passes,
              "match checking",
@@ -949,32 +1065,18 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
              || middle::liveness::check_crate(tcx));
 
         time(time_passes,
-             "rvalue checking",
-             || rvalues::check_crate(tcx));
-
-        let mut mir_map =
-            time(time_passes,
-                 "MIR dump",
-                 || mir::mir_map::build_mir_for_crate(tcx));
-
-        time(time_passes, "MIR passes", || {
-            let mut passes = sess.mir_passes.borrow_mut();
-            // Push all the built-in passes.
-            passes.push_hook(box mir::transform::dump_mir::DumpMir);
-            passes.push_pass(box mir::transform::simplify_cfg::SimplifyCfg::new("initial"));
-            passes.push_pass(box mir::transform::qualify_consts::QualifyAndPromoteConstants);
-            passes.push_pass(box mir::transform::type_check::TypeckMir);
-            passes.push_pass(
-                box mir::transform::simplify_branches::SimplifyBranches::new("initial"));
-            passes.push_pass(box mir::transform::simplify_cfg::SimplifyCfg::new("qualify-consts"));
-            // And run everything.
-            passes.run_passes(tcx, &mut mir_map);
-        });
+             "borrow checking",
+             || borrowck::check_crate(tcx));
 
         time(time_passes,
-             "borrow checking",
-             || borrowck::check_crate(tcx, &mir_map));
+             "MIR borrow checking",
+             || for def_id in tcx.body_owners() { tcx.mir_borrowck(def_id); });
 
+        time(time_passes,
+             "MIR effect checking",
+             || for def_id in tcx.body_owners() {
+                 mir::transform::check_unsafety::check_unsafety(tcx, def_id)
+             });
         // Avoid overwhelming user with errors if type checking failed.
         // I'm not sure how helpful this is, to be honest, but it avoids
         // a
@@ -982,144 +1084,81 @@ pub fn phase_3_run_analysis_passes<'tcx, F, R>(sess: &'tcx Session,
         // lint warnings and so on -- kindck used to do this abort, but
         // kindck is gone now). -nmatsakis
         if sess.err_count() > 0 {
-            return Ok(f(tcx, Some(mir_map), analysis, Err(sess.err_count())));
+            return Ok(f(tcx, analysis, rx, sess.compile_status()));
         }
 
-        analysis.reachable =
-            time(time_passes,
-                 "reachability checking",
-                 || reachable::find_reachable(tcx, &analysis.access_levels));
-
-        time(time_passes, "death checking", || {
-            middle::dead::check_crate(tcx, &analysis.access_levels);
-        });
-
-        let ref lib_features_used =
-            time(time_passes,
-                 "stability checking",
-                 || stability::check_unstable_api_usage(tcx));
+        time(time_passes, "death checking", || middle::dead::check_crate(tcx));
 
         time(time_passes, "unused lib feature checking", || {
-            stability::check_unused_or_stable_features(&tcx.sess,
-                                                       lib_features_used)
+            stability::check_unused_or_stable_features(tcx)
         });
 
-        time(time_passes,
-             "lint checking",
-             || lint::check_crate(tcx, &analysis.access_levels));
+        time(time_passes, "lint checking", || lint::check_crate(tcx));
 
-        // The above three passes generate errors w/o aborting
-        if sess.err_count() > 0 {
-            return Ok(f(tcx, Some(mir_map), analysis, Err(sess.err_count())));
-        }
-
-        Ok(f(tcx, Some(mir_map), analysis, Ok(())))
+        return Ok(f(tcx, analysis, rx, tcx.sess.compile_status()));
     })
 }
 
 /// Run the translation phase to LLVM, after which the AST and analysis can
-pub fn phase_4_translate_to_llvm<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                           mut mir_map: MirMap<'tcx>,
-                                           analysis: ty::CrateAnalysis)
-                                           -> trans::CrateTranslation {
+/// be discarded.
+pub fn phase_4_translate_to_llvm<'a, 'tcx, Trans: TransCrate>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                                           rx: mpsc::Receiver<Box<Any + Send>>)
+                                           -> <Trans as TransCrate>::OngoingCrateTranslation {
     let time_passes = tcx.sess.time_passes();
 
     time(time_passes,
          "resolving dependency formats",
-         || dependency_format::calculate(&tcx.sess));
-
-    // Run the passes that transform the MIR into a more suitable for translation
-    // to LLVM code.
-    time(time_passes, "Prepare MIR codegen passes", || {
-        let mut passes = ::rustc::mir::transform::Passes::new();
-        passes.push_hook(box mir::transform::dump_mir::DumpMir);
-        passes.push_pass(box mir::transform::no_landing_pads::NoLandingPads);
-        passes.push_pass(box mir::transform::simplify_cfg::SimplifyCfg::new("no-landing-pads"));
-
-        passes.push_pass(box mir::transform::erase_regions::EraseRegions);
-
-        passes.push_pass(box mir::transform::add_call_guards::AddCallGuards);
-        passes.push_pass(box borrowck::ElaborateDrops);
-        passes.push_pass(box mir::transform::no_landing_pads::NoLandingPads);
-        passes.push_pass(box mir::transform::simplify_cfg::SimplifyCfg::new("elaborate-drops"));
-
-        passes.push_pass(box mir::transform::add_call_guards::AddCallGuards);
-        passes.push_pass(box mir::transform::dump_mir::Marker("PreTrans"));
-
-        passes.run_passes(tcx, &mut mir_map);
-    });
+         || ::rustc::middle::dependency_format::calculate(tcx));
 
     let translation =
-        time(time_passes,
-             "translation",
-             move || trans::trans_crate(tcx, &mir_map, analysis));
-
-    time(time_passes,
-         "assert dep graph",
-         move || rustc_incremental::assert_dep_graph(tcx));
-
-    time(time_passes,
-         "serialize dep graph",
-         move || rustc_incremental::save_dep_graph(tcx));
+        time(time_passes, "translation", move || {
+            Trans::trans_crate(tcx, rx)
+        });
+    if tcx.sess.profile_queries() {
+        profile::dump("profile_queries".to_string())
+    }
 
     translation
 }
 
 /// Run LLVM itself, producing a bitcode file, assembly file or object file
 /// as a side effect.
-pub fn phase_5_run_llvm_passes(sess: &Session,
-                               trans: &trans::CrateTranslation,
-                               outputs: &OutputFilenames) -> CompileResult {
-    if sess.opts.cg.no_integrated_as {
-        let mut map = HashMap::new();
-        map.insert(OutputType::Assembly, None);
-        time(sess.time_passes(),
-             "LLVM passes",
-             || write::run_passes(sess, trans, &map, outputs));
+pub fn phase_5_run_llvm_passes<Trans: TransCrate>(sess: &Session,
+                               dep_graph: &DepGraph,
+                               trans: <Trans as TransCrate>::OngoingCrateTranslation)
+                               -> (CompileResult, <Trans as TransCrate>::TranslatedCrate) {
+    let trans = Trans::join_trans(trans, sess, dep_graph);
 
-        write::run_assembler(sess, outputs);
-
-        // Remove assembly source, unless --save-temps was specified
-        if !sess.opts.cg.save_temps {
-            fs::remove_file(&outputs.temp_path(OutputType::Assembly, None)).unwrap();
-        }
-    } else {
-        time(sess.time_passes(),
-             "LLVM passes",
-             || write::run_passes(sess, trans, &sess.opts.output_types, outputs));
+    if sess.opts.debugging_opts.incremental_info {
+        Trans::dump_incremental_data(&trans);
     }
 
-    if sess.err_count() > 0 {
-        Err(sess.err_count())
-    } else {
-        Ok(())
-    }
-}
-
-/// Run the linker on any artifacts that resulted from the LLVM run.
-/// This should produce either a finished executable or library.
-pub fn phase_6_link_output(sess: &Session,
-                           trans: &trans::CrateTranslation,
-                           outputs: &OutputFilenames) {
     time(sess.time_passes(),
-         "linking",
-         || link::link_binary(sess, trans, outputs, &trans.link.crate_name));
+         "serialize work products",
+         move || rustc_incremental::save_work_products(sess, dep_graph));
+
+    (sess.compile_status(), trans)
 }
 
-fn escape_dep_filename(filename: &str) -> String {
+fn escape_dep_filename(filename: &FileName) -> String {
     // Apparently clang and gcc *only* escape spaces:
     // http://llvm.org/klaus/clang/commit/9d50634cfc268ecc9a7250226dd5ca0e945240d4
-    filename.replace(" ", "\\ ")
+    filename.to_string().replace(" ", "\\ ")
 }
 
-fn write_out_deps(sess: &Session, outputs: &OutputFilenames, id: &str) {
+fn write_out_deps(sess: &Session, outputs: &OutputFilenames, crate_name: &str) {
     let mut out_filenames = Vec::new();
     for output_type in sess.opts.output_types.keys() {
         let file = outputs.path(*output_type);
         match *output_type {
             OutputType::Exe => {
                 for output in sess.crate_types.borrow().iter() {
-                    let p = link::filename_for_input(sess, *output, id, outputs);
+                    let p = ::rustc_trans_utils::link::filename_for_input(
+                        sess,
+                        *output,
+                        crate_name,
+                        outputs
+                    );
                     out_filenames.push(p);
                 }
             }
@@ -1140,8 +1179,7 @@ fn write_out_deps(sess: &Session, outputs: &OutputFilenames, id: &str) {
             // Build a list of files used to compile the output and
             // write Makefile-compatible dependency rules
             let files: Vec<String> = sess.codemap()
-                                         .files
-                                         .borrow()
+                                         .files()
                                          .iter()
                                          .filter(|fmap| fmap.is_real_file())
                                          .filter(|fmap| !fmap.is_imported())
@@ -1193,12 +1231,15 @@ pub fn collect_crate_types(session: &Session, attrs: &[ast::Attribute]) -> Vec<c
                          Some(ref n) if *n == "staticlib" => {
                              Some(config::CrateTypeStaticlib)
                          }
+                         Some(ref n) if *n == "proc-macro" => {
+                             Some(config::CrateTypeProcMacro)
+                         }
                          Some(ref n) if *n == "bin" => Some(config::CrateTypeExecutable),
                          Some(_) => {
-                             session.add_lint(lint::builtin::UNKNOWN_CRATE_TYPES,
-                                              ast::CRATE_NODE_ID,
-                                              a.span,
-                                              "invalid `crate_type` value".to_string());
+                             session.buffer_lint(lint::builtin::UNKNOWN_CRATE_TYPES,
+                                                 ast::CRATE_NODE_ID,
+                                                 a.span,
+                                                 "invalid `crate_type` value");
                              None
                          }
                          _ => {
@@ -1227,7 +1268,7 @@ pub fn collect_crate_types(session: &Session, attrs: &[ast::Attribute]) -> Vec<c
     if base.is_empty() {
         base.extend(attr_types);
         if base.is_empty() {
-            base.push(link::default_output_for_target(session));
+            base.push(::rustc_trans_utils::link::default_output_for_target(session));
         }
         base.sort();
         base.dedup();
@@ -1235,7 +1276,7 @@ pub fn collect_crate_types(session: &Session, attrs: &[ast::Attribute]) -> Vec<c
 
     base.into_iter()
         .filter(|crate_type| {
-            let res = !link::invalid_output_for_target(session, *crate_type);
+            let res = !::rustc_trans_utils::link::invalid_output_for_target(session, *crate_type);
 
             if !res {
                 session.warn(&format!("dropping unsupported crate type `{}` for target `{}`",
@@ -1248,8 +1289,14 @@ pub fn collect_crate_types(session: &Session, attrs: &[ast::Attribute]) -> Vec<c
         .collect()
 }
 
-pub fn compute_crate_disambiguator(session: &Session) -> String {
-    let mut hasher = Sha256::new();
+pub fn compute_crate_disambiguator(session: &Session) -> CrateDisambiguator {
+    use std::hash::Hasher;
+
+    // The crate_disambiguator is a 128 bit hash. The disambiguator is fed
+    // into various other hashes quite a bit (symbol hashes, incr. comp. hashes,
+    // debuginfo type IDs, etc), so we don't want it to be too wide. 128 bits
+    // should still be safe enough to avoid collisions in practice.
+    let mut hasher = StableHasher::<Fingerprint>::new();
 
     let mut metadata = session.opts.cg.metadata.clone();
     // We don't want the crate_disambiguator to dependent on the order
@@ -1258,24 +1305,22 @@ pub fn compute_crate_disambiguator(session: &Session) -> String {
     // Every distinct -C metadata value is only incorporated once:
     metadata.dedup();
 
-    hasher.input_str("metadata");
+    hasher.write(b"metadata");
     for s in &metadata {
         // Also incorporate the length of a metadata string, so that we generate
         // different values for `-Cmetadata=ab -Cmetadata=c` and
         // `-Cmetadata=a -Cmetadata=bc`
-        hasher.input_str(&format!("{}", s.len())[..]);
-        hasher.input_str(&s[..]);
+        hasher.write_usize(s.len());
+        hasher.write(s.as_bytes());
     }
 
-    let mut hash = hasher.result_str();
+    // Also incorporate crate type, so that we don't get symbol conflicts when
+    // linking against a library of the same name, if this is an executable.
+    let is_exe = session.crate_types.borrow().contains(&config::CrateTypeExecutable);
+    hasher.write(if is_exe { b"exe" } else { b"lib" });
 
-    // If this is an executable, add a special suffix, so that we don't get
-    // symbol conflicts when linking against a library of the same name.
-    if session.crate_types.borrow().contains(&config::CrateTypeExecutable) {
-       hash.push_str("-exe");
-    }
+    CrateDisambiguator::from(hasher.finish())
 
-    hash
 }
 
 pub fn build_output_filenames(input: &Input,
@@ -1317,8 +1362,8 @@ pub fn build_output_filenames(input: &Input,
                                            .filter(|a| a.is_none())
                                            .count();
             let ofile = if unnamed_output_types > 1 {
-                sess.warn("ignoring specified output filename because multiple outputs were \
-                           requested");
+                sess.warn("due to multiple output types requested, the explicitly specified \
+                           output file name will be adapted for each output type");
                 None
             } else {
                 Some(out_file.clone())

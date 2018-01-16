@@ -10,7 +10,8 @@
 
 enum Enum {
     P = 3,
-    X = 3, //~ ERROR E0081
+    X = 3,
+    //~^ ERROR discriminant value `3isize` already exists
     Y = 5
 }
 

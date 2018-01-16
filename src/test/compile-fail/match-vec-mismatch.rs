@@ -17,8 +17,9 @@ fn main() {
         _ => { }
     };
 
+    // Note that this one works with default binding modes.
     match &[0, 1, 2] {
-        [..] => {} //~ ERROR expected an array or slice, found `&[_; 3]`
+        [..] => {} //~ ERROR non-reference pattern used to match a reference
     };
 
     match &[0, 1, 2] {
@@ -34,7 +35,7 @@ fn main() {
         [0, 1, 2, 3, x..] => {} //~ ERROR pattern requires
     };
 
-    match does_not_exist { //~ ERROR unresolved name
+    match does_not_exist { //~ ERROR cannot find value `does_not_exist` in this scope
         [] => {}
     };
 }

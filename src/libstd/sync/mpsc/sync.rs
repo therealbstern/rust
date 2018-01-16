@@ -36,7 +36,8 @@
 pub use self::Failure::*;
 use self::Blocker::*;
 
-use vec::Vec;
+use core::intrinsics::abort;
+use core::isize;
 use core::mem;
 use core::ptr;
 
@@ -45,6 +46,8 @@ use sync::mpsc::blocking::{self, WaitToken, SignalToken};
 use sync::mpsc::select::StartResult::{self, Installed, Abort};
 use sync::{Mutex, MutexGuard};
 use time::Instant;
+
+const MAX_REFCOUNT: usize = (isize::MAX) as usize;
 
 pub struct Packet<T> {
     /// Only field outside of the mutex. Just done for kicks, but mainly because
@@ -174,7 +177,7 @@ impl<T> Packet<T> {
             lock: Mutex::new(State {
                 disconnected: false,
                 blocker: NoneBlocked,
-                cap: cap,
+                cap,
                 canceled: None,
                 queue: Queue {
                     head: ptr::null_mut(),
@@ -309,7 +312,7 @@ impl<T> Packet<T> {
         let mut guard = self.lock.lock().unwrap();
 
         // Easy cases first
-        if guard.disconnected { return Err(Disconnected) }
+        if guard.disconnected && guard.buf.size() == 0 { return Err(Disconnected) }
         if guard.buf.size() == 0 { return Err(Empty) }
 
         // Be sure to wake up neighbors
@@ -351,7 +354,14 @@ impl<T> Packet<T> {
     // Prepares this shared packet for a channel clone, essentially just bumping
     // a refcount.
     pub fn clone_chan(&self) {
-        self.channels.fetch_add(1, Ordering::SeqCst);
+        let old_count = self.channels.fetch_add(1, Ordering::SeqCst);
+
+        // See comments on Arc::clone() on why we do this (for `mem::forget`).
+        if old_count > MAX_REFCOUNT {
+            unsafe {
+                abort();
+            }
+        }
     }
 
     pub fn drop_chan(&self) {

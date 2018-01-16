@@ -19,10 +19,21 @@
 //! fact an unbound type variable, we want the match to be regarded as ambiguous, because depending
 //! on what type that type variable is ultimately assigned, the match may or may not succeed.
 //!
+//! To handle closures, freshened types also have to contain the signature and kind of any
+//! closure in the local inference context, as otherwise the cache key might be invalidated.
+//! The way this is done is somewhat hacky - the closure signature is appended to the substs,
+//! as well as the closure kind "encoded" as a type. Also, special handling is needed when
+//! the closure signature contains a reference to the original closure.
+//!
 //! Note that you should be careful not to allow the output of freshening to leak to the user in
 //! error messages or in any other form. Freshening is only really useful as an internal detail.
 //!
-//! __An important detail concerning regions.__ The freshener also replaces *all* regions with
+//! Because of the manipulation required to handle closures, doing arbitrary operations on
+//! freshened types is not recommended. However, in addition to doing equality/hash
+//! comparisons (for caching), it is possible to do a `ty::_match` operation between
+//! 2 freshened types - this works even with the closure encoding.
+//!
+//! __An important detail concerning regions.__ The freshener also replaces *all* free regions with
 //! 'erased. The reason behind this is that, in general, we do not take region relationships into
 //! account when making type-overloaded decisions. This is important because of the design of the
 //! region inferencer, which is not based on unification but rather on accumulating and then
@@ -32,7 +43,9 @@
 
 use ty::{self, Ty, TyCtxt, TypeFoldable};
 use ty::fold::TypeFolder;
-use std::collections::hash_map::{self, Entry};
+use util::nodemap::FxHashMap;
+
+use std::collections::hash_map::Entry;
 
 use super::InferCtxt;
 use super::unify_key::ToType;
@@ -40,16 +53,16 @@ use super::unify_key::ToType;
 pub struct TypeFreshener<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     infcx: &'a InferCtxt<'a, 'gcx, 'tcx>,
     freshen_count: u32,
-    freshen_map: hash_map::HashMap<ty::InferTy, Ty<'tcx>>,
+    freshen_map: FxHashMap<ty::InferTy, Ty<'tcx>>,
 }
 
 impl<'a, 'gcx, 'tcx> TypeFreshener<'a, 'gcx, 'tcx> {
     pub fn new(infcx: &'a InferCtxt<'a, 'gcx, 'tcx>)
                -> TypeFreshener<'a, 'gcx, 'tcx> {
         TypeFreshener {
-            infcx: infcx,
+            infcx,
             freshen_count: 0,
-            freshen_map: hash_map::HashMap::new(),
+            freshen_map: FxHashMap(),
         }
     }
 
@@ -60,9 +73,8 @@ impl<'a, 'gcx, 'tcx> TypeFreshener<'a, 'gcx, 'tcx> {
                   -> Ty<'tcx> where
         F: FnOnce(u32) -> ty::InferTy,
     {
-        match opt_ty {
-            Some(ty) => { return ty.fold_with(self); }
-            None => { }
+        if let Some(ty) = opt_ty {
+            return ty.fold_with(self);
         }
 
         match self.freshen_map.entry(key) {
@@ -83,15 +95,15 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
         self.infcx.tcx
     }
 
-    fn fold_region(&mut self, r: ty::Region) -> ty::Region {
-        match r {
-            ty::ReEarlyBound(..) |
+    fn fold_region(&mut self, r: ty::Region<'tcx>) -> ty::Region<'tcx> {
+        match *r {
             ty::ReLateBound(..) => {
                 // leave bound regions alone
                 r
             }
 
             ty::ReStatic |
+            ty::ReEarlyBound(..) |
             ty::ReFree(_) |
             ty::ReScope(_) |
             ty::ReVar(_) |
@@ -99,13 +111,21 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
             ty::ReEmpty |
             ty::ReErased => {
                 // replace all free regions with 'erased
-                ty::ReErased
+                self.tcx().types.re_erased
+            }
+
+            ty::ReClosureBound(..) => {
+                bug!(
+                    "encountered unexpected ReClosureBound: {:?}",
+                    r,
+                );
             }
         }
     }
 
     fn fold_ty(&mut self, t: Ty<'tcx>) -> Ty<'tcx> {
-        if !t.needs_infer() && !t.has_erasable_regions() {
+        if !t.needs_infer() && !t.has_erasable_regions() &&
+            !(t.has_closure_types() && self.infcx.in_progress_tables.is_some()) {
             return t;
         }
 
@@ -150,13 +170,13 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
                 t
             }
 
+            ty::TyGenerator(..) |
             ty::TyBool |
             ty::TyChar |
             ty::TyInt(..) |
             ty::TyUint(..) |
             ty::TyFloat(..) |
-            ty::TyEnum(..) |
-            ty::TyBox(..) |
+            ty::TyAdt(..) |
             ty::TyStr |
             ty::TyError |
             ty::TyArray(..) |
@@ -165,12 +185,14 @@ impl<'a, 'gcx, 'tcx> TypeFolder<'gcx, 'tcx> for TypeFreshener<'a, 'gcx, 'tcx> {
             ty::TyRef(..) |
             ty::TyFnDef(..) |
             ty::TyFnPtr(_) |
-            ty::TyTrait(..) |
-            ty::TyStruct(..) |
-            ty::TyClosure(..) |
+            ty::TyDynamic(..) |
+            ty::TyNever |
             ty::TyTuple(..) |
             ty::TyProjection(..) |
-            ty::TyParam(..) => {
+            ty::TyForeign(..) |
+            ty::TyParam(..) |
+            ty::TyClosure(..) |
+            ty::TyAnon(..) => {
                 t.super_fold_with(self)
             }
         }

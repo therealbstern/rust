@@ -8,15 +8,12 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
-#![allow(unused)]
-
 struct SemiPriv;
 
 mod m1 {
     struct Priv;
     impl ::SemiPriv {
-        pub fn f(_: Priv) {} //~ WARN private type in public interface
+        pub fn f(_: Priv) {} //~ WARN private type `m1::Priv` in public interface
         //~^ WARNING hard error
     }
 
@@ -28,8 +25,7 @@ mod m1 {
 mod m2 {
     struct Priv;
     impl ::std::ops::Deref for ::SemiPriv {
-        type Target = Priv; //~ WARN private type in public interface
-        //~^ WARNING hard error
+        type Target = Priv; //~ ERROR private type `m2::Priv` in public interface
         fn deref(&self) -> &Self::Target { unimplemented!() }
     }
 
@@ -46,10 +42,8 @@ trait SemiPrivTrait {
 mod m3 {
     struct Priv;
     impl ::SemiPrivTrait for () {
-        type Assoc = Priv; //~ WARN private type in public interface
-        //~^ WARNING hard error
+        type Assoc = Priv; //~ ERROR private type `m3::Priv` in public interface
     }
 }
 
-#[rustc_error]
-fn main() {} //~ ERROR compilation successful
+fn main() {}

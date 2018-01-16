@@ -7,7 +7,10 @@
 // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
-#![feature(panic_handler, const_fn, std_panic)]
+
+// ignore-emscripten no threads support
+
+#![feature(panic_handler, std_panic)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::panic;

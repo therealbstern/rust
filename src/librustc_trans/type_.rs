@@ -11,19 +11,18 @@
 #![allow(non_upper_case_globals)]
 
 use llvm;
-use llvm::{TypeRef, Bool, False, True, TypeKind};
+use llvm::{ContextRef, TypeRef, Bool, False, True, TypeKind};
 use llvm::{Float, Double, X86_FP80, PPC_FP128, FP128};
 
 use context::CrateContext;
-use util::nodemap::FnvHashMap;
 
 use syntax::ast;
+use rustc::ty::layout::{self, Align, Size};
 
 use std::ffi::CString;
 use std::fmt;
 use std::mem;
 use std::ptr;
-use std::cell::RefCell;
 
 use libc::c_uint;
 
@@ -36,7 +35,7 @@ pub struct Type {
 impl fmt::Debug for Type {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&llvm::build_string(|s| unsafe {
-            llvm::LLVMWriteTypeToString(self.to_ref(), s);
+            llvm::LLVMRustWriteTypeToString(self.to_ref(), s);
         }).expect("non-UTF8 type description from LLVM"))
     }
 }
@@ -67,12 +66,8 @@ impl Type {
         ty!(llvm::LLVMVoidTypeInContext(ccx.llcx()))
     }
 
-    pub fn nil(ccx: &CrateContext) -> Type {
-        Type::empty_struct(ccx)
-    }
-
     pub fn metadata(ccx: &CrateContext) -> Type {
-        ty!(llvm::LLVMMetadataTypeInContext(ccx.llcx()))
+        ty!(llvm::LLVMRustMetadataTypeInContext(ccx.llcx()))
     }
 
     pub fn i1(ccx: &CrateContext) -> Type {
@@ -81,6 +76,10 @@ impl Type {
 
     pub fn i8(ccx: &CrateContext) -> Type {
         ty!(llvm::LLVMInt8TypeInContext(ccx.llcx()))
+    }
+
+    pub fn i8_llcx(llcx: ContextRef) -> Type {
+        ty!(llvm::LLVMInt8TypeInContext(llcx))
     }
 
     pub fn i16(ccx: &CrateContext) -> Type {
@@ -93,6 +92,10 @@ impl Type {
 
     pub fn i64(ccx: &CrateContext) -> Type {
         ty!(llvm::LLVMInt64TypeInContext(ccx.llcx()))
+    }
+
+    pub fn i128(ccx: &CrateContext) -> Type {
+        ty!(llvm::LLVMIntTypeInContext(ccx.llcx(), 128))
     }
 
     // Creates an integer type with the given number of bits, e.g. i24
@@ -120,7 +123,11 @@ impl Type {
         Type::i8(ccx).ptr_to()
     }
 
-    pub fn int(ccx: &CrateContext) -> Type {
+    pub fn i8p_llcx(llcx: ContextRef) -> Type {
+        Type::i8_llcx(llcx).ptr_to()
+    }
+
+    pub fn isize(ccx: &CrateContext) -> Type {
         match &ccx.tcx().sess.target.target.target_pointer_width[..] {
             "16" => Type::i16(ccx),
             "32" => Type::i32(ccx),
@@ -129,23 +136,34 @@ impl Type {
         }
     }
 
+    pub fn c_int(ccx: &CrateContext) -> Type {
+        match &ccx.tcx().sess.target.target.target_c_int_width[..] {
+            "16" => Type::i16(ccx),
+            "32" => Type::i32(ccx),
+            "64" => Type::i64(ccx),
+            width => bug!("Unsupported target_c_int_width: {}", width),
+        }
+    }
+
     pub fn int_from_ty(ccx: &CrateContext, t: ast::IntTy) -> Type {
         match t {
-            ast::IntTy::Is => ccx.int_type(),
+            ast::IntTy::Isize => ccx.isize_ty(),
             ast::IntTy::I8 => Type::i8(ccx),
             ast::IntTy::I16 => Type::i16(ccx),
             ast::IntTy::I32 => Type::i32(ccx),
-            ast::IntTy::I64 => Type::i64(ccx)
+            ast::IntTy::I64 => Type::i64(ccx),
+            ast::IntTy::I128 => Type::i128(ccx),
         }
     }
 
     pub fn uint_from_ty(ccx: &CrateContext, t: ast::UintTy) -> Type {
         match t {
-            ast::UintTy::Us => ccx.int_type(),
+            ast::UintTy::Usize => ccx.isize_ty(),
             ast::UintTy::U8 => Type::i8(ccx),
             ast::UintTy::U16 => Type::i16(ccx),
             ast::UintTy::U32 => Type::i32(ccx),
-            ast::UintTy::U64 => Type::i64(ccx)
+            ast::UintTy::U64 => Type::i64(ccx),
+            ast::UintTy::U128 => Type::i128(ccx),
         }
     }
 
@@ -180,9 +198,6 @@ impl Type {
         ty!(llvm::LLVMStructCreateNamed(ccx.llcx(), name.as_ptr()))
     }
 
-    pub fn empty_struct(ccx: &CrateContext) -> Type {
-        Type::struct_(ccx, &[], false)
-    }
 
     pub fn array(ty: &Type, len: u64) -> Type {
         ty!(llvm::LLVMRustArrayType(ty.to_ref(), len))
@@ -192,23 +207,9 @@ impl Type {
         ty!(llvm::LLVMVectorType(ty.to_ref(), len as c_uint))
     }
 
-    pub fn vec(ccx: &CrateContext, ty: &Type) -> Type {
-        Type::struct_(ccx,
-            &[Type::array(ty, 0), Type::int(ccx)],
-        false)
-    }
-
-    pub fn opaque_vec(ccx: &CrateContext) -> Type {
-        Type::vec(ccx, &Type::i8(ccx))
-    }
-
-    pub fn vtable_ptr(ccx: &CrateContext) -> Type {
-        Type::func(&[Type::i8p(ccx)], &Type::void(ccx)).ptr_to().ptr_to()
-    }
-
     pub fn kind(&self) -> TypeKind {
         unsafe {
-            llvm::LLVMGetTypeKind(self.to_ref())
+            llvm::LLVMRustGetTypeKind(self.to_ref())
         }
     }
 
@@ -224,19 +225,6 @@ impl Type {
         ty!(llvm::LLVMPointerType(self.to_ref(), 0))
     }
 
-    pub fn is_aggregate(&self) -> bool {
-        match self.kind() {
-            TypeKind::Struct | TypeKind::Array => true,
-            _ =>  false
-        }
-    }
-
-    pub fn is_packed(&self) -> bool {
-        unsafe {
-            llvm::LLVMIsPackedStruct(self.to_ref()) == True
-        }
-    }
-
     pub fn element_type(&self) -> Type {
         unsafe {
             Type::from_ref(llvm::LLVMGetElementType(self.to_ref()))
@@ -248,29 +236,6 @@ impl Type {
         unsafe {
             llvm::LLVMGetVectorSize(self.to_ref()) as usize
         }
-    }
-
-    pub fn array_length(&self) -> usize {
-        unsafe {
-            llvm::LLVMGetArrayLength(self.to_ref()) as usize
-        }
-    }
-
-    pub fn field_types(&self) -> Vec<Type> {
-        unsafe {
-            let n_elts = llvm::LLVMCountStructElementTypes(self.to_ref()) as usize;
-            if n_elts == 0 {
-                return Vec::new();
-            }
-            let mut elts = vec![Type { rf: ptr::null_mut() }; n_elts];
-            llvm::LLVMGetStructElementTypes(self.to_ref(),
-                                            elts.as_mut_ptr() as *mut TypeRef);
-            elts
-        }
-    }
-
-    pub fn return_type(&self) -> Type {
-        ty!(llvm::LLVMGetReturnType(self.to_ref()))
     }
 
     pub fn func_params(&self) -> Vec<Type> {
@@ -299,27 +264,37 @@ impl Type {
             llvm::LLVMGetIntTypeWidth(self.to_ref()) as u64
         }
     }
-}
 
-/* Memory-managed object interface to type handles. */
-
-pub struct TypeNames {
-    named_types: RefCell<FnvHashMap<String, TypeRef>>,
-}
-
-impl TypeNames {
-    pub fn new() -> TypeNames {
-        TypeNames {
-            named_types: RefCell::new(FnvHashMap())
+    pub fn from_integer(cx: &CrateContext, i: layout::Integer) -> Type {
+        use rustc::ty::layout::Integer::*;
+        match i {
+            I8 => Type::i8(cx),
+            I16 => Type::i16(cx),
+            I32 => Type::i32(cx),
+            I64 => Type::i64(cx),
+            I128 => Type::i128(cx),
         }
     }
 
-    pub fn associate_type(&self, s: &str, t: &Type) {
-        assert!(self.named_types.borrow_mut().insert(s.to_string(),
-                                                     t.to_ref()).is_none());
+    /// Return a LLVM type that has at most the required alignment,
+    /// as a conservative approximation for unknown pointee types.
+    pub fn pointee_for_abi_align(ccx: &CrateContext, align: Align) -> Type {
+        // FIXME(eddyb) We could find a better approximation if ity.align < align.
+        let ity = layout::Integer::approximate_abi_align(ccx, align);
+        Type::from_integer(ccx, ity)
     }
 
-    pub fn find_type(&self, s: &str) -> Option<Type> {
-        self.named_types.borrow().get(s).map(|x| Type::from_ref(*x))
+    /// Return a LLVM type that has at most the required alignment,
+    /// and exactly the required size, as a best-effort padding array.
+    pub fn padding_filler(ccx: &CrateContext, size: Size, align: Align) -> Type {
+        let unit = layout::Integer::approximate_abi_align(ccx, align);
+        let size = size.bytes();
+        let unit_size = unit.size().bytes();
+        assert_eq!(size % unit_size, 0);
+        Type::array(&Type::from_integer(ccx, unit), size / unit_size)
+    }
+
+    pub fn x86_mmx(ccx: &CrateContext) -> Type {
+        ty!(llvm::LLVMX86MMXTypeInContext(ccx.llcx()))
     }
 }

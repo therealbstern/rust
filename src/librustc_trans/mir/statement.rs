@@ -8,55 +8,83 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use rustc::mir::repr as mir;
+use rustc::mir;
 
-use common::{self, BlockAndBuilder};
+use asm;
+use builder::Builder;
 
 use super::MirContext;
 use super::LocalRef;
 
-impl<'bcx, 'tcx> MirContext<'bcx, 'tcx> {
+impl<'a, 'tcx> MirContext<'a, 'tcx> {
     pub fn trans_statement(&mut self,
-                           bcx: BlockAndBuilder<'bcx, 'tcx>,
+                           bcx: Builder<'a, 'tcx>,
                            statement: &mir::Statement<'tcx>)
-                           -> BlockAndBuilder<'bcx, 'tcx> {
+                           -> Builder<'a, 'tcx> {
         debug!("trans_statement(statement={:?})", statement);
 
-        let debug_loc = self.debug_loc(statement.source_info);
-        debug_loc.apply_to_bcx(&bcx);
-        debug_loc.apply(bcx.fcx());
+        self.set_debug_loc(&bcx, statement.source_info);
         match statement.kind {
-            mir::StatementKind::Assign(ref lvalue, ref rvalue) => {
-                if let Some(index) = self.mir.local_index(lvalue) {
+            mir::StatementKind::Assign(ref place, ref rvalue) => {
+                if let mir::Place::Local(index) = *place {
                     match self.locals[index] {
-                        LocalRef::Lvalue(tr_dest) => {
-                            self.trans_rvalue(bcx, tr_dest, rvalue, debug_loc)
+                        LocalRef::Place(tr_dest) => {
+                            self.trans_rvalue(bcx, tr_dest, rvalue)
                         }
                         LocalRef::Operand(None) => {
-                            let (bcx, operand) = self.trans_rvalue_operand(bcx, rvalue,
-                                                                           debug_loc);
+                            let (bcx, operand) = self.trans_rvalue_operand(bcx, rvalue);
                             self.locals[index] = LocalRef::Operand(Some(operand));
                             bcx
                         }
-                        LocalRef::Operand(Some(_)) => {
-                            let ty = self.lvalue_ty(lvalue);
-
-                            if !common::type_is_zero_size(bcx.ccx(), ty) {
+                        LocalRef::Operand(Some(op)) => {
+                            if !op.layout.is_zst() {
                                 span_bug!(statement.source_info.span,
                                           "operand {:?} already assigned",
                                           rvalue);
-                            } else {
-                                // If the type is zero-sized, it's already been set here,
-                                // but we still need to make sure we translate the operand
-                                self.trans_rvalue_operand(bcx, rvalue, debug_loc).0
                             }
+
+                            // If the type is zero-sized, it's already been set here,
+                            // but we still need to make sure we translate the operand
+                            self.trans_rvalue_operand(bcx, rvalue).0
                         }
                     }
                 } else {
-                    let tr_dest = self.trans_lvalue(&bcx, lvalue);
-                    self.trans_rvalue(bcx, tr_dest, rvalue, debug_loc)
+                    let tr_dest = self.trans_place(&bcx, place);
+                    self.trans_rvalue(bcx, tr_dest, rvalue)
                 }
             }
+            mir::StatementKind::SetDiscriminant{ref place, variant_index} => {
+                self.trans_place(&bcx, place)
+                    .trans_set_discr(&bcx, variant_index);
+                bcx
+            }
+            mir::StatementKind::StorageLive(local) => {
+                if let LocalRef::Place(tr_place) = self.locals[local] {
+                    tr_place.storage_live(&bcx);
+                }
+                bcx
+            }
+            mir::StatementKind::StorageDead(local) => {
+                if let LocalRef::Place(tr_place) = self.locals[local] {
+                    tr_place.storage_dead(&bcx);
+                }
+                bcx
+            }
+            mir::StatementKind::InlineAsm { ref asm, ref outputs, ref inputs } => {
+                let outputs = outputs.iter().map(|output| {
+                    self.trans_place(&bcx, output)
+                }).collect();
+
+                let input_vals = inputs.iter().map(|input| {
+                    self.trans_operand(&bcx, input).immediate()
+                }).collect();
+
+                asm::trans_inline_asm(&bcx, asm, outputs, input_vals);
+                bcx
+            }
+            mir::StatementKind::EndRegion(_) |
+            mir::StatementKind::Validate(..) |
+            mir::StatementKind::Nop => bcx,
         }
     }
 }

@@ -8,14 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_attrs)]
+// ignore-wasm32-bare no libc to test ffi with
 
-#[link(name = "rust_test_helpers")]
+#[link(name = "rust_test_helpers", kind = "static")]
 extern {
     fn rust_interesting_average(_: i64, ...) -> f64;
 }
 
-#[rustc_mir]
 fn test<T, U>(a: i64, b: i64, c: i64, d: i64, e: i64, f: T, g: U) -> i64 {
     unsafe {
         rust_interesting_average(6, a, a as f64,

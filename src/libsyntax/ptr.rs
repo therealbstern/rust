@@ -39,10 +39,12 @@
 use std::fmt::{self, Display, Debug};
 use std::iter::FromIterator;
 use std::ops::Deref;
-use std::{ptr, slice, vec};
+use std::{mem, ptr, slice, vec};
 
 use serialize::{Encodable, Decodable, Encoder, Decoder};
 
+use rustc_data_structures::stable_hasher::{StableHasher, StableHasherResult,
+                                           HashStable};
 /// An owned smart pointer.
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct P<T: ?Sized> {
@@ -66,7 +68,7 @@ impl<T: 'static> P<T> {
         f(*self.ptr)
     }
     /// Equivalent to and_then(|x| x)
-    pub fn unwrap(self) -> T {
+    pub fn into_inner(self) -> T {
         *self.ptr
     }
 
@@ -74,12 +76,22 @@ impl<T: 'static> P<T> {
     pub fn map<F>(mut self, f: F) -> P<T> where
         F: FnOnce(T) -> T,
     {
+        let p: *mut T = &mut *self.ptr;
+
+        // Leak self in case of panic.
+        // FIXME(eddyb) Use some sort of "free guard" that
+        // only deallocates, without dropping the pointee,
+        // in case the call the `f` below ends in a panic.
+        mem::forget(self);
+
         unsafe {
-            let p = &mut *self.ptr;
-            // FIXME(#5016) this shouldn't need to drop-fill to be safe.
-            ptr::write(p, f(ptr::read_and_drop(p)));
+            ptr::write(p, f(ptr::read(p)));
+
+            // Recreate self from the raw pointer.
+            P {
+                ptr: Box::from_raw(p)
+            }
         }
-        self
     }
 }
 
@@ -144,6 +156,7 @@ impl<T> P<[T]> {
 }
 
 impl<T> Default for P<[T]> {
+    /// Creates an empty `P<[T]>`.
     fn default() -> P<[T]> {
         P::new()
     }
@@ -198,9 +211,16 @@ impl<T: Encodable> Encodable for P<[T]> {
 
 impl<T: Decodable> Decodable for P<[T]> {
     fn decode<D: Decoder>(d: &mut D) -> Result<P<[T]>, D::Error> {
-        Ok(P::from_vec(match Decodable::decode(d) {
-            Ok(t) => t,
-            Err(e) => return Err(e)
-        }))
+        Ok(P::from_vec(Decodable::decode(d)?))
+    }
+}
+
+impl<CTX, T> HashStable<CTX> for P<T>
+    where T: ?Sized + HashStable<CTX>
+{
+    fn hash_stable<W: StableHasherResult>(&self,
+                                          hcx: &mut CTX,
+                                          hasher: &mut StableHasher<W>) {
+        (**self).hash_stable(hcx, hasher);
     }
 }

@@ -27,7 +27,8 @@ impl S {
 
 fn main() {
     match 10 {
-        <S as Tr>::A::f::<u8> => {} //~ ERROR associated items in match patterns must be constants
+        <S as Tr>::A::f::<u8> => {}
+        //~^ ERROR expected unit struct/variant or constant, found method `<<S as Tr>::A>::f<u8>`
         0 ... <S as Tr>::A::f::<u8> => {} //~ ERROR only char and numeric types are allowed in range
     }
 }

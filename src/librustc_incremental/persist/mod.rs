@@ -13,12 +13,20 @@
 //! various HIR nodes.
 
 mod data;
-mod directory;
 mod dirty_clean;
-mod hash;
+mod fs;
 mod load;
 mod save;
-mod util;
+mod work_product;
+mod file_format;
 
+pub use self::fs::prepare_session_directory;
+pub use self::fs::finalize_session_directory;
+pub use self::fs::in_incr_comp_dir;
+pub use self::load::dep_graph_tcx_init;
 pub use self::load::load_dep_graph;
+pub use self::load::load_query_result_cache;
 pub use self::save::save_dep_graph;
+pub use self::save::save_work_products;
+pub use self::work_product::save_trans_partition;
+pub use self::work_product::delete_workproduct_files;

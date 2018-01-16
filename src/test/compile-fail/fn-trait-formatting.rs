@@ -8,7 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(unboxed_closures)]
 #![feature(box_syntax)]
 
 fn needs_fn<F>(x: F) where F: Fn(isize) -> isize {}
@@ -17,20 +16,16 @@ fn main() {
     let _: () = (box |_: isize| {}) as Box<FnOnce(isize)>;
     //~^ ERROR mismatched types
     //~| expected type `()`
-    //~| found type `Box<std::ops::FnOnce(isize)>`
-    //~| expected (), found box
+    //~| found type `std::boxed::Box<std::ops::FnOnce(isize)>`
     let _: () = (box |_: isize, isize| {}) as Box<Fn(isize, isize)>;
     //~^ ERROR mismatched types
     //~| expected type `()`
-    //~| found type `Box<std::ops::Fn(isize, isize)>`
-    //~| expected (), found box
+    //~| found type `std::boxed::Box<std::ops::Fn(isize, isize)>`
     let _: () = (box || -> isize { unimplemented!() }) as Box<FnMut() -> isize>;
     //~^ ERROR mismatched types
     //~| expected type `()`
-    //~| found type `Box<std::ops::FnMut() -> isize>`
-    //~| expected (), found box
+    //~| found type `std::boxed::Box<std::ops::FnMut() -> isize>`
 
     needs_fn(1);
     //~^ ERROR : std::ops::Fn<(isize,)>`
-    //~| ERROR : std::ops::FnOnce<(isize,)>`
 }

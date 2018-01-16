@@ -8,7 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-impl Vec<u8> {} //~ ERROR E0116
+impl Vec<u8> {}
+//~^ ERROR E0116
 
 fn main() {
 }

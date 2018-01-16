@@ -8,8 +8,11 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-fn foo<T>() {}
+fn foo() {}
+fn bar<T>() {}
 
 fn main() {
-    foo::<f64, bool>(); //~ ERROR E0087
+    foo::<f64>(); //~ ERROR expected at most 0 type parameters, found 1 type parameter [E0087]
+
+    bar::<f64, u64>(); //~ ERROR expected at most 1 type parameter, found 2 type parameters [E0087]
 }

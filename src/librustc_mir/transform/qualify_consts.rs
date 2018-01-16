@@ -15,68 +15,63 @@
 //! diagnostics as to why a constant rvalue wasn't promoted.
 
 use rustc_data_structures::bitvec::BitVector;
+use rustc_data_structures::indexed_set::IdxSetBuf;
 use rustc_data_structures::indexed_vec::{IndexVec, Idx};
 use rustc::hir;
 use rustc::hir::def_id::DefId;
-use rustc::hir::intravisit::FnKind;
-use rustc::hir::map::blocks::FnLikeNode;
-use rustc::traits::{self, ProjectionMode};
-use rustc::ty::{self, TyCtxt, Ty};
+use rustc::middle::const_val::ConstVal;
+use rustc::traits::{self, Reveal};
+use rustc::ty::{self, TyCtxt, Ty, TypeFoldable};
 use rustc::ty::cast::CastTy;
-use rustc::mir::repr::*;
-use rustc::mir::mir_map::MirMap;
-use rustc::mir::traversal::{self, ReversePostorder};
-use rustc::mir::transform::{Pass, MirMapPass, MirPassHook, MirSource};
-use rustc::mir::visit::{LvalueContext, Visitor};
-use rustc::util::nodemap::DefIdMap;
+use rustc::ty::maps::Providers;
+use rustc::mir::*;
+use rustc::mir::traversal::ReversePostorder;
+use rustc::mir::visit::{PlaceContext, Visitor};
+use rustc::middle::lang_items;
 use syntax::abi::Abi;
+use syntax::attr;
 use syntax::feature_gate::UnstableFeatures;
-use syntax_pos::Span;
+use syntax_pos::{Span, DUMMY_SP};
 
-use std::collections::hash_map::Entry;
 use std::fmt;
+use std::rc::Rc;
+use std::usize;
 
-use build::Location;
-
+use transform::{MirPass, MirSource};
 use super::promote_consts::{self, Candidate, TempState};
 
 bitflags! {
-    flags Qualif: u8 {
-        // Const item's qualification while recursing.
-        // Recursive consts are an error.
-        const RECURSIVE         = 1 << 0,
-
+    // Borrows of temporaries can be promoted only if
+    // they have none of these qualifications, with
+    // the exception of `STATIC_REF` (in statics only).
+    struct Qualif: u8 {
         // Constant containing interior mutability (UnsafeCell).
-        const MUTABLE_INTERIOR  = 1 << 1,
+        const MUTABLE_INTERIOR  = 1 << 0;
 
         // Constant containing an ADT that implements Drop.
-        const NEEDS_DROP        = 1 << 2,
+        const NEEDS_DROP        = 1 << 1;
 
         // Function argument.
-        const FN_ARGUMENT       = 1 << 3,
+        const FN_ARGUMENT       = 1 << 2;
 
-        // Static lvalue or move from a static.
-        const STATIC            = 1 << 4,
+        // Static place or move from a static.
+        const STATIC            = 1 << 3;
 
         // Reference to a static.
-        const STATIC_REF        = 1 << 5,
+        const STATIC_REF        = 1 << 4;
 
         // Not constant at all - non-`const fn` calls, asm!,
         // pointer comparisons, ptr-to-int casts, etc.
-        const NOT_CONST         = 1 << 6,
+        const NOT_CONST         = 1 << 5;
 
         // Refers to temporaries which cannot be promoted as
         // promote_consts decided they weren't simple enough.
-        const NOT_PROMOTABLE    = 1 << 7,
-
-        // Borrows of temporaries can be promoted only
-        // if they have none of the above qualifications.
-        const NEVER_PROMOTE     = !0,
+        const NOT_PROMOTABLE    = 1 << 6;
 
         // Const items can only have MUTABLE_INTERIOR
         // and NOT_PROMOTABLE without producing an error.
         const CONST_ERROR       = !Qualif::MUTABLE_INTERIOR.bits &
-                                  !Qualif::NOT_PROMOTABLE.bits
+                                  !Qualif::NOT_PROMOTABLE.bits;
     }
 }
 
@@ -84,11 +79,11 @@ impl<'a, 'tcx> Qualif {
     /// Remove flags which are impossible for the given type.
     fn restrict(&mut self, ty: Ty<'tcx>,
                 tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                param_env: &ty::ParameterEnvironment<'tcx>) {
-        if !ty.type_contents(tcx).interior_unsafe() {
+                param_env: ty::ParamEnv<'tcx>) {
+        if ty.is_freeze(tcx, param_env, DUMMY_SP) {
             *self = *self - Qualif::MUTABLE_INTERIOR;
         }
-        if !tcx.type_needs_drop_given_env(ty, param_env) {
+        if !ty.needs_drop(tcx, param_env) {
             *self = *self - Qualif::NEEDS_DROP;
         }
     }
@@ -115,23 +110,6 @@ impl fmt::Display for Mode {
     }
 }
 
-fn is_const_fn(tcx: TyCtxt, def_id: DefId) -> bool {
-    if let Some(node_id) = tcx.map.as_local_node_id(def_id) {
-        let fn_like = FnLikeNode::from_node(tcx.map.get(node_id));
-        match fn_like.map(|f| f.kind()) {
-            Some(FnKind::ItemFn(_, _, _, c, _, _, _)) => {
-                c == hir::Constness::Const
-            }
-            Some(FnKind::Method(_, m, _, _)) => {
-                m.constness == hir::Constness::Const
-            }
-            _ => false
-        }
-    } else {
-        tcx.sess.cstore.is_const_fn(def_id)
-    }
-}
-
 struct Qualifier<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     mode: Mode,
     span: Span,
@@ -139,23 +117,17 @@ struct Qualifier<'a, 'gcx: 'a+'tcx, 'tcx: 'a> {
     mir: &'a Mir<'tcx>,
     rpo: ReversePostorder<'a, 'tcx>,
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    param_env: ty::ParameterEnvironment<'tcx>,
-    qualif_map: &'a mut DefIdMap<Qualif>,
-    mir_map: Option<&'a MirMap<'tcx>>,
-    temp_qualif: IndexVec<Temp, Option<Qualif>>,
+    param_env: ty::ParamEnv<'tcx>,
+    temp_qualif: IndexVec<Local, Option<Qualif>>,
     return_qualif: Option<Qualif>,
     qualif: Qualif,
     const_fn_arg_vars: BitVector,
-    location: Location,
-    temp_promotion_state: IndexVec<Temp, TempState>,
+    temp_promotion_state: IndexVec<Local, TempState>,
     promotion_candidates: Vec<Candidate>
 }
 
 impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
     fn new(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-           param_env: ty::ParameterEnvironment<'tcx>,
-           qualif_map: &'a mut DefIdMap<Qualif>,
-           mir_map: Option<&'a MirMap<'tcx>>,
            def_id: DefId,
            mir: &'a Mir<'tcx>,
            mode: Mode)
@@ -163,24 +135,28 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
         let mut rpo = traversal::reverse_postorder(mir);
         let temps = promote_consts::collect_temps(mir, &mut rpo);
         rpo.reset();
+
+        let param_env = tcx.param_env(def_id);
+
+        let mut temp_qualif = IndexVec::from_elem(None, &mir.local_decls);
+        for arg in mir.args_iter() {
+            let mut qualif = Qualif::NEEDS_DROP;
+            qualif.restrict(mir.local_decls[arg].ty, tcx, param_env);
+            temp_qualif[arg] = Some(qualif);
+        }
+
         Qualifier {
-            mode: mode,
+            mode,
             span: mir.span,
-            def_id: def_id,
-            mir: mir,
-            rpo: rpo,
-            tcx: tcx,
-            param_env: param_env,
-            qualif_map: qualif_map,
-            mir_map: mir_map,
-            temp_qualif: IndexVec::from_elem(None, &mir.temp_decls),
+            def_id,
+            mir,
+            rpo,
+            tcx,
+            param_env,
+            temp_qualif,
             return_qualif: None,
             qualif: Qualif::empty(),
-            const_fn_arg_vars: BitVector::new(mir.var_decls.len()),
-            location: Location {
-                block: START_BLOCK,
-                statement_index: 0
-            },
+            const_fn_arg_vars: BitVector::new(mir.local_decls.len()),
             temp_promotion_state: temps,
             promotion_candidates: vec![]
         }
@@ -215,7 +191,7 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
     /// Add the given type's qualification to self.qualif.
     fn add_type(&mut self, ty: Ty<'tcx>) {
         self.add(Qualif::MUTABLE_INTERIOR | Qualif::NEEDS_DROP);
-        self.qualif.restrict(ty, self.tcx, &self.param_env);
+        self.qualif.restrict(ty, self.tcx, self.param_env);
     }
 
     /// Within the provided closure, self.qualif will start
@@ -228,44 +204,17 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
         self.add(original);
     }
 
-    /// Check for NEEDS_DROP (from an ADT or const fn call) and
-    /// error, unless we're in a function, or the feature-gate
-    /// for globals with destructors is enabled.
-    fn deny_drop(&self) {
-        if self.mode == Mode::Fn || !self.qualif.intersects(Qualif::NEEDS_DROP) {
-            return;
-        }
-
-        // Static and const fn's allow destructors, but they're feature-gated.
-        let msg = if self.mode != Mode::Const {
-            // Feature-gate for globals with destructors is enabled.
-            if self.tcx.sess.features.borrow().drop_types_in_const {
-                return;
-            }
-
-            // This comes from a macro that has #[allow_internal_unstable].
-            if self.tcx.sess.codemap().span_allows_unstable(self.span) {
-                return;
-            }
-
-            format!("destructors in {}s are an unstable feature",
-                    self.mode)
+    /// Check if a Local with the current qualifications is promotable.
+    fn can_promote(&mut self) -> bool {
+        // References to statics are allowed, but only in other statics.
+        if self.mode == Mode::Static || self.mode == Mode::StaticMut {
+            (self.qualif - Qualif::STATIC_REF).is_empty()
         } else {
-            format!("{}s are not allowed to have destructors",
-                    self.mode)
-        };
-
-        let mut err =
-            struct_span_err!(self.tcx.sess, self.span, E0493, "{}", msg);
-        if self.mode != Mode::Const {
-            help!(&mut err,
-                  "in Nightly builds, add `#![feature(drop_types_in_const)]` \
-                   to the crate attributes to enable");
+            self.qualif.is_empty()
         }
-        err.emit();
     }
 
-    /// Check if an Lvalue with the current qualifications could
+    /// Check if a Place with the current qualifications could
     /// be consumed, by either an operand or a Deref projection.
     fn try_consume(&mut self) -> bool {
         if self.qualif.intersects(Qualif::STATIC) && self.mode != Mode::Fn {
@@ -276,7 +225,10 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
             } else {
                 "cannot refer to statics by value, use a constant instead"
             };
-            span_err!(self.tcx.sess, self.span, E0394, "{}", msg);
+            struct_span_err!(self.tcx.sess, self.span, E0394, "{}", msg)
+                .span_label(self.span, "referring to another static by value")
+                .note("use the address-of operator or a constant instead")
+                .emit();
 
             // Replace STATIC with NOT_CONST to avoid further errors.
             self.qualif = self.qualif - Qualif::STATIC;
@@ -289,7 +241,7 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
     }
 
     /// Assign the current qualification to the given destination.
-    fn assign(&mut self, dest: &Lvalue<'tcx>) {
+    fn assign(&mut self, dest: &Place<'tcx>, location: Location) {
         let qualif = self.qualif;
         let span = self.span;
         let store = |slot: &mut Option<Qualif>| {
@@ -301,8 +253,10 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
 
         // Only handle promotable temps in non-const functions.
         if self.mode == Mode::Fn {
-            if let Lvalue::Temp(index) = *dest {
-                if self.temp_promotion_state[index].is_promotable() {
+            if let Place::Local(index) = *dest {
+                if self.mir.local_kind(index) == LocalKind::Temp
+                && self.temp_promotion_state[index].is_promotable() {
+                    debug!("store to promotable temp {:?}", index);
                     store(&mut self.temp_qualif[index]);
                 }
             }
@@ -310,13 +264,20 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
         }
 
         match *dest {
-            Lvalue::Temp(index) => store(&mut self.temp_qualif[index]),
-            Lvalue::ReturnPointer => store(&mut self.return_qualif),
+            Place::Local(index) if self.mir.local_kind(index) == LocalKind::Temp => {
+                debug!("store to temp {:?}", index);
+                store(&mut self.temp_qualif[index])
+            }
+            Place::Local(index) if self.mir.local_kind(index) == LocalKind::ReturnPointer => {
+                debug!("store to return place {:?}", index);
+                store(&mut self.return_qualif)
+            }
 
-            Lvalue::Projection(box Projection {
-                base: Lvalue::Temp(index),
+            Place::Projection(box Projection {
+                base: Place::Local(index),
                 elem: ProjectionElem::Deref
-            }) if self.mir.temp_decls[index].ty.is_unique()
+            }) if self.mir.local_kind(index) == LocalKind::Temp
+               && self.mir.local_decls[index].ty.is_box()
                && self.temp_qualif[index].map_or(false, |qualif| {
                     qualif.intersects(Qualif::NOT_CONST)
                }) => {
@@ -327,14 +288,16 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
             // This must be an explicit assignment.
             _ => {
                 // Catch more errors in the destination.
-                self.visit_lvalue(dest, LvalueContext::Store);
+                self.visit_place(dest, PlaceContext::Store, location);
                 self.statement_like();
             }
         }
     }
 
     /// Qualify a whole const, static initializer or const fn.
-    fn qualify_const(&mut self) -> Qualif {
+    fn qualify_const(&mut self) -> (Qualif, Rc<IdxSetBuf<Local>>) {
+        debug!("qualifying {} {:?}", self.mode, self.def_id);
+
         let mir = self.mir;
 
         let mut seen_blocks = BitVector::new(mir.basic_blocks().len());
@@ -346,7 +309,6 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
 
             let target = match mir[bb].terminator().kind {
                 TerminatorKind::Goto { target } |
-                // Drops are considered noops.
                 TerminatorKind::Drop { target, .. } |
                 TerminatorKind::Assert { target, .. } |
                 TerminatorKind::Call { destination: Some((_, target)), .. } => {
@@ -355,20 +317,22 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
 
                 // Non-terminating calls cannot produce any value.
                 TerminatorKind::Call { destination: None, .. } => {
-                    return Qualif::empty();
+                    break;
                 }
 
-                TerminatorKind::If {..} |
-                TerminatorKind::Switch {..} |
                 TerminatorKind::SwitchInt {..} |
                 TerminatorKind::DropAndReplace { .. } |
                 TerminatorKind::Resume |
-                TerminatorKind::Unreachable => None,
+                TerminatorKind::Abort |
+                TerminatorKind::GeneratorDrop |
+                TerminatorKind::Yield { .. } |
+                TerminatorKind::Unreachable |
+                TerminatorKind::FalseEdges { .. } => None,
 
                 TerminatorKind::Return => {
                     // Check for unused values. This usually means
                     // there are extra statements in the AST.
-                    for temp in mir.temp_decls.indices() {
+                    for temp in mir.temps_iter() {
                         if self.temp_qualif[temp].is_none() {
                             continue;
                         }
@@ -393,9 +357,13 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
 
                     // Make sure there are no extra unassigned variables.
                     self.qualif = Qualif::NOT_CONST;
-                    for index in 0..mir.var_decls.len() {
-                        if !self.const_fn_arg_vars.contains(index) {
-                            self.assign(&Lvalue::Var(Var::new(index)));
+                    for index in mir.vars_iter() {
+                        if !self.const_fn_arg_vars.contains(index.index()) {
+                            debug!("unassigned variable {:?}", index);
+                            self.assign(&Place::Local(index), Location {
+                                block: bb,
+                                statement_index: usize::MAX,
+                            });
                         }
                     }
 
@@ -415,25 +383,35 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
             }
         }
 
-        let return_ty = mir.return_ty.unwrap();
         self.qualif = self.return_qualif.unwrap_or(Qualif::NOT_CONST);
 
-        match self.mode {
-            Mode::StaticMut => {
-                // Check for destructors in static mut.
-                self.add_type(return_ty);
-                self.deny_drop();
-            }
-            _ => {
-                // Account for errors in consts by using the
-                // conservative type qualification instead.
-                if self.qualif.intersects(Qualif::CONST_ERROR) {
-                    self.qualif = Qualif::empty();
-                    self.add_type(return_ty);
+        // Account for errors in consts by using the
+        // conservative type qualification instead.
+        if self.qualif.intersects(Qualif::CONST_ERROR) {
+            self.qualif = Qualif::empty();
+            let return_ty = mir.return_ty();
+            self.add_type(return_ty);
+        }
+
+
+        // Collect all the temps we need to promote.
+        let mut promoted_temps = IdxSetBuf::new_empty(self.temp_promotion_state.len());
+
+        for candidate in &self.promotion_candidates {
+            match *candidate {
+                Candidate::Ref(Location { block: bb, statement_index: stmt_idx }) => {
+                    match self.mir[bb].statements[stmt_idx].kind {
+                        StatementKind::Assign(_, Rvalue::Ref(_, _, Place::Local(index))) => {
+                            promoted_temps.add(&index);
+                        }
+                        _ => {}
+                    }
                 }
+                Candidate::ShuffleIndices(_) => {}
             }
         }
-        self.qualif
+
+        (self.qualif, Rc::new(promoted_temps))
     }
 }
 
@@ -441,39 +419,67 @@ impl<'a, 'tcx> Qualifier<'a, 'tcx, 'tcx> {
 /// For functions (constant or not), it also records
 /// candidates for promotion in promotion_candidates.
 impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
-    fn visit_lvalue(&mut self, lvalue: &Lvalue<'tcx>, context: LvalueContext) {
-        match *lvalue {
-            Lvalue::Arg(_) => {
-                self.add(Qualif::FN_ARGUMENT);
+    fn visit_local(&mut self,
+                   &local: &Local,
+                   _: PlaceContext<'tcx>,
+                   _: Location) {
+        let kind = self.mir.local_kind(local);
+        match kind {
+            LocalKind::ReturnPointer => {
+                self.not_const();
             }
-            Lvalue::Var(_) => {
+            LocalKind::Var => {
                 self.add(Qualif::NOT_CONST);
             }
-            Lvalue::Temp(index) => {
-                if !self.temp_promotion_state[index].is_promotable() {
+            LocalKind::Arg |
+            LocalKind::Temp => {
+                if let LocalKind::Arg = kind {
+                    self.add(Qualif::FN_ARGUMENT);
+                }
+
+                if !self.temp_promotion_state[local].is_promotable() {
                     self.add(Qualif::NOT_PROMOTABLE);
                 }
 
-                if let Some(qualif) = self.temp_qualif[index] {
+                if let Some(qualif) = self.temp_qualif[local] {
                     self.add(qualif);
                 } else {
                     self.not_const();
                 }
             }
-            Lvalue::Static(_) => {
+        }
+    }
+
+    fn visit_place(&mut self,
+                    place: &Place<'tcx>,
+                    context: PlaceContext<'tcx>,
+                    location: Location) {
+        match *place {
+            Place::Local(ref local) => self.visit_local(local, context, location),
+            Place::Static(ref global) => {
                 self.add(Qualif::STATIC);
+
+                if self.mode != Mode::Fn {
+                    for attr in &self.tcx.get_attrs(global.def_id)[..] {
+                        if attr.check_name("thread_local") {
+                            span_err!(self.tcx.sess, self.span, E0625,
+                                      "thread-local statics cannot be \
+                                       accessed at compile-time");
+                            self.add(Qualif::NOT_CONST);
+                            return;
+                        }
+                    }
+                }
+
                 if self.mode == Mode::Const || self.mode == Mode::ConstFn {
                     span_err!(self.tcx.sess, self.span, E0013,
                               "{}s cannot refer to statics, use \
                                a constant instead", self.mode);
                 }
             }
-            Lvalue::ReturnPointer => {
-                self.not_const();
-            }
-            Lvalue::Projection(ref proj) => {
+            Place::Projection(ref proj) => {
                 self.nest(|this| {
-                    this.super_lvalue(lvalue, context);
+                    this.super_place(place, context, location);
                     match proj.elem {
                         ProjectionElem::Deref => {
                             if !this.try_consume() {
@@ -485,14 +491,17 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                                 this.add(Qualif::STATIC);
                             }
 
-                            let base_ty = this.mir.lvalue_ty(this.tcx, &proj.base)
-                                              .to_ty(this.tcx);
+                            let base_ty = proj.base.ty(this.mir, this.tcx).to_ty(this.tcx);
                             if let ty::TyRawPtr(_) = base_ty.sty {
                                 this.add(Qualif::NOT_CONST);
                                 if this.mode != Mode::Fn {
-                                    span_err!(this.tcx.sess, this.span, E0396,
-                                              "raw pointers cannot be dereferenced in {}s",
-                                              this.mode);
+                                    struct_span_err!(this.tcx.sess,
+                                        this.span, E0396,
+                                        "raw pointers cannot be dereferenced in {}s",
+                                        this.mode)
+                                    .span_label(this.span,
+                                        "dereference of raw pointer in constant")
+                                    .emit();
                                 }
                             }
                         }
@@ -505,9 +514,8 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                                           "cannot refer to the interior of another \
                                            static, use a constant instead");
                             }
-                            let ty = this.mir.lvalue_ty(this.tcx, lvalue)
-                                         .to_ty(this.tcx);
-                            this.qualif.restrict(ty, this.tcx, &this.param_env);
+                            let ty = place.ty(this.mir, this.tcx).to_ty(this.tcx);
+                            this.qualif.restrict(ty, this.tcx, this.param_env);
                         }
 
                         ProjectionElem::ConstantIndex {..} |
@@ -521,77 +529,77 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
         }
     }
 
-    fn visit_operand(&mut self, operand: &Operand<'tcx>) {
+    fn visit_operand(&mut self, operand: &Operand<'tcx>, location: Location) {
         match *operand {
-            Operand::Consume(_) => {
+            Operand::Copy(_) |
+            Operand::Move(_) => {
                 self.nest(|this| {
-                    this.super_operand(operand);
+                    this.super_operand(operand, location);
                     this.try_consume();
                 });
+
+                // Mark the consumed locals to indicate later drops are noops.
+                if let Operand::Move(Place::Local(local)) = *operand {
+                    self.temp_qualif[local] = self.temp_qualif[local].map(|q|
+                        q - Qualif::NEEDS_DROP
+                    );
+                }
             }
             Operand::Constant(ref constant) => {
-                // Only functions and methods can have these types.
-                if let ty::TyFnDef(..) = constant.ty.sty {
-                    return;
-                }
-
-                if let Literal::Item { def_id, substs } = constant.literal {
-                    // Don't peek inside generic (associated) constants.
-                    if !substs.types.is_empty() {
-                        self.add_type(constant.ty);
+                if let Literal::Value {
+                    value: &ty::Const { val: ConstVal::Unevaluated(def_id, _), ty }
+                } = constant.literal {
+                    // Don't peek inside trait associated constants.
+                    if self.tcx.trait_of_item(def_id).is_some() {
+                        self.add_type(ty);
                     } else {
-                        let qualif = qualify_const_item_cached(self.tcx,
-                                                               self.qualif_map,
-                                                               self.mir_map,
-                                                               def_id);
+                        let (bits, _) = self.tcx.at(constant.span).mir_const_qualif(def_id);
+
+                        let qualif = Qualif::from_bits(bits).expect("invalid mir_const_qualif");
                         self.add(qualif);
-                    }
 
-                    // FIXME(eddyb) check recursive constants here,
-                    // instead of rustc_passes::static_recursion.
-                    if self.qualif.intersects(Qualif::RECURSIVE) {
-                        span_bug!(constant.span,
-                                  "recursive constant wasn't caught earlier");
-                    }
-
-                    // Let `const fn` transitively have destructors,
-                    // but they do get stopped in `const` or `static`.
-                    if self.mode != Mode::ConstFn {
-                        self.deny_drop();
+                        // Just in case the type is more specific than
+                        // the definition, e.g. impl associated const
+                        // with type parameters, take it into account.
+                        self.qualif.restrict(ty, self.tcx, self.param_env);
                     }
                 }
             }
         }
     }
 
-    fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>) {
-        // Recurse through operands and lvalues.
-        self.super_rvalue(rvalue);
+    fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
+        // Recurse through operands and places.
+        self.super_rvalue(rvalue, location);
 
         match *rvalue {
             Rvalue::Use(_) |
             Rvalue::Repeat(..) |
-            Rvalue::UnaryOp(..) |
+            Rvalue::UnaryOp(UnOp::Neg, _) |
+            Rvalue::UnaryOp(UnOp::Not, _) |
+            Rvalue::NullaryOp(NullOp::SizeOf, _) |
             Rvalue::CheckedBinaryOp(..) |
-            Rvalue::Cast(CastKind::ReifyFnPointer, _, _) |
-            Rvalue::Cast(CastKind::UnsafeFnPointer, _, _) |
-            Rvalue::Cast(CastKind::Unsize, _, _) => {}
+            Rvalue::Cast(CastKind::ReifyFnPointer, ..) |
+            Rvalue::Cast(CastKind::UnsafeFnPointer, ..) |
+            Rvalue::Cast(CastKind::ClosureFnPointer, ..) |
+            Rvalue::Cast(CastKind::Unsize, ..) |
+            Rvalue::Discriminant(..) => {}
 
             Rvalue::Len(_) => {
-                // Static lvalues in consts would have errored already,
+                // Static places in consts would have errored already,
                 // don't treat length checks as reads from statics.
                 self.qualif = self.qualif - Qualif::STATIC;
             }
 
-            Rvalue::Ref(_, kind, ref lvalue) => {
-                // Static lvalues in consts would have errored already,
+            Rvalue::Ref(_, kind, ref place) => {
+                // Static places in consts would have errored already,
                 // only keep track of references to them here.
                 if self.qualif.intersects(Qualif::STATIC) {
                     self.qualif = self.qualif - Qualif::STATIC;
                     self.add(Qualif::STATIC_REF);
                 }
 
-                let ty = self.mir.lvalue_ty(self.tcx, lvalue).to_ty(self.tcx);
+                let ty = place.ty(self.mir, self.tcx).to_ty(self.tcx);
                 if kind == BorrowKind::Mut {
                     // In theory, any zero-sized value could be borrowed
                     // mutably without consequences. However, only &mut []
@@ -599,16 +607,12 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                     let allow = if self.mode == Mode::StaticMut {
                         // Inside a `static mut`, &mut [...] is also allowed.
                         match ty.sty {
-                            ty::TyArray(..) | ty::TySlice(_) => {
-                                // Mutating can expose drops, be conservative.
-                                self.add_type(ty);
-                                self.deny_drop();
-                                true
-                            }
+                            ty::TyArray(..) | ty::TySlice(_) => true,
                             _ => false
                         }
-                    } else if let ty::TyArray(_, 0) = ty.sty {
-                        self.mode == Mode::Fn
+                    } else if let ty::TyArray(_, len) = ty.sty {
+                        len.val.to_const_int().unwrap().to_u64().unwrap() == 0 &&
+                            self.mode == Mode::Fn
                     } else {
                         false
                     };
@@ -616,9 +620,12 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                     if !allow {
                         self.add(Qualif::NOT_CONST);
                         if self.mode != Mode::Fn {
-                            span_err!(self.tcx.sess, self.span, E0017,
-                                      "references in {}s may only refer \
-                                       to immutable values", self.mode);
+                            struct_span_err!(self.tcx.sess,  self.span, E0017,
+                                             "references in {}s may only refer \
+                                              to immutable values", self.mode)
+                                .span_label(self.span, format!("{}s require immutable values",
+                                                                self.mode))
+                                .emit();
                         }
                     }
                 } else {
@@ -632,18 +639,18 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                         self.add(Qualif::NOT_CONST);
                         if self.mode != Mode::Fn {
                             span_err!(self.tcx.sess, self.span, E0492,
-                                      "cannot borrow a constant which contains \
+                                      "cannot borrow a constant which may contain \
                                        interior mutability, create a static instead");
                         }
                     }
                 }
 
                 // We might have a candidate for promotion.
-                let candidate = Candidate::Ref(self.location);
-                if self.mode == Mode::Fn || self.mode == Mode::ConstFn {
-                    if !self.qualif.intersects(Qualif::NEVER_PROMOTE) {
-                        // We can only promote direct borrows of temps.
-                        if let Lvalue::Temp(_) = *lvalue {
+                let candidate = Candidate::Ref(location);
+                if self.can_promote() {
+                    // We can only promote direct borrows of temps.
+                    if let Place::Local(local) = *place {
+                        if self.mir.local_kind(local) == LocalKind::Temp {
                             self.promotion_candidates.push(candidate);
                         }
                     }
@@ -651,7 +658,7 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
             }
 
             Rvalue::Cast(CastKind::Misc, ref operand, cast_ty) => {
-                let operand_ty = self.mir.operand_ty(self.tcx, operand);
+                let operand_ty = operand.ty(self.mir, self.tcx);
                 let cast_in = CastTy::from_ty(operand_ty).expect("bad input type for cast");
                 let cast_out = CastTy::from_ty(cast_ty).expect("bad output type for cast");
                 match (cast_in, cast_out) {
@@ -669,74 +676,90 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
             }
 
             Rvalue::BinaryOp(op, ref lhs, _) => {
-                if let ty::TyRawPtr(_) = self.mir.operand_ty(self.tcx, lhs).sty {
+                if let ty::TyRawPtr(_) = lhs.ty(self.mir, self.tcx).sty {
                     assert!(op == BinOp::Eq || op == BinOp::Ne ||
                             op == BinOp::Le || op == BinOp::Lt ||
-                            op == BinOp::Ge || op == BinOp::Gt);
+                            op == BinOp::Ge || op == BinOp::Gt ||
+                            op == BinOp::Offset);
 
                     self.add(Qualif::NOT_CONST);
                     if self.mode != Mode::Fn {
-                        span_err!(self.tcx.sess, self.span, E0395,
-                                  "raw pointers cannot be compared in {}s",
-                                  self.mode);
+                        struct_span_err!(
+                            self.tcx.sess, self.span, E0395,
+                            "raw pointers cannot be compared in {}s",
+                            self.mode)
+                        .span_label(
+                            self.span,
+                            "comparing raw pointers in static")
+                        .emit();
                     }
                 }
             }
 
-            Rvalue::Box(_) => {
+            Rvalue::NullaryOp(NullOp::Box, _) => {
                 self.add(Qualif::NOT_CONST);
                 if self.mode != Mode::Fn {
-                    span_err!(self.tcx.sess, self.span, E0010,
-                              "allocations are not allowed in {}s", self.mode);
+                    struct_span_err!(self.tcx.sess, self.span, E0010,
+                                     "allocations are not allowed in {}s", self.mode)
+                        .span_label(self.span, format!("allocation not allowed in {}s", self.mode))
+                        .emit();
                 }
             }
 
             Rvalue::Aggregate(ref kind, _) => {
-                if let AggregateKind::Adt(def, _, _) = *kind {
-                    if def.has_dtor() {
+                if let AggregateKind::Adt(def, ..) = **kind {
+                    if def.has_dtor(self.tcx) {
                         self.add(Qualif::NEEDS_DROP);
-                        self.deny_drop();
                     }
 
-                    if Some(def.did) == self.tcx.lang_items.unsafe_cell_type() {
-                        let ty = self.mir.rvalue_ty(self.tcx, rvalue).unwrap();
+                    if Some(def.did) == self.tcx.lang_items().unsafe_cell_type() {
+                        let ty = rvalue.ty(self.mir, self.tcx);
                         self.add_type(ty);
                         assert!(self.qualif.intersects(Qualif::MUTABLE_INTERIOR));
-                        // Even if the value inside may not need dropping,
-                        // mutating it would change that.
-                        if !self.qualif.intersects(Qualif::NOT_CONST) {
-                            self.deny_drop();
+                    }
+                }
+            }
+        }
+    }
+
+    fn visit_terminator_kind(&mut self,
+                             bb: BasicBlock,
+                             kind: &TerminatorKind<'tcx>,
+                             location: Location) {
+        if let TerminatorKind::Call { ref func, ref args, ref destination, .. } = *kind {
+            self.visit_operand(func, location);
+
+            let fn_ty = func.ty(self.mir, self.tcx);
+            let (mut is_shuffle, mut is_const_fn) = (false, None);
+            if let ty::TyFnDef(def_id, _) = fn_ty.sty {
+                match self.tcx.fn_sig(def_id).abi() {
+                    Abi::RustIntrinsic |
+                    Abi::PlatformIntrinsic => {
+                        assert!(!self.tcx.is_const_fn(def_id));
+                        match &self.tcx.item_name(def_id)[..] {
+                            "size_of" | "min_align_of" => is_const_fn = Some(def_id),
+
+                            name if name.starts_with("simd_shuffle") => {
+                                is_shuffle = true;
+                            }
+
+                            _ => {}
+                        }
+                    }
+                    _ => {
+                        if self.tcx.is_const_fn(def_id) {
+                            is_const_fn = Some(def_id);
                         }
                     }
                 }
             }
 
-            Rvalue::InlineAsm {..} => {
-                self.not_const();
-            }
-        }
-    }
-
-    fn visit_terminator_kind(&mut self, bb: BasicBlock, kind: &TerminatorKind<'tcx>) {
-        if let TerminatorKind::Call { ref func, ref args, ref destination, .. } = *kind {
-            self.visit_operand(func);
-
-            let fn_ty = self.mir.operand_ty(self.tcx, func);
-            let (is_shuffle, is_const_fn) = match fn_ty.sty {
-                ty::TyFnDef(def_id, _, f) => {
-                    (f.abi == Abi::PlatformIntrinsic &&
-                     self.tcx.item_name(def_id).as_str().starts_with("simd_shuffle"),
-                     is_const_fn(self.tcx, def_id))
-                }
-                _ => (false, false)
-            };
-
             for (i, arg) in args.iter().enumerate() {
                 self.nest(|this| {
-                    this.visit_operand(arg);
+                    this.visit_operand(arg, location);
                     if is_shuffle && i == 2 && this.mode == Mode::Fn {
                         let candidate = Candidate::ShuffleIndices(bb);
-                        if !this.qualif.intersects(Qualif::NEVER_PROMOTE) {
+                        if this.can_promote() {
                             this.promotion_candidates.push(candidate);
                         } else {
                             span_err!(this.tcx.sess, this.span, E0526,
@@ -747,25 +770,38 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
             }
 
             // Const fn calls.
-            if is_const_fn {
-                // We are in a const or static initializer,
-                if self.mode != Mode::Fn &&
+            if let Some(def_id) = is_const_fn {
+                // find corresponding rustc_const_unstable feature
+                if let Some(&attr::Stability {
+                    rustc_const_unstable: Some(attr::RustcConstUnstable {
+                        feature: ref feature_name
+                    }),
+                .. }) = self.tcx.lookup_stability(def_id) {
 
-                    // feature-gate is not enabled,
-                    !self.tcx.sess.features.borrow().const_fn &&
+                    // We are in a const or static initializer,
+                    if self.mode != Mode::Fn &&
 
-                    // this doesn't come from a crate with the feature-gate enabled,
-                    self.def_id.is_local() &&
+                        // feature-gate is not enabled,
+                        !self.tcx.sess.features.borrow()
+                            .declared_lib_features
+                            .iter()
+                            .any(|&(ref sym, _)| sym == feature_name) &&
 
-                    // this doesn't come from a macro that has #[allow_internal_unstable]
-                    !self.tcx.sess.codemap().span_allows_unstable(self.span)
-                {
-                    let mut err = self.tcx.sess.struct_span_err(self.span,
-                        "const fns are an unstable feature");
-                    help!(&mut err,
-                          "in Nightly builds, add `#![feature(const_fn)]` \
-                           to the crate attributes to enable");
-                    err.emit();
+                        // this doesn't come from a crate with the feature-gate enabled,
+                        self.def_id.is_local() &&
+
+                        // this doesn't come from a macro that has #[allow_internal_unstable]
+                        !self.span.allows_unstable()
+                    {
+                        let mut err = self.tcx.sess.struct_span_err(self.span,
+                            &format!("`{}` is not yet stable as a const fn",
+                                     self.tcx.item_path_str(def_id)));
+                        help!(&mut err,
+                              "in Nightly builds, add `#![feature({})]` \
+                               to the crate attributes to enable",
+                              feature_name);
+                        err.emit();
+                    }
                 }
             } else {
                 self.qualif = Qualif::NOT_CONST;
@@ -801,38 +837,73 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
                 } else {
                     // Be conservative about the returned value of a const fn.
                     let tcx = self.tcx;
-                    let ty = self.mir.lvalue_ty(tcx, dest).to_ty(tcx);
+                    let ty = dest.ty(self.mir, tcx).to_ty(tcx);
                     self.qualif = Qualif::empty();
                     self.add_type(ty);
+                }
+                self.assign(dest, location);
+            }
+        } else if let TerminatorKind::Drop { location: ref place, .. } = *kind {
+            self.super_terminator_kind(bb, kind, location);
 
-                    // Let `const fn` transitively have destructors,
-                    // but they do get stopped in `const` or `static`.
-                    if self.mode != Mode::ConstFn {
-                        self.deny_drop();
+            // Deny *any* live drops anywhere other than functions.
+            if self.mode != Mode::Fn {
+                // HACK(eddyb) Emulate a bit of dataflow analysis,
+                // conservatively, that drop elaboration will do.
+                let needs_drop = if let Place::Local(local) = *place {
+                    if self.temp_qualif[local].map_or(true, |q| q.intersects(Qualif::NEEDS_DROP)) {
+                        Some(self.mir.local_decls[local].source_info.span)
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(self.span)
+                };
+
+                if let Some(span) = needs_drop {
+                    // Double-check the type being dropped, to minimize false positives.
+                    let ty = place.ty(self.mir, self.tcx).to_ty(self.tcx);
+                    if ty.needs_drop(self.tcx, self.param_env) {
+                        struct_span_err!(self.tcx.sess, span, E0493,
+                                         "destructors cannot be evaluated at compile-time")
+                            .span_label(span, format!("{}s cannot evaluate destructors",
+                                                      self.mode))
+                            .emit();
                     }
                 }
-                self.assign(dest);
             }
         } else {
             // Qualify any operands inside other terminators.
-            self.super_terminator_kind(bb, kind);
+            self.super_terminator_kind(bb, kind, location);
         }
     }
 
-    fn visit_assign(&mut self, _: BasicBlock, dest: &Lvalue<'tcx>, rvalue: &Rvalue<'tcx>) {
-        self.visit_rvalue(rvalue);
+    fn visit_assign(&mut self,
+                    _: BasicBlock,
+                    dest: &Place<'tcx>,
+                    rvalue: &Rvalue<'tcx>,
+                    location: Location) {
+        self.visit_rvalue(rvalue, location);
 
         // Check the allowed const fn argument forms.
-        if let (Mode::ConstFn, &Lvalue::Var(index)) = (self.mode, dest) {
-            if self.const_fn_arg_vars.insert(index.index()) {
+        if let (Mode::ConstFn, &Place::Local(index)) = (self.mode, dest) {
+            if self.mir.local_kind(index) == LocalKind::Var &&
+               self.const_fn_arg_vars.insert(index.index()) {
+
                 // Direct use of an argument is permitted.
-                if let Rvalue::Use(Operand::Consume(Lvalue::Arg(_))) = *rvalue {
-                    return;
+                match *rvalue {
+                    Rvalue::Use(Operand::Copy(Place::Local(local))) |
+                    Rvalue::Use(Operand::Move(Place::Local(local))) => {
+                        if self.mir.local_kind(local) == LocalKind::Arg {
+                            return;
+                        }
+                    }
+                    _ => {}
                 }
 
                 // Avoid a generic error for other uses of arguments.
                 if self.qualif.intersects(Qualif::FN_ARGUMENT) {
-                    let decl = &self.mir.var_decls[index];
+                    let decl = &self.mir.local_decls[index];
                     span_err!(self.tcx.sess, decl.source_info.span, E0022,
                               "arguments of constant functions can only \
                                be immutable by-value bindings");
@@ -841,164 +912,176 @@ impl<'a, 'tcx> Visitor<'tcx> for Qualifier<'a, 'tcx, 'tcx> {
             }
         }
 
-        self.assign(dest);
+        self.assign(dest, location);
     }
 
     fn visit_source_info(&mut self, source_info: &SourceInfo) {
         self.span = source_info.span;
     }
 
-    fn visit_statement(&mut self, bb: BasicBlock, statement: &Statement<'tcx>) {
-        assert_eq!(self.location.block, bb);
-        self.nest(|this| this.super_statement(bb, statement));
-        self.location.statement_index += 1;
+    fn visit_statement(&mut self, bb: BasicBlock, statement: &Statement<'tcx>, location: Location) {
+        self.nest(|this| {
+            this.visit_source_info(&statement.source_info);
+            match statement.kind {
+                StatementKind::Assign(ref place, ref rvalue) => {
+                    this.visit_assign(bb, place, rvalue, location);
+                }
+                StatementKind::SetDiscriminant { .. } |
+                StatementKind::StorageLive(_) |
+                StatementKind::StorageDead(_) |
+                StatementKind::InlineAsm {..} |
+                StatementKind::EndRegion(_) |
+                StatementKind::Validate(..) |
+                StatementKind::Nop => {}
+            }
+        });
     }
 
-    fn visit_terminator(&mut self, bb: BasicBlock, terminator: &Terminator<'tcx>) {
-        assert_eq!(self.location.block, bb);
-        self.nest(|this| this.super_terminator(bb, terminator));
-    }
-
-    fn visit_basic_block_data(&mut self, bb: BasicBlock, data: &BasicBlockData<'tcx>) {
-        self.location.statement_index = 0;
-        self.location.block = bb;
-        self.super_basic_block_data(bb, data);
+    fn visit_terminator(&mut self,
+                        bb: BasicBlock,
+                        terminator: &Terminator<'tcx>,
+                        location: Location) {
+        self.nest(|this| this.super_terminator(bb, terminator, location));
     }
 }
 
-fn qualify_const_item_cached<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                                       qualif_map: &mut DefIdMap<Qualif>,
-                                       mir_map: Option<&MirMap<'tcx>>,
-                                       def_id: DefId)
-                                       -> Qualif {
-    match qualif_map.entry(def_id) {
-        Entry::Occupied(entry) => return *entry.get(),
-        Entry::Vacant(entry) => {
-            // Guard against `const` recursion.
-            entry.insert(Qualif::RECURSIVE);
-        }
+pub fn provide(providers: &mut Providers) {
+    *providers = Providers {
+        mir_const_qualif,
+        ..*providers
+    };
+}
+
+fn mir_const_qualif<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                              def_id: DefId)
+                              -> (u8, Rc<IdxSetBuf<Local>>) {
+    // NB: This `borrow()` is guaranteed to be valid (i.e., the value
+    // cannot yet be stolen), because `mir_validated()`, which steals
+    // from `mir_const(), forces this query to execute before
+    // performing the steal.
+    let mir = &tcx.mir_const(def_id).borrow();
+
+    if mir.return_ty().references_error() {
+        tcx.sess.delay_span_bug(mir.span, "mir_const_qualif: Mir had errors");
+        return (Qualif::NOT_CONST.bits(), Rc::new(IdxSetBuf::new_empty(0)));
     }
 
-    let extern_mir;
-    let param_env_and_mir = if def_id.is_local() {
-        let node_id = tcx.map.as_local_node_id(def_id).unwrap();
-        mir_map.and_then(|map| map.map.get(&node_id)).map(|mir| {
-            (ty::ParameterEnvironment::for_item(tcx, node_id), mir)
-        })
-    } else if let Some(mir) = tcx.sess.cstore.maybe_get_item_mir(tcx, def_id) {
-        // These should only be monomorphic constants.
-        extern_mir = mir;
-        Some((tcx.empty_parameter_environment(), &extern_mir))
-    } else {
-        None
-    };
-
-    let (param_env, mir) = param_env_and_mir.unwrap_or_else(|| {
-        bug!("missing constant MIR for {}", tcx.item_path_str(def_id))
-    });
-
-    let mut qualifier = Qualifier::new(tcx, param_env, qualif_map, mir_map,
-                                       def_id, mir, Mode::Const);
-    let qualif = qualifier.qualify_const();
-    qualifier.qualif_map.insert(def_id, qualif);
-    qualif
+    let mut qualifier = Qualifier::new(tcx, def_id, mir, Mode::Const);
+    let (qualif, promoted_temps) = qualifier.qualify_const();
+    (qualif.bits(), promoted_temps)
 }
 
 pub struct QualifyAndPromoteConstants;
 
-impl Pass for QualifyAndPromoteConstants {}
+impl MirPass for QualifyAndPromoteConstants {
+    fn run_pass<'a, 'tcx>(&self,
+                          tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                          src: MirSource,
+                          mir: &mut Mir<'tcx>) {
+        // There's not really any point in promoting errorful MIR.
+        if mir.return_ty().references_error() {
+            tcx.sess.delay_span_bug(mir.span, "QualifyAndPromoteConstants: Mir had errors");
+            return;
+        }
 
-impl<'tcx> MirMapPass<'tcx> for QualifyAndPromoteConstants {
-    fn run_pass<'a>(&mut self,
-                    tcx: TyCtxt<'a, 'tcx, 'tcx>,
-                    map: &mut MirMap<'tcx>,
-                    hooks: &mut [Box<for<'s> MirPassHook<'s>>]) {
-        let mut qualif_map = DefIdMap();
+        if src.promoted.is_some() {
+            return;
+        }
 
-        // First, visit `const` items, potentially recursing, to get
-        // accurate MUTABLE_INTERIOR and NEEDS_DROP qualifications.
-        for &id in map.map.keys() {
-            let def_id = tcx.map.local_def_id(id);
-            let _task = tcx.dep_graph.in_task(self.dep_node(def_id));
-            let src = MirSource::from_node(tcx, id);
-            if let MirSource::Const(_) = src {
-                qualify_const_item_cached(tcx, &mut qualif_map, Some(map), def_id);
+        let def_id = src.def_id;
+        let id = tcx.hir.as_local_node_id(def_id).unwrap();
+        let mut const_promoted_temps = None;
+        let mode = match tcx.hir.body_owner_kind(id) {
+            hir::BodyOwnerKind::Fn => {
+                if tcx.is_const_fn(def_id) {
+                    Mode::ConstFn
+                } else {
+                    Mode::Fn
+                }
+            }
+            hir::BodyOwnerKind::Const => {
+                const_promoted_temps = Some(tcx.mir_const_qualif(def_id).1);
+                Mode::Const
+            }
+            hir::BodyOwnerKind::Static(hir::MutImmutable) => Mode::Static,
+            hir::BodyOwnerKind::Static(hir::MutMutable) => Mode::StaticMut,
+        };
+
+        if mode == Mode::Fn || mode == Mode::ConstFn {
+            // This is ugly because Qualifier holds onto mir,
+            // which can't be mutated until its scope ends.
+            let (temps, candidates) = {
+                let mut qualifier = Qualifier::new(tcx, def_id, mir, mode);
+                if mode == Mode::ConstFn {
+                    // Enforce a constant-like CFG for `const fn`.
+                    qualifier.qualify_const();
+                } else {
+                    while let Some((bb, data)) = qualifier.rpo.next() {
+                        qualifier.visit_basic_block_data(bb, data);
+                    }
+                }
+
+                (qualifier.temp_promotion_state, qualifier.promotion_candidates)
+            };
+
+            // Do the actual promotion, now that we know what's viable.
+            promote_consts::promote_candidates(mir, tcx, temps, candidates);
+        } else {
+            let promoted_temps = if mode == Mode::Const {
+                // Already computed by `mir_const_qualif`.
+                const_promoted_temps.unwrap()
+            } else {
+                Qualifier::new(tcx, def_id, mir, mode).qualify_const().1
+            };
+
+            // In `const` and `static` everything without `StorageDead`
+            // is `'static`, we don't have to create promoted MIR fragments,
+            // just remove `Drop` and `StorageDead` on "promoted" locals.
+            for block in mir.basic_blocks_mut() {
+                block.statements.retain(|statement| {
+                    match statement.kind {
+                        StatementKind::StorageDead(index) => {
+                            !promoted_temps.contains(&index)
+                        }
+                        _ => true
+                    }
+                });
+                let terminator = block.terminator_mut();
+                match terminator.kind {
+                    TerminatorKind::Drop { location: Place::Local(index), target, .. } => {
+                        if promoted_temps.contains(&index) {
+                            terminator.kind = TerminatorKind::Goto {
+                                target,
+                            };
+                        }
+                    }
+                    _ => {}
+                }
             }
         }
 
-        // Then, handle everything else, without recursing,
-        // as the MIR map is not shared, since promotion
-        // in functions (including `const fn`) mutates it.
-        for (&id, mir) in &mut map.map {
-            let def_id = tcx.map.local_def_id(id);
-            let _task = tcx.dep_graph.in_task(self.dep_node(def_id));
-            let src = MirSource::from_node(tcx, id);
-            let mode = match src {
-                MirSource::Fn(_) => {
-                    if is_const_fn(tcx, def_id) {
-                        Mode::ConstFn
-                    } else {
-                        Mode::Fn
-                    }
+        // Statics must be Sync.
+        if mode == Mode::Static {
+            // `#[thread_local]` statics don't have to be `Sync`.
+            for attr in &tcx.get_attrs(def_id)[..] {
+                if attr.check_name("thread_local") {
+                    return;
                 }
-                MirSource::Const(_) => continue,
-                MirSource::Static(_, hir::MutImmutable) => Mode::Static,
-                MirSource::Static(_, hir::MutMutable) => Mode::StaticMut,
-                MirSource::Promoted(..) => bug!()
-            };
-            let param_env = ty::ParameterEnvironment::for_item(tcx, id);
-
-            for hook in &mut *hooks {
-                hook.on_mir_pass(tcx, src, mir, self, false);
             }
-
-            if mode == Mode::Fn || mode == Mode::ConstFn {
-                // This is ugly because Qualifier holds onto mir,
-                // which can't be mutated until its scope ends.
-                let (temps, candidates) = {
-                    let mut qualifier = Qualifier::new(tcx, param_env, &mut qualif_map,
-                                                       None, def_id, mir, mode);
-                    if mode == Mode::ConstFn {
-                        // Enforce a constant-like CFG for `const fn`.
-                        qualifier.qualify_const();
-                    } else {
-                        while let Some((bb, data)) = qualifier.rpo.next() {
-                            qualifier.visit_basic_block_data(bb, data);
-                        }
-                    }
-
-                    (qualifier.temp_promotion_state,
-                     qualifier.promotion_candidates)
-                };
-
-                // Do the actual promotion, now that we know what's viable.
-                promote_consts::promote_candidates(mir, tcx, temps, candidates);
-            } else {
-                let mut qualifier = Qualifier::new(tcx, param_env, &mut qualif_map,
-                                                   None, def_id, mir, mode);
-                qualifier.qualify_const();
-            }
-
-            for hook in &mut *hooks {
-                hook.on_mir_pass(tcx, src, mir, self, true);
-            }
-
-            // Statics must be Sync.
-            if mode == Mode::Static {
-                let ty = mir.return_ty.unwrap();
-                tcx.infer_ctxt(None, None, ProjectionMode::AnyFinal).enter(|infcx| {
-                    let cause = traits::ObligationCause::new(mir.span, id, traits::SharedStatic);
-                    let mut fulfillment_cx = traits::FulfillmentContext::new();
-                    fulfillment_cx.register_builtin_bound(&infcx, ty, ty::BoundSync, cause);
-                    if let Err(err) = fulfillment_cx.select_all_or_error(&infcx) {
-                        infcx.report_fulfillment_errors(&err);
-                    }
-
-                    if let Err(errors) = fulfillment_cx.select_rfc1592_obligations(&infcx) {
-                        infcx.report_fulfillment_errors_as_warnings(&errors, id);
-                    }
-                });
-            }
+            let ty = mir.return_ty();
+            tcx.infer_ctxt().enter(|infcx| {
+                let param_env = ty::ParamEnv::empty(Reveal::UserFacing);
+                let cause = traits::ObligationCause::new(mir.span, id, traits::SharedStatic);
+                let mut fulfillment_cx = traits::FulfillmentContext::new();
+                fulfillment_cx.register_bound(&infcx,
+                                              param_env,
+                                              ty,
+                                              tcx.require_lang_item(lang_items::SyncTraitLangItem),
+                                              cause);
+                if let Err(err) = fulfillment_cx.select_all_or_error(&infcx) {
+                    infcx.report_fulfillment_errors(&err, None);
+                }
+            });
         }
     }
 }

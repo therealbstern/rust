@@ -10,16 +10,18 @@
 
 //! A helper class for dealing with static archives
 
-use std::ffi::{CString, CStr, OsString};
+use std::ffi::{CString, CStr};
 use std::io;
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::str;
 
+use back::bytecode::RLIB_BYTECODE_EXTENSION;
 use libc;
 use llvm::archive_ro::{ArchiveRO, Child};
 use llvm::{self, ArchiveKind};
+use metadata::METADATA_FILENAME;
 use rustc::session::Session;
 
 pub struct ArchiveConfig<'a> {
@@ -27,12 +29,9 @@ pub struct ArchiveConfig<'a> {
     pub dst: PathBuf,
     pub src: Option<PathBuf>,
     pub lib_search_paths: Vec<PathBuf>,
-    pub ar_prog: String,
-    pub command_path: OsString,
 }
 
-/// Helper for adding many files to an archive with a single invocation of
-/// `ar`.
+/// Helper for adding many files to an archive.
 #[must_use = "must call build() to finish building the archive"]
 pub struct ArchiveBuilder<'a> {
     config: ArchiveConfig<'a>,
@@ -65,10 +64,10 @@ pub fn find_library(name: &str, search_paths: &[PathBuf], sess: &Session)
 
     for path in search_paths {
         debug!("looking for {} inside {:?}", name, path);
-        let test = path.join(&oslibname[..]);
+        let test = path.join(&oslibname);
         if test.exists() { return test }
         if oslibname != unixlibname {
-            let test = path.join(&unixlibname[..]);
+            let test = path.join(&unixlibname);
             if test.exists() { return test }
         }
     }
@@ -88,7 +87,7 @@ impl<'a> ArchiveBuilder<'a> {
     /// by `config`.
     pub fn new(config: ArchiveConfig<'a>) -> ArchiveBuilder<'a> {
         ArchiveBuilder {
-            config: config,
+            config,
             removals: Vec::new(),
             additions: Vec::new(),
             should_update_symbols: false,
@@ -121,11 +120,8 @@ impl<'a> ArchiveBuilder<'a> {
         if let Some(ref a) = self.src_archive {
             return a.as_ref()
         }
-        let src = match self.config.src {
-            Some(ref src) => src,
-            None => return None,
-        };
-        self.src_archive = Some(ArchiveRO::open(src));
+        let src = self.config.src.as_ref()?;
+        self.src_archive = Some(ArchiveRO::open(src).ok());
         self.src_archive.as_ref().unwrap().as_ref()
     }
 
@@ -145,23 +141,35 @@ impl<'a> ArchiveBuilder<'a> {
     ///
     /// This ignores adding the bytecode from the rlib, and if LTO is enabled
     /// then the object file also isn't added.
-    pub fn add_rlib(&mut self, rlib: &Path, name: &str, lto: bool)
-                    -> io::Result<()> {
+    pub fn add_rlib(&mut self,
+                    rlib: &Path,
+                    name: &str,
+                    lto: bool,
+                    skip_objects: bool) -> io::Result<()> {
         // Ignoring obj file starting with the crate name
         // as simple comparison is not enough - there
         // might be also an extra name suffix
         let obj_start = format!("{}", name);
 
-        // Ignoring all bytecode files, no matter of
-        // name
-        let bc_ext = ".bytecode.deflate";
-        let metadata_filename =
-            self.config.sess.cstore.metadata_filename().to_owned();
-
         self.add_archive(rlib, move |fname: &str| {
-            let skip_obj = lto && fname.starts_with(&obj_start)
-                && fname.ends_with(".o");
-            skip_obj || fname.ends_with(bc_ext) || fname == metadata_filename
+            // Ignore bytecode/metadata files, no matter the name.
+            if fname.ends_with(RLIB_BYTECODE_EXTENSION) || fname == METADATA_FILENAME {
+                return true
+            }
+
+            // Don't include Rust objects if LTO is enabled
+            if lto && fname.starts_with(&obj_start) && fname.ends_with(".o") {
+                return true
+            }
+
+            // Otherwise if this is *not* a rust object and we're skipping
+            // objects then skip this file
+            if skip_objects && (!fname.starts_with(&obj_start) || !fname.ends_with(".o")) {
+                return true
+            }
+
+            // ok, don't skip this
+            return false
         })
     }
 
@@ -170,12 +178,11 @@ impl<'a> ArchiveBuilder<'a> {
         where F: FnMut(&str) -> bool + 'static
     {
         let archive = match ArchiveRO::open(archive) {
-            Some(ar) => ar,
-            None => return Err(io::Error::new(io::ErrorKind::Other,
-                                              "failed to open archive")),
+            Ok(ar) => ar,
+            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
         };
         self.additions.push(Addition::Archive {
-            archive: archive,
+            archive,
             skip: Box::new(skip),
         });
         Ok(())
@@ -190,8 +197,8 @@ impl<'a> ArchiveBuilder<'a> {
         });
     }
 
-    /// Indicate that the next call to `build` should updates all symbols in
-    /// the archive (run 'ar s' over it).
+    /// Indicate that the next call to `build` should update all symbols in
+    /// the archive (equivalent to running 'ar s' over it).
     pub fn update_symbols(&mut self) {
         self.should_update_symbols = true;
     }
@@ -214,7 +221,7 @@ impl<'a> ArchiveBuilder<'a> {
     }
 
     fn llvm_archive_kind(&self) -> Result<ArchiveKind, &str> {
-        let kind = &self.config.sess.target.target.options.archive_format[..];
+        let kind = &*self.config.sess.target.target.options.archive_format;
         kind.parse().map_err(|_| kind)
     }
 
@@ -293,7 +300,7 @@ impl<'a> ArchiveBuilder<'a> {
                                                members.as_ptr(),
                                                self.should_update_symbols,
                                                kind);
-            let ret = if r != 0 {
+            let ret = if r.into_result().is_err() {
                 let err = llvm::LLVMRustGetLastError();
                 let msg = if err.is_null() {
                     "failed to write archive".to_string()

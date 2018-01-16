@@ -8,8 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rustc_private, rustdoc)]
-#![feature(question_mark)]
+#![feature(rustc_private)]
 
 extern crate syntax;
 extern crate rustdoc;
@@ -25,7 +24,7 @@ use std::path::PathBuf;
 
 use syntax::diagnostics::metadata::{get_metadata_dir, ErrorMetadataMap, ErrorMetadata};
 
-use rustdoc::html::markdown::Markdown;
+use rustdoc::html::markdown::{Markdown, PLAYGROUND, RenderType};
 use rustc_serialize::json;
 
 enum OutputFormat {
@@ -101,7 +100,7 @@ impl Formatter for HTMLFormatter {
 
         // Description rendered as markdown.
         match info.description {
-            Some(ref desc) => write!(output, "{}", Markdown(desc))?,
+            Some(ref desc) => write!(output, "{}", Markdown(desc, RenderType::Hoedown))?,
             None => write!(output, "<p>No description.</p>\n")?,
         }
 
@@ -110,7 +109,65 @@ impl Formatter for HTMLFormatter {
     }
 
     fn footer(&self, output: &mut Write) -> Result<(), Box<Error>> {
-        write!(output, "</body>\n</html>")?;
+        write!(output, r##"<script>
+function onEach(arr, func) {{
+    if (arr && arr.length > 0 && func) {{
+        for (var i = 0; i < arr.length; i++) {{
+            func(arr[i]);
+        }}
+    }}
+}}
+
+function hasClass(elem, className) {{
+    if (elem && className && elem.className) {{
+        var elemClass = elem.className;
+        var start = elemClass.indexOf(className);
+        if (start === -1) {{
+            return false;
+        }} else if (elemClass.length === className.length) {{
+            return true;
+        }} else {{
+            if (start > 0 && elemClass[start - 1] !== ' ') {{
+                return false;
+            }}
+            var end = start + className.length;
+            if (end < elemClass.length && elemClass[end] !== ' ') {{
+                return false;
+            }}
+            return true;
+        }}
+        if (start > 0 && elemClass[start - 1] !== ' ') {{
+            return false;
+        }}
+        var end = start + className.length;
+        if (end < elemClass.length && elemClass[end] !== ' ') {{
+            return false;
+        }}
+        return true;
+    }}
+    return false;
+}}
+
+onEach(document.getElementsByClassName('rust-example-rendered'), function(e) {{
+    if (hasClass(e, 'compile_fail')) {{
+        e.addEventListener("mouseover", function(event) {{
+            e.previousElementSibling.childNodes[0].style.color = '#f00';
+        }});
+        e.addEventListener("mouseout", function(event) {{
+            e.previousElementSibling.childNodes[0].style.color = '';
+        }});
+    }} else if (hasClass(e, 'ignore')) {{
+        e.addEventListener("mouseover", function(event) {{
+            e.previousElementSibling.childNodes[0].style.color = '#ff9200';
+        }});
+        e.addEventListener("mouseout", function(event) {{
+            e.previousElementSibling.childNodes[0].style.color = '';
+        }});
+    }}
+}});
+</script>
+</body>
+</html>"##)?;
         Ok(())
     }
 }
@@ -202,6 +259,9 @@ fn parse_args() -> (OutputFormat, PathBuf) {
 }
 
 fn main() {
+    PLAYGROUND.with(|slot| {
+        *slot.borrow_mut() = Some((None, String::from("https://play.rust-lang.org/")));
+    });
     let (format, dst) = parse_args();
     if let Err(e) = main_with_result(format, &dst) {
         panic!("{}", e.description());

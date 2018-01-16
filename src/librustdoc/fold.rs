@@ -49,6 +49,13 @@ pub trait DocFolder : Sized {
                                      i.fields.iter().any(|f| f.is_stripped());
                 StructItem(i)
             },
+            UnionItem(mut i) => {
+                let num_fields = i.fields.len();
+                i.fields = i.fields.into_iter().filter_map(|x| self.fold_item(x)).collect();
+                i.fields_stripped |= num_fields != i.fields.len() ||
+                                     i.fields.iter().any(|f| f.is_stripped());
+                UnionItem(i)
+            },
             EnumItem(mut i) => {
                 let num_variants = i.variants.len();
                 i.variants = i.variants.into_iter().filter_map(|x| self.fold_item(x)).collect();
@@ -67,12 +74,12 @@ pub trait DocFolder : Sized {
             VariantItem(i) => {
                 let i2 = i.clone(); // this clone is small
                 match i.kind {
-                    StructVariant(mut j) => {
+                    VariantKind::Struct(mut j) => {
                         let num_fields = j.fields.len();
                         j.fields = j.fields.into_iter().filter_map(|x| self.fold_item(x)).collect();
                         j.fields_stripped |= num_fields != j.fields.len() ||
                                              j.fields.iter().any(|f| f.is_stripped());
-                        VariantItem(Variant {kind: StructVariant(j), ..i2})
+                        VariantItem(Variant {kind: VariantKind::Struct(j), ..i2})
                     },
                     _ => VariantItem(i2)
                 }
@@ -90,9 +97,8 @@ pub trait DocFolder : Sized {
             _ => self.fold_inner_recur(inner),
         };
 
-        Some(Item { attrs: attrs, name: name, source: source, inner: inner,
-                    visibility: visibility, stability: stability, deprecation: deprecation,
-                    def_id: def_id })
+        Some(Item { attrs, name, source, inner, visibility,
+                    stability, deprecation, def_id })
     }
 
     fn fold_mod(&mut self, m: Module) -> Module {

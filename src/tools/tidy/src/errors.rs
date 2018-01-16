@@ -25,7 +25,7 @@ pub fn check(path: &Path, bad: &mut bool) {
                 &mut |path| super::filter_dirs(path) || path.ends_with("src/test"),
                 &mut |file| {
         let filename = file.file_name().unwrap().to_string_lossy();
-        if filename != "diagnostics.rs" {
+        if filename != "diagnostics.rs" && filename != "diagnostic_list.rs" {
             return
         }
 
@@ -79,11 +79,10 @@ pub fn check(path: &Path, bad: &mut bool) {
             continue
         }
 
-        println!("duplicate error code: {}", code);
+        tidy_error!(bad, "duplicate error code: {}", code);
         for &(ref file, line_num, ref line) in entries.iter() {
-            println!("{}:{}: {}", file.display(), line_num, line);
+            tidy_error!(bad, "{}:{}: {}", file.display(), line_num, line);
         }
-        *bad = true;
     }
 
     if !*bad {

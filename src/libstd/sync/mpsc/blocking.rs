@@ -13,9 +13,7 @@
 use thread::{self, Thread};
 use sync::atomic::{AtomicBool, Ordering};
 use sync::Arc;
-use marker::{Sync, Send};
 use mem;
-use clone::Clone;
 use time::Instant;
 
 struct Inner {
@@ -48,7 +46,7 @@ pub fn tokens() -> (WaitToken, SignalToken) {
         inner: inner.clone(),
     };
     let signal_token = SignalToken {
-        inner: inner
+        inner,
     };
     (wait_token, signal_token)
 }

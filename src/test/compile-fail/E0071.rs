@@ -8,9 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-enum Foo { FirstValue(i32) }
+enum Foo {}
+type FooAlias = Foo;
 
 fn main() {
-    let u = Foo::FirstValue { value: 0 }; //~ ERROR E0071
-    let t = u32 { value: 4 }; //~ ERROR E0071
+    let u = FooAlias { value: 0 };
+    //~^ ERROR expected struct, variant or union type, found enum `Foo` [E0071]
 }
