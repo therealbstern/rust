@@ -17,7 +17,7 @@
 // `use` directives.
 //
 // Unused trait imports can't be checked until the method resolution. We save
-// candidates here, and do the acutal check in librustc_typeck/check_unused.rs.
+// candidates here, and do the actual check in librustc_typeck/check_unused.rs.
 
 use std::ops::{Deref, DerefMut};
 
@@ -86,7 +86,7 @@ impl<'a, 'b> Visitor<'a> for UnusedImportCheckVisitor<'a, 'b> {
         // because this means that they were generated in some fashion by the
         // compiler and we don't need to consider them.
         if let ast::ItemKind::Use(..) = item.node {
-            if item.vis == ast::Visibility::Public || item.span.source_equal(&DUMMY_SP) {
+            if item.vis.node == ast::VisibilityKind::Public || item.span.source_equal(&DUMMY_SP) {
                 return;
             }
         }
@@ -102,11 +102,18 @@ impl<'a, 'b> Visitor<'a> for UnusedImportCheckVisitor<'a, 'b> {
         }
 
         if let ast::UseTreeKind::Nested(ref items) = use_tree.kind {
+            // If it's the parent group, cover the entire use item
+            let span = if nested {
+                use_tree.span
+            } else {
+                self.item_span
+            };
+
             if items.len() == 0 {
                 self.unused_imports
                     .entry(self.base_id)
                     .or_insert_with(NodeMap)
-                    .insert(id, self.item_span);
+                    .insert(id, span);
             }
         } else {
             let base_id = self.base_id;
@@ -133,6 +140,10 @@ pub fn check_crate(resolver: &mut Resolver, krate: &ast::Crate) {
             }
             _ => {}
         }
+    }
+
+    for (id, span) in resolver.unused_labels.iter() {
+        resolver.session.buffer_lint(lint::builtin::UNUSED_LABELS, *id, *span, "unused label");
     }
 
     let mut visitor = UnusedImportCheckVisitor {

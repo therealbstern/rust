@@ -12,8 +12,7 @@
 
 #![feature(unsized_tuple_coercion)]
 
-type Fat<T: ?Sized> = (isize, &'static str, T);
-//~^ WARNING trait bounds are not (yet) enforced
+type Fat<T> = (isize, &'static str, T);
 
 #[derive(PartialEq,Eq)]
 struct Bar;
@@ -46,5 +45,5 @@ pub fn main() {
     //~| expected type `ToBar`
     //~| found type `Bar1`
     //~| expected trait ToBar, found struct `Bar1`
-    //~| ERROR `ToBar: std::marker::Sized` is not satisfied
+    //~| ERROR the size for value values of type
 }

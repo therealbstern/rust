@@ -1,14 +1,17 @@
-error: invalid tuple or struct index
+error[E0609]: no field `00` on type `Verdict`
   --> $DIR/issue-47073-zero-padded-tuple-struct-indices.rs:18:30
    |
-18 |     let _condemned = justice.00;
-   |                              ^^ help: try simplifying the index: `0`
+LL |     let _condemned = justice.00;
+   |                              ^^ did you mean `0`?
 
-error: invalid tuple or struct index
+error[E0609]: no field `001` on type `Verdict`
   --> $DIR/issue-47073-zero-padded-tuple-struct-indices.rs:20:31
    |
-20 |     let _punishment = justice.001;
-   |                               ^^^ help: try simplifying the index: `1`
+LL |     let _punishment = justice.001;
+   |                               ^^^ unknown field
+   |
+   = note: available fields are: `0`, `1`
 
 error: aborting due to 2 previous errors
 
+For more information about this error, try `rustc --explain E0609`.

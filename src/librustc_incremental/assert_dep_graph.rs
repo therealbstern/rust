@@ -13,7 +13,7 @@
 //! will dump graphs in graphviz form to disk, and it searches for
 //! `#[rustc_if_this_changed]` and `#[rustc_then_this_would_need]`
 //! annotations. These annotations can be used to test whether paths
-//! exist in the graph. These checks run after trans, so they view the
+//! exist in the graph. These checks run after codegen, so they view the
 //! the final state of the dependency graph. Note that there are
 //! similar assertions found in `persist::dirty_clean` which check the
 //! **initial** state of the dependency graph, just after it has been
@@ -36,10 +36,10 @@
 //! #[rustc_if_this_changed(Hir)]
 //! fn foo() { }
 //!
-//! #[rustc_then_this_would_need(trans)] //~ ERROR no path from `foo`
+//! #[rustc_then_this_would_need(codegen)] //~ ERROR no path from `foo`
 //! fn bar() { }
 //!
-//! #[rustc_then_this_would_need(trans)] //~ ERROR OK
+//! #[rustc_then_this_would_need(codegen)] //~ ERROR OK
 //! fn baz() { foo(); }
 //! ```
 
@@ -69,7 +69,7 @@ pub fn assert_dep_graph<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) {
         // if the `rustc_attrs` feature is not enabled, then the
         // attributes we are interested in cannot be present anyway, so
         // skip the walk.
-        if !tcx.sess.features.borrow().rustc_attrs {
+        if !tcx.features().rustc_attrs {
             return;
         }
 
@@ -110,7 +110,7 @@ impl<'a, 'tcx> IfThisChanged<'a, 'tcx> {
         for list_item in attr.meta_item_list().unwrap_or_default() {
             match list_item.word() {
                 Some(word) if value.is_none() =>
-                    value = Some(word.name().clone()),
+                    value = Some(word.name()),
                 _ =>
                     // FIXME better-encapsulate meta_item (don't directly access `node`)
                     span_bug!(list_item.span(), "unexpected meta-item {:?}", list_item.node),

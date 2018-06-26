@@ -11,9 +11,7 @@
 // compile-flags: -Z thinlto -C codegen-units=2
 // min-llvm-version 4.0
 
-#![feature(allocator_api, global_allocator)]
-
 #[global_allocator]
-static A: std::heap::System = std::heap::System;
+static A: std::alloc::System = std::alloc::System;
 
 fn main() {}

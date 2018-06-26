@@ -13,17 +13,18 @@
 const X : usize = 2;
 
 const fn f(x: usize) -> usize {
-    let mut sum = 0; //~ ERROR blocks in constant functions are limited
-    for i in 0..x { //~ ERROR calls in constant functions
-    //~| ERROR constant function contains unimplemented
+    let mut sum = 0;
+    //~^ let bindings in constant functions are unstable
+    //~| statements in constant functions are unstable
+    for i in 0..x {
+        //~^ ERROR E0015
+        //~| ERROR E0019
         sum += i;
     }
-    sum //~ ERROR E0080
-        //~| non-constant path in constant
+    sum
 }
 
 #[allow(unused_variables)]
 fn main() {
-    let a : [i32; f(X)];
-    //~^ WARNING constant evaluation error: non-constant path
+    let a : [i32; f(X)]; //~ ERROR E0080
 }

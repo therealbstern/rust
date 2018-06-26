@@ -15,12 +15,12 @@ pub use self::ReprAttr::*;
 pub use self::IntType::*;
 
 use ast;
-use ast::{AttrId, Attribute, Name, Ident};
+use ast::{AttrId, Attribute, Name, Ident, Path, PathSegment};
 use ast::{MetaItem, MetaItemKind, NestedMetaItem, NestedMetaItemKind};
-use ast::{Lit, LitKind, Expr, ExprKind, Item, Local, Stmt, StmtKind};
-use codemap::{Spanned, respan, dummy_spanned};
-use syntax_pos::{Span, DUMMY_SP};
-use errors::Handler;
+use ast::{Lit, LitKind, Expr, ExprKind, Item, Local, Stmt, StmtKind, GenericParam};
+use codemap::{BytePos, Spanned, respan, dummy_spanned};
+use syntax_pos::Span;
+use errors::{Applicability, Handler};
 use feature_gate::{Features, GatedCfg};
 use parse::lexer::comments::{doc_comment_style, strip_doc_comment_decoration};
 use parse::parser::Parser;
@@ -30,14 +30,9 @@ use ptr::P;
 use symbol::Symbol;
 use tokenstream::{TokenStream, TokenTree, Delimited};
 use util::ThinVec;
+use GLOBALS;
 
-use std::cell::RefCell;
 use std::iter;
-
-thread_local! {
-    static USED_ATTRS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
-    static KNOWN_ATTRS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
-}
 
 enum AttrError {
     MultipleItem(Name),
@@ -65,22 +60,24 @@ fn handle_errors(diag: &Handler, span: Span, error: AttrError) {
 pub fn mark_used(attr: &Attribute) {
     debug!("Marking {:?} as used.", attr);
     let AttrId(id) = attr.id;
-    USED_ATTRS.with(|slot| {
+    GLOBALS.with(|globals| {
+        let mut slot = globals.used_attrs.lock();
         let idx = (id / 64) as usize;
         let shift = id % 64;
-        if slot.borrow().len() <= idx {
-            slot.borrow_mut().resize(idx + 1, 0);
+        if slot.len() <= idx {
+            slot.resize(idx + 1, 0);
         }
-        slot.borrow_mut()[idx] |= 1 << shift;
+        slot[idx] |= 1 << shift;
     });
 }
 
 pub fn is_used(attr: &Attribute) -> bool {
     let AttrId(id) = attr.id;
-    USED_ATTRS.with(|slot| {
+    GLOBALS.with(|globals| {
+        let slot = globals.used_attrs.lock();
         let idx = (id / 64) as usize;
         let shift = id % 64;
-        slot.borrow().get(idx).map(|bits| bits & (1 << shift) != 0)
+        slot.get(idx).map(|bits| bits & (1 << shift) != 0)
             .unwrap_or(false)
     })
 }
@@ -88,24 +85,34 @@ pub fn is_used(attr: &Attribute) -> bool {
 pub fn mark_known(attr: &Attribute) {
     debug!("Marking {:?} as known.", attr);
     let AttrId(id) = attr.id;
-    KNOWN_ATTRS.with(|slot| {
+    GLOBALS.with(|globals| {
+        let mut slot = globals.known_attrs.lock();
         let idx = (id / 64) as usize;
         let shift = id % 64;
-        if slot.borrow().len() <= idx {
-            slot.borrow_mut().resize(idx + 1, 0);
+        if slot.len() <= idx {
+            slot.resize(idx + 1, 0);
         }
-        slot.borrow_mut()[idx] |= 1 << shift;
+        slot[idx] |= 1 << shift;
     });
 }
 
 pub fn is_known(attr: &Attribute) -> bool {
     let AttrId(id) = attr.id;
-    KNOWN_ATTRS.with(|slot| {
+    GLOBALS.with(|globals| {
+        let slot = globals.known_attrs.lock();
         let idx = (id / 64) as usize;
         let shift = id % 64;
-        slot.borrow().get(idx).map(|bits| bits & (1 << shift) != 0)
+        slot.get(idx).map(|bits| bits & (1 << shift) != 0)
             .unwrap_or(false)
     })
+}
+
+const RUST_KNOWN_TOOL: &[&str] = &["clippy", "rustfmt"];
+
+pub fn is_known_tool(attr: &Attribute) -> bool {
+    let tool_name =
+        attr.path.segments.iter().next().expect("empty path in attribute").ident.name;
+    RUST_KNOWN_TOOL.contains(&tool_name.as_str().as_ref())
 }
 
 impl NestedMetaItem {
@@ -205,6 +212,10 @@ impl NestedMetaItem {
     }
 }
 
+fn name_from_path(path: &Path) -> Name {
+    path.segments.last().expect("empty path in attribute").ident.name
+}
+
 impl Attribute {
     pub fn check_name(&self, name: &str) -> bool {
         let matches = self.path == name;
@@ -214,11 +225,10 @@ impl Attribute {
         matches
     }
 
-    pub fn name(&self) -> Option<Name> {
-        match self.path.segments.len() {
-            1 => Some(self.path.segments[0].identifier.name),
-            _ => None,
-        }
+    /// Returns the **last** segment of the name of this attribute.
+    /// E.g. `foo` for `#[foo]`, `skip` for `#[rustfmt::skip]`.
+    pub fn name(&self) -> Name {
+        name_from_path(&self.path)
     }
 
     pub fn value_str(&self) -> Option<Symbol> {
@@ -248,11 +258,15 @@ impl Attribute {
     pub fn is_value_str(&self) -> bool {
         self.value_str().is_some()
     }
+
+    pub fn is_scoped(&self) -> bool {
+        self.path.segments.len() > 1
+    }
 }
 
 impl MetaItem {
     pub fn name(&self) -> Name {
-        self.name
+        name_from_path(&self.ident)
     }
 
     pub fn value_str(&self) -> Option<Symbol> {
@@ -301,10 +315,7 @@ impl Attribute {
     pub fn meta(&self) -> Option<MetaItem> {
         let mut tokens = self.tokens.trees().peekable();
         Some(MetaItem {
-            name: match self.path.segments.len() {
-                1 => self.path.segments[0].identifier.name,
-                _ => return None,
-            },
+            ident: self.path.clone(),
             node: if let Some(node) = MetaItemKind::from_tokens(&mut tokens) {
                 if tokens.peek().is_some() {
                     return None;
@@ -349,12 +360,8 @@ impl Attribute {
     }
 
     pub fn parse_meta<'a>(&self, sess: &'a ParseSess) -> PResult<'a, MetaItem> {
-        if self.path.segments.len() > 1 {
-            sess.span_diagnostic.span_err(self.path.span, "expected ident, found path");
-        }
-
         Ok(MetaItem {
-            name: self.path.segments.last().unwrap().identifier.name,
+            ident: self.path.clone(),
             node: self.parse(sess, |parser| parser.parse_meta_item_kind())?,
             span: self.span,
         })
@@ -369,8 +376,8 @@ impl Attribute {
         if self.is_sugared_doc {
             let comment = self.value_str().unwrap();
             let meta = mk_name_value_item_str(
-                Symbol::intern("doc"),
-                Symbol::intern(&strip_doc_comment_decoration(&comment.as_str())));
+                Ident::from_str("doc"),
+                dummy_spanned(Symbol::intern(&strip_doc_comment_decoration(&comment.as_str()))));
             let mut attr = if self.style == ast::AttrStyle::Outer {
                 mk_attr_outer(self.span, self.id, meta)
             } else {
@@ -386,37 +393,25 @@ impl Attribute {
 
 /* Constructors */
 
-pub fn mk_name_value_item_str(name: Name, value: Symbol) -> MetaItem {
-    let value_lit = dummy_spanned(LitKind::Str(value, ast::StrStyle::Cooked));
-    mk_spanned_name_value_item(DUMMY_SP, name, value_lit)
+pub fn mk_name_value_item_str(ident: Ident, value: Spanned<Symbol>) -> MetaItem {
+    let value = respan(value.span, LitKind::Str(value.node, ast::StrStyle::Cooked));
+    mk_name_value_item(ident.span.to(value.span), ident, value)
 }
 
-pub fn mk_name_value_item(name: Name, value: ast::Lit) -> MetaItem {
-    mk_spanned_name_value_item(DUMMY_SP, name, value)
+pub fn mk_name_value_item(span: Span, ident: Ident, value: ast::Lit) -> MetaItem {
+    MetaItem { ident: Path::from_ident(ident), span, node: MetaItemKind::NameValue(value) }
 }
 
-pub fn mk_list_item(name: Name, items: Vec<NestedMetaItem>) -> MetaItem {
-    mk_spanned_list_item(DUMMY_SP, name, items)
+pub fn mk_list_item(span: Span, ident: Ident, items: Vec<NestedMetaItem>) -> MetaItem {
+    MetaItem { ident: Path::from_ident(ident), span, node: MetaItemKind::List(items) }
 }
 
-pub fn mk_list_word_item(name: Name) -> ast::NestedMetaItem {
-    dummy_spanned(NestedMetaItemKind::MetaItem(mk_spanned_word_item(DUMMY_SP, name)))
+pub fn mk_word_item(ident: Ident) -> MetaItem {
+    MetaItem { ident: Path::from_ident(ident), span: ident.span, node: MetaItemKind::Word }
 }
 
-pub fn mk_word_item(name: Name) -> MetaItem {
-    mk_spanned_word_item(DUMMY_SP, name)
-}
-
-pub fn mk_spanned_name_value_item(sp: Span, name: Name, value: ast::Lit) -> MetaItem {
-    MetaItem { span: sp, name: name, node: MetaItemKind::NameValue(value) }
-}
-
-pub fn mk_spanned_list_item(sp: Span, name: Name, items: Vec<NestedMetaItem>) -> MetaItem {
-    MetaItem { span: sp, name: name, node: MetaItemKind::List(items) }
-}
-
-pub fn mk_spanned_word_item(sp: Span, name: Name) -> MetaItem {
-    MetaItem { span: sp, name: name, node: MetaItemKind::Word }
+pub fn mk_nested_word_item(ident: Ident) -> NestedMetaItem {
+    respan(ident.span, NestedMetaItemKind::MetaItem(mk_word_item(ident)))
 }
 
 pub fn mk_attr_id() -> AttrId {
@@ -440,7 +435,7 @@ pub fn mk_spanned_attr_inner(sp: Span, id: AttrId, item: MetaItem) -> Attribute 
     Attribute {
         id,
         style: ast::AttrStyle::Inner,
-        path: ast::Path::from_ident(item.span, ast::Ident::with_empty_ctxt(item.name)),
+        path: item.ident,
         tokens: item.node.tokens(item.span),
         is_sugared_doc: false,
         span: sp,
@@ -458,7 +453,7 @@ pub fn mk_spanned_attr_outer(sp: Span, id: AttrId, item: MetaItem) -> Attribute 
     Attribute {
         id,
         style: ast::AttrStyle::Outer,
-        path: ast::Path::from_ident(item.span, ast::Ident::with_empty_ctxt(item.name)),
+        path: item.ident,
         tokens: item.node.tokens(item.span),
         is_sugared_doc: false,
         span: sp,
@@ -471,7 +466,7 @@ pub fn mk_sugared_doc_attr(id: AttrId, text: Symbol, span: Span) -> Attribute {
     Attribute {
         id,
         style,
-        path: ast::Path::from_ident(span, ast::Ident::from_str("doc")),
+        path: Path::from_ident(Ident::from_str("doc").with_span_pos(span)),
         tokens: MetaItemKind::NameValue(lit).tokens(span),
         is_sugared_doc: true,
         span,
@@ -520,7 +515,7 @@ pub fn find_crate_name(attrs: &[Attribute]) -> Option<Symbol> {
     first_attr_value_str_by_name(attrs, "crate_name")
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, Hash, PartialEq, RustcEncodable, RustcDecodable)]
 pub enum InlineAttr {
     None,
     Hint,
@@ -528,10 +523,24 @@ pub enum InlineAttr {
     Never,
 }
 
-/// Determine what `#[inline]` attribute is present in `attrs`, if any.
-pub fn find_inline_attr(diagnostic: Option<&Handler>, attrs: &[Attribute]) -> InlineAttr {
-    attrs.iter().fold(InlineAttr::None, |ia, attr| {
-        if attr.path != "inline" {
+#[derive(Copy, Clone, PartialEq)]
+pub enum UnwindAttr {
+    Allowed,
+    Aborts,
+}
+
+/// Determine what `#[unwind]` attribute is present in `attrs`, if any.
+pub fn find_unwind_attr(diagnostic: Option<&Handler>, attrs: &[Attribute]) -> Option<UnwindAttr> {
+    let syntax_error = |attr: &Attribute| {
+        mark_used(attr);
+        diagnostic.map(|d| {
+            span_err!(d, attr.span, E0633, "malformed `#[unwind]` attribute");
+        });
+        None
+    };
+
+    attrs.iter().fold(None, |ia, attr| {
+        if attr.path != "unwind" {
             return ia;
         }
         let meta = match attr.meta() {
@@ -540,24 +549,18 @@ pub fn find_inline_attr(diagnostic: Option<&Handler>, attrs: &[Attribute]) -> In
         };
         match meta {
             MetaItemKind::Word => {
-                mark_used(attr);
-                InlineAttr::Hint
+                syntax_error(attr)
             }
             MetaItemKind::List(ref items) => {
                 mark_used(attr);
                 if items.len() != 1 {
-                    diagnostic.map(|d|{ span_err!(d, attr.span, E0534, "expected one argument"); });
-                    InlineAttr::None
-                } else if list_contains_name(&items[..], "always") {
-                    InlineAttr::Always
-                } else if list_contains_name(&items[..], "never") {
-                    InlineAttr::Never
+                    syntax_error(attr)
+                } else if list_contains_name(&items[..], "allowed") {
+                    Some(UnwindAttr::Allowed)
+                } else if list_contains_name(&items[..], "aborts") {
+                    Some(UnwindAttr::Aborts)
                 } else {
-                    diagnostic.map(|d| {
-                        span_err!(d, items[0].span, E0535, "invalid argument");
-                    });
-
-                    InlineAttr::None
+                    syntax_error(attr)
                 }
             }
             _ => ia,
@@ -565,13 +568,6 @@ pub fn find_inline_attr(diagnostic: Option<&Handler>, attrs: &[Attribute]) -> In
     })
 }
 
-/// True if `#[inline]` or `#[inline(always)]` is present in `attrs`.
-pub fn requests_inline(attrs: &[Attribute]) -> bool {
-    match find_inline_attr(None, attrs) {
-        InlineAttr::Hint | InlineAttr::Always => true,
-        InlineAttr::None | InlineAttr::Never => false,
-    }
-}
 
 /// Tests if a cfg-pattern matches the cfg set
 pub fn cfg_matches(cfg: &ast::MetaItem, sess: &ParseSess, features: Option<&Features>) -> bool {
@@ -600,7 +596,7 @@ pub fn eval_condition<F>(cfg: &ast::MetaItem, sess: &ParseSess, eval: &mut F)
 
             // The unwraps below may look dangerous, but we've already asserted
             // that they won't fail with the loop above.
-            match &*cfg.name.as_str() {
+            match &*cfg.name().as_str() {
                 "any" => mis.iter().any(|mi| {
                     eval_condition(mi.meta_item().unwrap(), sess, eval)
                 }),
@@ -731,7 +727,7 @@ fn find_stability_generic<'a, I>(diagnostic: &Handler,
                 }
             }
 
-            match &*meta.name.as_str() {
+            match &*meta.name().as_str() {
                 "rustc_deprecated" => {
                     if rustc_depr.is_some() {
                         span_err!(diagnostic, item_sp, E0540,
@@ -992,7 +988,8 @@ pub fn find_deprecation(diagnostic: &Handler, attrs: &[Attribute],
 /// Valid repr contents: any of the primitive integral type names (see
 /// `int_type_of_word`, below) to specify enum discriminant type; `C`, to use
 /// the same discriminant size that the corresponding C enum would or C
-/// structure layout, and `packed` to remove padding.
+/// structure layout, `packed` to remove padding, and `transparent` to elegate representation
+/// concerns to the only non-ZST field.
 pub fn find_repr_attrs(diagnostic: &Handler, attr: &Attribute) -> Vec<ReprAttr> {
     let mut acc = Vec::new();
     if attr.path == "repr" {
@@ -1009,8 +1006,9 @@ pub fn find_repr_attrs(diagnostic: &Handler, attr: &Attribute) -> Vec<ReprAttr> 
                     let word = &*mi.name().as_str();
                     let hint = match word {
                         "C" => Some(ReprC),
-                        "packed" => Some(ReprPacked),
+                        "packed" => Some(ReprPacked(1)),
                         "simd" => Some(ReprSimd),
+                        "transparent" => Some(ReprTransparent),
                         _ => match int_type_of_word(word) {
                             Some(ity) => Some(ReprInt(ity)),
                             None => {
@@ -1024,26 +1022,70 @@ pub fn find_repr_attrs(diagnostic: &Handler, attr: &Attribute) -> Vec<ReprAttr> 
                         acc.push(h);
                     }
                 } else if let Some((name, value)) = item.name_value_literal() {
-                    if name == "align" {
-                        recognised = true;
-                        let mut align_error = None;
-                        if let ast::LitKind::Int(align, ast::LitIntType::Unsuffixed) = value.node {
-                            if align.is_power_of_two() {
-                                // rustc::ty::layout::Align restricts align to <= 2147483647
-                                if align <= 2147483647 {
-                                    acc.push(ReprAlign(align as u32));
+                    let parse_alignment = |node: &ast::LitKind| -> Result<u32, &'static str> {
+                        if let ast::LitKind::Int(literal, ast::LitIntType::Unsuffixed) = node {
+                            if literal.is_power_of_two() {
+                                // rustc::ty::layout::Align restricts align to <= 2^29
+                                if *literal <= 1 << 29 {
+                                    Ok(*literal as u32)
                                 } else {
-                                    align_error = Some("larger than 2147483647");
+                                    Err("larger than 2^29")
                                 }
                             } else {
-                                align_error = Some("not a power of two");
+                                Err("not a power of two")
                             }
                         } else {
-                            align_error = Some("not an unsuffixed integer");
+                            Err("not an unsuffixed integer")
                         }
-                        if let Some(align_error) = align_error {
-                            span_err!(diagnostic, item.span, E0589,
-                                      "invalid `repr(align)` attribute: {}", align_error);
+                    };
+
+                    let mut literal_error = None;
+                    if name == "align" {
+                        recognised = true;
+                        match parse_alignment(&value.node) {
+                            Ok(literal) => acc.push(ReprAlign(literal)),
+                            Err(message) => literal_error = Some(message)
+                        };
+                    }
+                    else if name == "packed" {
+                        recognised = true;
+                        match parse_alignment(&value.node) {
+                            Ok(literal) => acc.push(ReprPacked(literal)),
+                            Err(message) => literal_error = Some(message)
+                        };
+                    }
+                    if let Some(literal_error) = literal_error {
+                        span_err!(diagnostic, item.span, E0589,
+                                  "invalid `repr(align)` attribute: {}", literal_error);
+                    }
+                } else {
+                    if let Some(meta_item) = item.meta_item() {
+                        if meta_item.name() == "align" {
+                            if let MetaItemKind::NameValue(ref value) = meta_item.node {
+                                recognised = true;
+                                let mut err = struct_span_err!(diagnostic, item.span, E0693,
+                                    "incorrect `repr(align)` attribute format");
+                                match value.node {
+                                    ast::LitKind::Int(int, ast::LitIntType::Unsuffixed) => {
+                                        err.span_suggestion_with_applicability(
+                                            item.span,
+                                            "use parentheses instead",
+                                            format!("align({})", int),
+                                            Applicability::MachineApplicable
+                                        );
+                                    }
+                                    ast::LitKind::Str(s, _) => {
+                                        err.span_suggestion_with_applicability(
+                                            item.span,
+                                            "use parentheses instead",
+                                            format!("align({})", s),
+                                            Applicability::MachineApplicable
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                                err.emit();
+                            }
                         }
                     }
                 }
@@ -1080,8 +1122,9 @@ fn int_type_of_word(s: &str) -> Option<IntType> {
 pub enum ReprAttr {
     ReprInt(IntType),
     ReprC,
-    ReprPacked,
+    ReprPacked(u32),
     ReprSimd,
+    ReprTransparent,
     ReprAlign(u32),
 }
 
@@ -1103,18 +1146,56 @@ impl IntType {
 
 impl MetaItem {
     fn tokens(&self) -> TokenStream {
-        let ident = TokenTree::Token(self.span, Token::Ident(Ident::with_empty_ctxt(self.name)));
-        TokenStream::concat(vec![ident.into(), self.node.tokens(self.span)])
+        let mut idents = vec![];
+        let mut last_pos = BytePos(0 as u32);
+        for (i, segment) in self.ident.segments.iter().enumerate() {
+            let is_first = i == 0;
+            if !is_first {
+                let mod_sep_span = Span::new(last_pos,
+                                             segment.ident.span.lo(),
+                                             segment.ident.span.ctxt());
+                idents.push(TokenTree::Token(mod_sep_span, Token::ModSep).into());
+            }
+            idents.push(TokenTree::Token(segment.ident.span,
+                                         Token::from_ast_ident(segment.ident)).into());
+            last_pos = segment.ident.span.hi();
+        }
+        idents.push(self.node.tokens(self.span));
+        TokenStream::concat(idents)
     }
 
     fn from_tokens<I>(tokens: &mut iter::Peekable<I>) -> Option<MetaItem>
         where I: Iterator<Item = TokenTree>,
     {
-        let (span, name) = match tokens.next() {
-            Some(TokenTree::Token(span, Token::Ident(ident))) => (span, ident.name),
+        // FIXME: Share code with `parse_path`.
+        let ident = match tokens.next() {
+            Some(TokenTree::Token(span, Token::Ident(ident, _))) => {
+                if let Some(TokenTree::Token(_, Token::ModSep)) = tokens.peek() {
+                    let mut segments = vec![PathSegment::from_ident(ident.with_span_pos(span))];
+                    tokens.next();
+                    loop {
+                        if let Some(TokenTree::Token(span,
+                                                     Token::Ident(ident, _))) = tokens.next() {
+                            segments.push(PathSegment::from_ident(ident.with_span_pos(span)));
+                        } else {
+                            return None;
+                        }
+                        if let Some(TokenTree::Token(_, Token::ModSep)) = tokens.peek() {
+                            tokens.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let span = span.with_hi(segments.last().unwrap().ident.span.hi());
+                    Path { span, segments }
+                } else {
+                    Path::from_ident(ident.with_span_pos(span))
+                }
+            }
             Some(TokenTree::Token(_, Token::Interpolated(ref nt))) => match nt.0 {
-                token::Nonterminal::NtIdent(ident) => (ident.span, ident.node.name),
+                token::Nonterminal::NtIdent(ident, _) => Path::from_ident(ident),
                 token::Nonterminal::NtMeta(ref meta) => return Some(meta.clone()),
+                token::Nonterminal::NtPath(ref path) => path.clone(),
                 _ => return None,
             },
             _ => return None,
@@ -1123,10 +1204,11 @@ impl MetaItem {
         let node = MetaItemKind::from_tokens(tokens)?;
         let hi = match node {
             MetaItemKind::NameValue(ref lit) => lit.span.hi(),
-            MetaItemKind::List(..) => list_closing_paren_pos.unwrap_or(span.hi()),
-            _ => span.hi(),
+            MetaItemKind::List(..) => list_closing_paren_pos.unwrap_or(ident.span.hi()),
+            _ => ident.span.hi(),
         };
-        Some(MetaItem { name, node, span: span.with_hi(hi) })
+        let span = ident.span.with_hi(hi);
+        Some(MetaItem { ident, node, span })
     }
 }
 
@@ -1228,10 +1310,7 @@ impl LitKind {
 
         match *self {
             LitKind::Str(string, ast::StrStyle::Cooked) => {
-                let mut escaped = String::new();
-                for ch in string.as_str().chars() {
-                    escaped.extend(ch.escape_unicode());
-                }
+                let escaped = string.as_str().escape_default();
                 Token::Literal(token::Lit::Str_(Symbol::intern(&escaped)), None)
             }
             LitKind::Str(string, ast::StrStyle::Raw(n)) => {
@@ -1266,16 +1345,16 @@ impl LitKind {
                 "true"
             } else {
                 "false"
-            }))),
+            })), false),
         }
     }
 
     fn from_token(token: Token) -> Option<LitKind> {
         match token {
-            Token::Ident(ident) if ident.name == "true" => Some(LitKind::Bool(true)),
-            Token::Ident(ident) if ident.name == "false" => Some(LitKind::Bool(false)),
+            Token::Ident(ident, false) if ident.name == "true" => Some(LitKind::Bool(true)),
+            Token::Ident(ident, false) if ident.name == "false" => Some(LitKind::Bool(false)),
             Token::Interpolated(ref nt) => match nt.0 {
-                token::NtExpr(ref v) => match v.node {
+                token::NtExpr(ref v) | token::NtLiteral(ref v) => match v.node {
                     ExprKind::Lit(ref lit) => Some(lit.node.clone()),
                     _ => None,
                 },
@@ -1362,6 +1441,17 @@ impl HasAttrs for Stmt {
     fn attrs(&self) -> &[ast::Attribute] { self.node.attrs() }
     fn map_attrs<F: FnOnce(Vec<ast::Attribute>) -> Vec<ast::Attribute>>(self, f: F) -> Self {
         Stmt { id: self.id, node: self.node.map_attrs(f), span: self.span }
+    }
+}
+
+impl HasAttrs for GenericParam {
+    fn attrs(&self) -> &[ast::Attribute] {
+        &self.attrs
+    }
+
+    fn map_attrs<F: FnOnce(Vec<Attribute>) -> Vec<Attribute>>(mut self, f: F) -> Self {
+        self.attrs = self.attrs.map_attrs(f);
+        self
     }
 }
 

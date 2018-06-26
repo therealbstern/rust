@@ -72,14 +72,14 @@ pub enum PassWhere {
 ///   or `typeck` and `bar` both appear in the name.
 pub fn dump_mir<'a, 'gcx, 'tcx, F>(
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    pass_num: Option<&Display>,
+    pass_num: Option<&dyn Display>,
     pass_name: &str,
-    disambiguator: &Display,
+    disambiguator: &dyn Display,
     source: MirSource,
     mir: &Mir<'tcx>,
     extra_data: F,
 ) where
-    F: FnMut(PassWhere, &mut Write) -> io::Result<()>,
+    F: FnMut(PassWhere, &mut dyn Write) -> io::Result<()>,
 {
     if !dump_enabled(tcx, pass_name, source) {
         return;
@@ -127,15 +127,15 @@ pub fn dump_enabled<'a, 'gcx, 'tcx>(
 
 fn dump_matched_mir_node<'a, 'gcx, 'tcx, F>(
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
-    pass_num: Option<&Display>,
+    pass_num: Option<&dyn Display>,
     pass_name: &str,
     node_path: &str,
-    disambiguator: &Display,
+    disambiguator: &dyn Display,
     source: MirSource,
     mir: &Mir<'tcx>,
     mut extra_data: F,
 ) where
-    F: FnMut(PassWhere, &mut Write) -> io::Result<()>,
+    F: FnMut(PassWhere, &mut dyn Write) -> io::Result<()>,
 {
     let _: io::Result<()> = do catch {
         let mut file = create_dump_file(tcx, "mir", pass_num, pass_name, disambiguator, source)?;
@@ -150,7 +150,6 @@ fn dump_matched_mir_node<'a, 'gcx, 'tcx, F>(
         extra_data(PassWhere::BeforeCFG, &mut file)?;
         write_mir_fn(tcx, source, mir, &mut extra_data, &mut file)?;
         extra_data(PassWhere::AfterCFG, &mut file)?;
-        Ok(())
     };
 
     if tcx.sess.opts.debugging_opts.dump_mir_graphviz {
@@ -158,7 +157,6 @@ fn dump_matched_mir_node<'a, 'gcx, 'tcx, F>(
             let mut file =
                 create_dump_file(tcx, "dot", pass_num, pass_name, disambiguator, source)?;
             write_mir_fn_graphviz(tcx, source.def_id, mir, &mut file)?;
-            Ok(())
         };
     }
 }
@@ -169,9 +167,9 @@ fn dump_matched_mir_node<'a, 'gcx, 'tcx, F>(
 fn dump_path(
     tcx: TyCtxt<'_, '_, '_>,
     extension: &str,
-    pass_num: Option<&Display>,
+    pass_num: Option<&dyn Display>,
     pass_name: &str,
-    disambiguator: &Display,
+    disambiguator: &dyn Display,
     source: MirSource,
 ) -> PathBuf {
     let promotion_id = match source.promoted {
@@ -189,11 +187,7 @@ fn dump_path(
     };
 
     let mut file_path = PathBuf::new();
-
-    if let Some(ref file_dir) = tcx.sess.opts.debugging_opts.dump_mir_dir {
-        let p = Path::new(file_dir);
-        file_path.push(p);
-    };
+    file_path.push(Path::new(&tcx.sess.opts.debugging_opts.dump_mir_dir));
 
     let item_name = tcx.hir
         .def_path(source.def_id)
@@ -221,9 +215,9 @@ fn dump_path(
 pub(crate) fn create_dump_file(
     tcx: TyCtxt<'_, '_, '_>,
     extension: &str,
-    pass_num: Option<&Display>,
+    pass_num: Option<&dyn Display>,
     pass_name: &str,
-    disambiguator: &Display,
+    disambiguator: &dyn Display,
     source: MirSource,
 ) -> io::Result<fs::File> {
     let file_path = dump_path(tcx, extension, pass_num, pass_name, disambiguator, source);
@@ -237,7 +231,7 @@ pub(crate) fn create_dump_file(
 pub fn write_mir_pretty<'a, 'gcx, 'tcx>(
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
     single: Option<DefId>,
-    w: &mut Write,
+    w: &mut dyn Write,
 ) -> io::Result<()> {
     writeln!(
         w,
@@ -278,10 +272,10 @@ pub fn write_mir_fn<'a, 'gcx, 'tcx, F>(
     src: MirSource,
     mir: &Mir<'tcx>,
     extra_data: &mut F,
-    w: &mut Write,
+    w: &mut dyn Write,
 ) -> io::Result<()>
 where
-    F: FnMut(PassWhere, &mut Write) -> io::Result<()>,
+    F: FnMut(PassWhere, &mut dyn Write) -> io::Result<()>,
 {
     write_mir_intro(tcx, src, mir, w)?;
     for block in mir.basic_blocks().indices() {
@@ -302,10 +296,10 @@ pub fn write_basic_block<'cx, 'gcx, 'tcx, F>(
     block: BasicBlock,
     mir: &Mir<'tcx>,
     extra_data: &mut F,
-    w: &mut Write,
+    w: &mut dyn Write,
 ) -> io::Result<()>
 where
-    F: FnMut(PassWhere, &mut Write) -> io::Result<()>,
+    F: FnMut(PassWhere, &mut dyn Write) -> io::Result<()>,
 {
     let data = &mir[block];
 
@@ -366,7 +360,7 @@ where
 /// a statement.
 fn write_extra<'cx, 'gcx, 'tcx, F>(
     tcx: TyCtxt<'cx, 'gcx, 'tcx>,
-    write: &mut Write,
+    write: &mut dyn Write,
     mut visit_op: F,
 ) -> io::Result<()>
 where
@@ -401,17 +395,17 @@ impl<'cx, 'gcx, 'tcx> Visitor<'tcx> for ExtraComments<'cx, 'gcx, 'tcx> {
         self.super_constant(constant, location);
         let Constant { span, ty, literal } = constant;
         self.push(&format!("mir::Constant"));
-        self.push(&format!("└ span: {:?}", span));
-        self.push(&format!("└ ty: {:?}", ty));
-        self.push(&format!("└ literal: {:?}", literal));
+        self.push(&format!("+ span: {:?}", span));
+        self.push(&format!("+ ty: {:?}", ty));
+        self.push(&format!("+ literal: {:?}", literal));
     }
 
     fn visit_const(&mut self, constant: &&'tcx ty::Const<'tcx>, _: Location) {
         self.super_const(constant);
-        let ty::Const { ty, val } = constant;
+        let ty::Const { ty, val, .. } = constant;
         self.push(&format!("ty::Const"));
-        self.push(&format!("└ ty: {:?}", ty));
-        self.push(&format!("└ val: {:?}", val));
+        self.push(&format!("+ ty: {:?}", ty));
+        self.push(&format!("+ val: {:?}", val));
     }
 
     fn visit_rvalue(&mut self, rvalue: &Rvalue<'tcx>, location: Location) {
@@ -420,15 +414,15 @@ impl<'cx, 'gcx, 'tcx> Visitor<'tcx> for ExtraComments<'cx, 'gcx, 'tcx> {
             Rvalue::Aggregate(kind, _) => match **kind {
                 AggregateKind::Closure(def_id, substs) => {
                     self.push(&format!("closure"));
-                    self.push(&format!("└ def_id: {:?}", def_id));
-                    self.push(&format!("└ substs: {:#?}", substs));
+                    self.push(&format!("+ def_id: {:?}", def_id));
+                    self.push(&format!("+ substs: {:#?}", substs));
                 }
 
-                AggregateKind::Generator(def_id, substs, interior) => {
+                AggregateKind::Generator(def_id, substs, movability) => {
                     self.push(&format!("generator"));
-                    self.push(&format!("└ def_id: {:?}", def_id));
-                    self.push(&format!("└ substs: {:#?}", substs));
-                    self.push(&format!("└ interior: {:?}", interior));
+                    self.push(&format!("+ def_id: {:?}", def_id));
+                    self.push(&format!("+ substs: {:#?}", substs));
+                    self.push(&format!("+ movability: {:?}", movability));
                 }
 
                 _ => {}
@@ -453,9 +447,9 @@ fn comment(tcx: TyCtxt, SourceInfo { span, scope }: SourceInfo) -> String {
 fn write_scope_tree(
     tcx: TyCtxt,
     mir: &Mir,
-    scope_tree: &FxHashMap<VisibilityScope, Vec<VisibilityScope>>,
-    w: &mut Write,
-    parent: VisibilityScope,
+    scope_tree: &FxHashMap<SourceScope, Vec<SourceScope>>,
+    w: &mut dyn Write,
+    parent: SourceScope,
     depth: usize,
 ) -> io::Result<()> {
     let indent = depth * INDENT.len();
@@ -466,7 +460,7 @@ fn write_scope_tree(
     };
 
     for &child in children {
-        let data = &mir.visibility_scopes[child];
+        let data = &mir.source_scopes[child];
         assert_eq!(data.parent_scope, Some(parent));
         writeln!(w, "{0:1$}scope {2} {{", "", indent, child.index())?;
 
@@ -519,22 +513,22 @@ pub fn write_mir_intro<'a, 'gcx, 'tcx>(
     tcx: TyCtxt<'a, 'gcx, 'tcx>,
     src: MirSource,
     mir: &Mir,
-    w: &mut Write,
+    w: &mut dyn Write,
 ) -> io::Result<()> {
     write_mir_sig(tcx, src, mir, w)?;
-    writeln!(w, " {{")?;
+    writeln!(w, "{{")?;
 
     // construct a scope tree and write it out
-    let mut scope_tree: FxHashMap<VisibilityScope, Vec<VisibilityScope>> = FxHashMap();
-    for (index, scope_data) in mir.visibility_scopes.iter().enumerate() {
+    let mut scope_tree: FxHashMap<SourceScope, Vec<SourceScope>> = FxHashMap();
+    for (index, scope_data) in mir.source_scopes.iter().enumerate() {
         if let Some(parent) = scope_data.parent_scope {
             scope_tree
                 .entry(parent)
                 .or_insert(vec![])
-                .push(VisibilityScope::new(index));
+                .push(SourceScope::new(index));
         } else {
             // Only the argument scope has no parent, because it's the root.
-            assert_eq!(index, ARGUMENT_VISIBILITY_SCOPE.index());
+            assert_eq!(index, OUTERMOST_SOURCE_SCOPE.index());
         }
     }
 
@@ -547,7 +541,7 @@ pub fn write_mir_intro<'a, 'gcx, 'tcx>(
              indented_retptr,
              ALIGN)?;
 
-    write_scope_tree(tcx, mir, &scope_tree, w, ARGUMENT_VISIBILITY_SCOPE, 1)?;
+    write_scope_tree(tcx, mir, &scope_tree, w, OUTERMOST_SOURCE_SCOPE, 1)?;
 
     write_temp_decls(mir, w)?;
 
@@ -557,7 +551,7 @@ pub fn write_mir_intro<'a, 'gcx, 'tcx>(
     Ok(())
 }
 
-fn write_mir_sig(tcx: TyCtxt, src: MirSource, mir: &Mir, w: &mut Write) -> io::Result<()> {
+fn write_mir_sig(tcx: TyCtxt, src: MirSource, mir: &Mir, w: &mut dyn Write) -> io::Result<()> {
     let id = tcx.hir.as_local_node_id(src.def_id).unwrap();
     let body_owner_kind = tcx.hir.body_owner_kind(id);
     match (body_owner_kind, src.promoted) {
@@ -585,16 +579,23 @@ fn write_mir_sig(tcx: TyCtxt, src: MirSource, mir: &Mir, w: &mut Write) -> io::R
                 write!(w, "{:?}: {}", Place::Local(arg), mir.local_decls[arg].ty)?;
             }
 
-            write!(w, ") -> {}", mir.return_ty())
+            write!(w, ") -> {}", mir.return_ty())?;
         }
         (hir::BodyOwnerKind::Const, _) | (hir::BodyOwnerKind::Static(_), _) | (_, Some(_)) => {
             assert_eq!(mir.arg_count, 0);
-            write!(w, ": {} =", mir.return_ty())
+            write!(w, ": {} =", mir.return_ty())?;
         }
     }
+
+    if let Some(yield_ty) = mir.yield_ty {
+        writeln!(w)?;
+        writeln!(w, "yields {}", yield_ty)?;
+    }
+
+    Ok(())
 }
 
-fn write_temp_decls(mir: &Mir, w: &mut Write) -> io::Result<()> {
+fn write_temp_decls(mir: &Mir, w: &mut dyn Write) -> io::Result<()> {
     // Compiler-introduced temporary types.
     for temp in mir.temps_iter() {
         writeln!(

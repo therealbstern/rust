@@ -20,7 +20,7 @@ impl<'tcx> Mirror<'tcx> for &'tcx hir::Block {
     type Output = Block<'tcx>;
 
     fn make_mirror<'a, 'gcx>(self, cx: &mut Cx<'a, 'gcx, 'tcx>) -> Block<'tcx> {
-        // We have to eagerly translate the "spine" of the statements
+        // We have to eagerly lower the "spine" of the statements
         // in order to get the lexical scoping correctly.
         let stmts = mirror_stmts(cx, self.hir_id.local_id, &*self.stmts);
         let opt_destruction_scope =
@@ -76,12 +76,14 @@ fn mirror_stmts<'a, 'gcx, 'tcx>(cx: &mut Cx<'a, 'gcx, 'tcx>,
                             first_statement_index: region::FirstStatementIndex::new(index),
                         });
 
+                        let ty = local.ty.clone().map(|ty| ty.hir_id);
                         let pattern = cx.pattern_from_hir(&local.pat);
                         result.push(StmtRef::Mirror(Box::new(Stmt {
                             kind: StmtKind::Let {
                                 remainder_scope: remainder_scope,
                                 init_scope: region::Scope::Node(hir_id.local_id),
                                 pattern,
+                                ty,
                                 initializer: local.init.to_ref(),
                                 lint_level: cx.lint_level_of(local.id),
                             },

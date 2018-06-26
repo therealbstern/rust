@@ -20,7 +20,7 @@ use {abort_on_err, driver};
 use rustc::ty::{self, TyCtxt, Resolutions, AllArenas};
 use rustc::cfg;
 use rustc::cfg::graphviz::LabelledCFG;
-use rustc::middle::cstore::CrateStore;
+use rustc::middle::cstore::CrateStoreDyn;
 use rustc::session::Session;
 use rustc::session::config::{Input, OutputFilenames};
 use rustc_borrowck as borrowck;
@@ -66,7 +66,7 @@ pub enum PpSourceMode {
 pub enum PpFlowGraphMode {
     Default,
     /// Drops the labels from the edges in the flowgraph output. This
-    /// is mostly for use in the --unpretty flowgraph run-make tests,
+    /// is mostly for use in the -Z unpretty flowgraph run-make tests,
     /// since the labels are largely uninteresting in those cases and
     /// have become a pain to maintain.
     UnlabelledEdges,
@@ -199,7 +199,7 @@ impl PpSourceMode {
     }
     fn call_with_pp_support_hir<'tcx, A, F>(&self,
                                                sess: &'tcx Session,
-                                               cstore: &'tcx CrateStore,
+                                               cstore: &'tcx CrateStoreDyn,
                                                hir_map: &hir_map::Map<'tcx>,
                                                analysis: &ty::CrateAnalysis,
                                                resolutions: &Resolutions,
@@ -228,7 +228,9 @@ impl PpSourceMode {
             }
             PpmTyped => {
                 let control = &driver::CompileController::basic();
-                abort_on_err(driver::phase_3_run_analysis_passes(control,
+                let codegen_backend = ::get_codegen_backend(sess);
+                abort_on_err(driver::phase_3_run_analysis_passes(&*codegen_backend,
+                                                                 control,
                                                                  sess,
                                                                  cstore,
                                                                  hir_map.clone(),
@@ -464,11 +466,11 @@ impl<'a> PrinterSupport for HygieneAnnotation<'a> {
 impl<'a> pprust::PpAnn for HygieneAnnotation<'a> {
     fn post(&self, s: &mut pprust::State, node: pprust::AnnNode) -> io::Result<()> {
         match node {
-            pprust::NodeIdent(&ast::Ident { name, ctxt }) => {
+            pprust::NodeIdent(&ast::Ident { name, span }) => {
                 s.s.space()?;
                 // FIXME #16420: this doesn't display the connections
                 // between syntax contexts
-                s.synth_comment(format!("{}{:?}", name.as_u32(), ctxt))
+                s.synth_comment(format!("{}{:?}", name.as_u32(), span.ctxt()))
             }
             pprust::NodeName(&name) => {
                 s.s.space()?;
@@ -582,6 +584,13 @@ impl<'a, 'hir> Iterator for NodesMatchingUII<'a, 'hir> {
             &mut NodesMatchingSuffix(ref mut iter) => iter.next(),
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            &NodesMatchingDirect(ref iter) => iter.size_hint(),
+            &NodesMatchingSuffix(ref iter) => iter.size_hint(),
+        }
+    }
 }
 
 impl UserIdentifiedItem {
@@ -668,14 +677,20 @@ impl<'a> ReplaceBodyWithLoop<'a> {
                     ast::TyKind::Paren(ref subty) => involves_impl_trait(subty),
                     ast::TyKind::Tup(ref tys) => any_involves_impl_trait(tys.iter()),
                     ast::TyKind::Path(_, ref path) => path.segments.iter().any(|seg| {
-                        match seg.parameters.as_ref().map(|p| &**p) {
+                        match seg.args.as_ref().map(|generic_arg| &**generic_arg) {
                             None => false,
-                            Some(&ast::PathParameters::AngleBracketed(ref data)) =>
-                                any_involves_impl_trait(data.types.iter()) ||
-                                any_involves_impl_trait(data.bindings.iter().map(|b| &b.ty)),
-                            Some(&ast::PathParameters::Parenthesized(ref data)) =>
+                            Some(&ast::GenericArgs::AngleBracketed(ref data)) => {
+                                let types = data.args.iter().filter_map(|arg| match arg {
+                                    ast::GenericArg::Type(ty) => Some(ty),
+                                    _ => None,
+                                });
+                                any_involves_impl_trait(types.into_iter()) ||
+                                any_involves_impl_trait(data.bindings.iter().map(|b| &b.ty))
+                            },
+                            Some(&ast::GenericArgs::Parenthesized(ref data)) => {
                                 any_involves_impl_trait(data.inputs.iter()) ||
-                                any_involves_impl_trait(data.output.iter()),
+                                any_involves_impl_trait(data.output.iter())
+                            }
                         }
                     }),
                     _ => false,
@@ -697,8 +712,8 @@ impl<'a> fold::Folder for ReplaceBodyWithLoop<'a> {
     fn fold_item_kind(&mut self, i: ast::ItemKind) -> ast::ItemKind {
         let is_const = match i {
             ast::ItemKind::Static(..) | ast::ItemKind::Const(..) => true,
-            ast::ItemKind::Fn(ref decl, _, ref constness, _, _, _) =>
-                constness.node == ast::Constness::Const || Self::should_ignore_fn(decl),
+            ast::ItemKind::Fn(ref decl, ref header, _, _) =>
+                header.constness.node == ast::Constness::Const || Self::should_ignore_fn(decl),
             _ => false,
         };
         self.run(is_const, |s| fold::noop_fold_item_kind(i, s))
@@ -707,8 +722,8 @@ impl<'a> fold::Folder for ReplaceBodyWithLoop<'a> {
     fn fold_trait_item(&mut self, i: ast::TraitItem) -> SmallVector<ast::TraitItem> {
         let is_const = match i.node {
             ast::TraitItemKind::Const(..) => true,
-            ast::TraitItemKind::Method(ast::MethodSig { ref decl, ref constness, .. }, _) =>
-                constness.node == ast::Constness::Const || Self::should_ignore_fn(decl),
+            ast::TraitItemKind::Method(ast::MethodSig { ref decl, ref header, .. }, _) =>
+                header.constness.node == ast::Constness::Const || Self::should_ignore_fn(decl),
             _ => false,
         };
         self.run(is_const, |s| fold::noop_fold_trait_item(i, s))
@@ -717,8 +732,8 @@ impl<'a> fold::Folder for ReplaceBodyWithLoop<'a> {
     fn fold_impl_item(&mut self, i: ast::ImplItem) -> SmallVector<ast::ImplItem> {
         let is_const = match i.node {
             ast::ImplItemKind::Const(..) => true,
-            ast::ImplItemKind::Method(ast::MethodSig { ref decl, ref constness, .. }, _) =>
-                constness.node == ast::Constness::Const || Self::should_ignore_fn(decl),
+            ast::ImplItemKind::Method(ast::MethodSig { ref decl, ref header, .. }, _) =>
+                header.constness.node == ast::Constness::Const || Self::should_ignore_fn(decl),
             _ => false,
         };
         self.run(is_const, |s| fold::noop_fold_impl_item(i, s))
@@ -903,7 +918,7 @@ pub fn print_after_parsing(sess: &Session,
 }
 
 pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
-                                                cstore: &'tcx CrateStore,
+                                                cstore: &'tcx CrateStoreDyn,
                                                 hir_map: &hir_map::Map<'tcx>,
                                                 analysis: &ty::CrateAnalysis,
                                                 resolutions: &Resolutions,
@@ -1006,7 +1021,7 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                                            move |annotation, _| {
                     debug!("pretty printing source code {:?}", s);
                     let sess = annotation.sess();
-                    let hir_map = annotation.hir_map().expect("--unpretty missing HIR map");
+                    let hir_map = annotation.hir_map().expect("-Z unpretty missing HIR map");
                     let mut pp_state = pprust_hir::State::new_from_input(sess.codemap(),
                                                                          &sess.parse_sess,
                                                                          src_name,
@@ -1019,7 +1034,7 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
                         pp_state.print_node(node)?;
                         pp_state.s.space()?;
                         let path = annotation.node_path(node_id)
-                            .expect("--unpretty missing node paths");
+                            .expect("-Z unpretty missing node paths");
                         pp_state.synth_comment(path)?;
                         pp_state.s.hardbreak()?;
                     }
@@ -1059,7 +1074,7 @@ pub fn print_after_hir_lowering<'tcx, 'a: 'tcx>(sess: &'a Session,
 // with a different callback than the standard driver, so that isn't easy.
 // Instead, we call that function ourselves.
 fn print_with_analysis<'tcx, 'a: 'tcx>(sess: &'a Session,
-                                       cstore: &'a CrateStore,
+                                       cstore: &'a CrateStoreDyn,
                                        hir_map: &hir_map::Map<'tcx>,
                                        analysis: &ty::CrateAnalysis,
                                        resolutions: &Resolutions,
@@ -1071,7 +1086,7 @@ fn print_with_analysis<'tcx, 'a: 'tcx>(sess: &'a Session,
                                        ofile: Option<&Path>) {
     let nodeid = if let Some(uii) = uii {
         debug!("pretty printing for {:?}", uii);
-        Some(uii.to_one_node_id("--unpretty", sess, &hir_map))
+        Some(uii.to_one_node_id("-Z unpretty", sess, &hir_map))
     } else {
         debug!("pretty printing for whole crate");
         None
@@ -1080,7 +1095,9 @@ fn print_with_analysis<'tcx, 'a: 'tcx>(sess: &'a Session,
     let mut out = Vec::new();
 
     let control = &driver::CompileController::basic();
-    abort_on_err(driver::phase_3_run_analysis_passes(control,
+    let codegen_backend = ::get_codegen_backend(sess);
+    abort_on_err(driver::phase_3_run_analysis_passes(&*codegen_backend,
+                                                     control,
                                                      sess,
                                                      cstore,
                                                      hir_map.clone(),

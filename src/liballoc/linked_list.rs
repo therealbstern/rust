@@ -28,10 +28,9 @@ use core::hash::{Hasher, Hash};
 use core::iter::{FromIterator, FusedIterator};
 use core::marker::PhantomData;
 use core::mem;
-use core::ops::{BoxPlace, InPlace, Place, Placer};
-use core::ptr::{self, Shared};
+use core::ptr::NonNull;
 
-use boxed::{Box, IntermediateBox};
+use boxed::Box;
 use super::SpecExtend;
 
 /// A doubly-linked list with owned nodes.
@@ -44,15 +43,15 @@ use super::SpecExtend;
 /// more memory efficient and make better use of CPU cache.
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct LinkedList<T> {
-    head: Option<Shared<Node<T>>>,
-    tail: Option<Shared<Node<T>>>,
+    head: Option<NonNull<Node<T>>>,
+    tail: Option<NonNull<Node<T>>>,
     len: usize,
     marker: PhantomData<Box<Node<T>>>,
 }
 
 struct Node<T> {
-    next: Option<Shared<Node<T>>>,
-    prev: Option<Shared<Node<T>>>,
+    next: Option<NonNull<Node<T>>>,
+    prev: Option<NonNull<Node<T>>>,
     element: T,
 }
 
@@ -65,8 +64,8 @@ struct Node<T> {
 /// [`LinkedList`]: struct.LinkedList.html
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Iter<'a, T: 'a> {
-    head: Option<Shared<Node<T>>>,
-    tail: Option<Shared<Node<T>>>,
+    head: Option<NonNull<Node<T>>>,
+    tail: Option<NonNull<Node<T>>>,
     len: usize,
     marker: PhantomData<&'a Node<T>>,
 }
@@ -98,8 +97,8 @@ impl<'a, T> Clone for Iter<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct IterMut<'a, T: 'a> {
     list: &'a mut LinkedList<T>,
-    head: Option<Shared<Node<T>>>,
-    tail: Option<Shared<Node<T>>>,
+    head: Option<NonNull<Node<T>>>,
+    tail: Option<NonNull<Node<T>>>,
     len: usize,
 }
 
@@ -157,7 +156,7 @@ impl<T> LinkedList<T> {
         unsafe {
             node.next = self.head;
             node.prev = None;
-            let node = Some(Shared::from(Box::into_unique(node)));
+            let node = Some(Box::into_raw_non_null(node));
 
             match self.head {
                 None => self.tail = node,
@@ -192,7 +191,7 @@ impl<T> LinkedList<T> {
         unsafe {
             node.next = None;
             node.prev = self.tail;
-            let node = Some(Shared::from(Box::into_unique(node)));
+            let node = Some(Box::into_raw_non_null(node));
 
             match self.tail {
                 None => self.head = node,
@@ -225,7 +224,7 @@ impl<T> LinkedList<T> {
     ///
     /// Warning: this will not check that the provided node belongs to the current list.
     #[inline]
-    unsafe fn unlink_node(&mut self, mut node: Shared<Node<T>>) {
+    unsafe fn unlink_node(&mut self, mut node: NonNull<Node<T>>) {
         let node = node.as_mut();
 
         match node.prev {
@@ -747,8 +746,8 @@ impl<T> LinkedList<T> {
     /// Creates an iterator which uses a closure to determine if an element should be removed.
     ///
     /// If the closure returns true, then the element is removed and yielded.
-    /// If the closure returns false, it will try again, and call the closure on the next element,
-    /// seeing if it passes the test.
+    /// If the closure returns false, the element will remain in the list and will not be yielded
+    /// by the iterator.
     ///
     /// Note that `drain_filter` lets you mutate every element in the filter closure, regardless of
     /// whether you choose to keep or remove it.
@@ -784,62 +783,6 @@ impl<T> LinkedList<T> {
             pred: filter,
             idx: 0,
             old_len: old_len,
-        }
-    }
-
-    /// Returns a place for insertion at the front of the list.
-    ///
-    /// Using this method with placement syntax is equivalent to
-    /// [`push_front`](#method.push_front), but may be more efficient.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(collection_placement)]
-    /// #![feature(placement_in_syntax)]
-    ///
-    /// use std::collections::LinkedList;
-    ///
-    /// let mut list = LinkedList::new();
-    /// list.front_place() <- 2;
-    /// list.front_place() <- 4;
-    /// assert!(list.iter().eq(&[4, 2]));
-    /// ```
-    #[unstable(feature = "collection_placement",
-               reason = "method name and placement protocol are subject to change",
-               issue = "30172")]
-    pub fn front_place(&mut self) -> FrontPlace<T> {
-        FrontPlace {
-            list: self,
-            node: IntermediateBox::make_place(),
-        }
-    }
-
-    /// Returns a place for insertion at the back of the list.
-    ///
-    /// Using this method with placement syntax is equivalent to [`push_back`](#method.push_back),
-    /// but may be more efficient.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// #![feature(collection_placement)]
-    /// #![feature(placement_in_syntax)]
-    ///
-    /// use std::collections::LinkedList;
-    ///
-    /// let mut list = LinkedList::new();
-    /// list.back_place() <- 2;
-    /// list.back_place() <- 4;
-    /// assert!(list.iter().eq(&[2, 4]));
-    /// ```
-    #[unstable(feature = "collection_placement",
-               reason = "method name and placement protocol are subject to change",
-               issue = "30172")]
-    pub fn back_place(&mut self) -> BackPlace<T> {
-        BackPlace {
-            list: self,
-            node: IntermediateBox::make_place(),
         }
     }
 }
@@ -897,7 +840,7 @@ impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> ExactSizeIterator for Iter<'a, T> {}
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T> FusedIterator for Iter<'a, T> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -946,7 +889,7 @@ impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, T> ExactSizeIterator for IterMut<'a, T> {}
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T> FusedIterator for IterMut<'a, T> {}
 
 impl<'a, T> IterMut<'a, T> {
@@ -986,11 +929,11 @@ impl<'a, T> IterMut<'a, T> {
                     Some(prev) => prev,
                 };
 
-                let node = Some(Shared::from(Box::into_unique(box Node {
+                let node = Some(Box::into_raw_non_null(box Node {
                     next: Some(head),
                     prev: Some(prev),
                     element,
-                })));
+                }));
 
                 prev.as_mut().next = node;
                 head.as_mut().prev = node;
@@ -1038,7 +981,7 @@ pub struct DrainFilter<'a, T: 'a, F: 'a>
     where F: FnMut(&mut T) -> bool,
 {
     list: &'a mut LinkedList<T>,
-    it: Option<Shared<Node<T>>>,
+    it: Option<NonNull<Node<T>>>,
     pred: F,
     idx: usize,
     old_len: usize,
@@ -1076,7 +1019,7 @@ impl<'a, T, F> Drop for DrainFilter<'a, T, F>
     where F: FnMut(&mut T) -> bool,
 {
     fn drop(&mut self) {
-        for _ in self { }
+        self.for_each(drop);
     }
 }
 
@@ -1117,7 +1060,7 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T> ExactSizeIterator for IntoIter<T> {}
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<T> FusedIterator for IntoIter<T> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -1239,123 +1182,6 @@ impl<T: Hash> Hash for LinkedList<T> {
         for elt in self {
             elt.hash(state);
         }
-    }
-}
-
-unsafe fn finalize<T>(node: IntermediateBox<Node<T>>) -> Box<Node<T>> {
-    let mut node = node.finalize();
-    ptr::write(&mut node.next, None);
-    ptr::write(&mut node.prev, None);
-    node
-}
-
-/// A place for insertion at the front of a `LinkedList`.
-///
-/// See [`LinkedList::front_place`](struct.LinkedList.html#method.front_place) for details.
-#[must_use = "places do nothing unless written to with `<-` syntax"]
-#[unstable(feature = "collection_placement",
-           reason = "struct name and placement protocol are subject to change",
-           issue = "30172")]
-pub struct FrontPlace<'a, T: 'a> {
-    list: &'a mut LinkedList<T>,
-    node: IntermediateBox<Node<T>>,
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "struct name and placement protocol are subject to change",
-           issue = "30172")]
-impl<'a, T: 'a + fmt::Debug> fmt::Debug for FrontPlace<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("FrontPlace")
-         .field(&self.list)
-         .finish()
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> Placer<T> for FrontPlace<'a, T> {
-    type Place = Self;
-
-    fn make_place(self) -> Self {
-        self
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> Place<T> for FrontPlace<'a, T> {
-    fn pointer(&mut self) -> *mut T {
-        unsafe { &mut (*self.node.pointer()).element }
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> InPlace<T> for FrontPlace<'a, T> {
-    type Owner = ();
-
-    unsafe fn finalize(self) {
-        let FrontPlace { list, node } = self;
-        list.push_front_node(finalize(node));
-    }
-}
-
-/// A place for insertion at the back of a `LinkedList`.
-///
-/// See [`LinkedList::back_place`](struct.LinkedList.html#method.back_place) for details.
-#[must_use = "places do nothing unless written to with `<-` syntax"]
-#[unstable(feature = "collection_placement",
-           reason = "struct name and placement protocol are subject to change",
-           issue = "30172")]
-pub struct BackPlace<'a, T: 'a> {
-    list: &'a mut LinkedList<T>,
-    node: IntermediateBox<Node<T>>,
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "struct name and placement protocol are subject to change",
-           issue = "30172")]
-impl<'a, T: 'a + fmt::Debug> fmt::Debug for BackPlace<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("BackPlace")
-         .field(&self.list)
-         .finish()
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> Placer<T> for BackPlace<'a, T> {
-    type Place = Self;
-
-    fn make_place(self) -> Self {
-        self
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> Place<T> for BackPlace<'a, T> {
-    fn pointer(&mut self) -> *mut T {
-        unsafe { &mut (*self.node.pointer()).element }
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> InPlace<T> for BackPlace<'a, T> {
-    type Owner = ();
-
-    unsafe fn finalize(self) {
-        let BackPlace { list, node } = self;
-        list.push_back_node(finalize(node));
     }
 }
 

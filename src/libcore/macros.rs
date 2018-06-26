@@ -19,71 +19,13 @@ macro_rules! panic {
     ($msg:expr) => ({
         $crate::panicking::panic(&($msg, file!(), line!(), __rust_unstable_column!()))
     });
-    ($fmt:expr, $($arg:tt)*) => ({
+    ($msg:expr,) => (
+        panic!($msg)
+    );
+    ($fmt:expr, $($arg:tt)+) => ({
         $crate::panicking::panic_fmt(format_args!($fmt, $($arg)*),
                                      &(file!(), line!(), __rust_unstable_column!()))
     });
-}
-
-/// Ensure that a boolean expression is `true` at runtime.
-///
-/// This will invoke the [`panic!`] macro if the provided expression cannot be
-/// evaluated to `true` at runtime.
-///
-/// # Uses
-///
-/// Assertions are always checked in both debug and release builds, and cannot
-/// be disabled. See [`debug_assert!`] for assertions that are not enabled in
-/// release builds by default.
-///
-/// Unsafe code relies on `assert!` to enforce run-time invariants that, if
-/// violated could lead to unsafety.
-///
-/// Other use-cases of `assert!` include [testing] and enforcing run-time
-/// invariants in safe code (whose violation cannot result in unsafety).
-///
-/// # Custom Messages
-///
-/// This macro has a second form, where a custom panic message can
-/// be provided with or without arguments for formatting.  See [`std::fmt`]
-/// for syntax for this form.
-///
-/// [`panic!`]: macro.panic.html
-/// [`debug_assert!`]: macro.debug_assert.html
-/// [testing]: ../book/second-edition/ch11-01-writing-tests.html#checking-results-with-the-assert-macro
-/// [`std::fmt`]: ../std/fmt/index.html
-///
-/// # Examples
-///
-/// ```
-/// // the panic message for these assertions is the stringified value of the
-/// // expression given.
-/// assert!(true);
-///
-/// fn some_computation() -> bool { true } // a very simple function
-///
-/// assert!(some_computation());
-///
-/// // assert with a custom message
-/// let x = true;
-/// assert!(x, "x wasn't true!");
-///
-/// let a = 3; let b = 27;
-/// assert!(a + b == 30, "a = {}, b = {}", a, b);
-/// ```
-#[macro_export]
-#[stable(feature = "rust1", since = "1.0.0")]
-macro_rules! assert {
-    ($cond:expr) => (
-        if !$cond {
-            panic!(concat!("assertion failed: ", stringify!($cond)))
-        }
-    );
-    ($cond:expr, $($arg:tt)+) => (
-        if !$cond {
-            panic!($($arg)+)
-        }
-    );
 }
 
 /// Asserts that two expressions are equal to each other (using [`PartialEq`]).
@@ -327,7 +269,7 @@ macro_rules! debug_assert_ne {
 ///     }
 /// }
 ///
-/// // The prefered method of quick returning Errors
+/// // The preferred method of quick returning Errors
 /// fn write_to_file_question() -> Result<(), MyError> {
 ///     let mut file = File::create("my_best_friends.txt")?;
 ///     file.write_all(b"This is a list of my best friends.")?;
@@ -353,13 +295,15 @@ macro_rules! debug_assert_ne {
 /// ```
 #[macro_export]
 #[stable(feature = "rust1", since = "1.0.0")]
+#[doc(alias = "?")]
 macro_rules! try {
     ($expr:expr) => (match $expr {
         $crate::result::Result::Ok(val) => val,
         $crate::result::Result::Err(err) => {
             return $crate::result::Result::Err($crate::convert::From::from(err))
         }
-    })
+    });
+    ($expr:expr,) => (try!($expr));
 }
 
 /// Write formatted data into a buffer.
@@ -456,6 +400,9 @@ macro_rules! writeln {
     ($dst:expr) => (
         write!($dst, "\n")
     );
+    ($dst:expr,) => (
+        writeln!($dst)
+    );
     ($dst:expr, $fmt:expr) => (
         write!($dst, concat!($fmt, "\n"))
     );
@@ -474,13 +421,13 @@ macro_rules! writeln {
 /// * Iterators that dynamically terminate.
 ///
 /// If the determination that the code is unreachable proves incorrect, the
-/// program immediately terminates with a [`panic!`].  The function [`unreachable`],
-/// which belongs to the [`std::intrinsics`] module, informs the compilier to
+/// program immediately terminates with a [`panic!`].  The function [`unreachable_unchecked`],
+/// which belongs to the [`std::hint`] module, informs the compilier to
 /// optimize the code out of the release version entirely.
 ///
 /// [`panic!`]:  ../std/macro.panic.html
-/// [`unreachable`]: ../std/intrinsics/fn.unreachable.html
-/// [`std::intrinsics`]: ../std/intrinsics/index.html
+/// [`unreachable_unchecked`]: ../std/hint/fn.unreachable_unchecked.html
+/// [`std::hint`]: ../std/hint/index.html
 ///
 /// # Panics
 ///
@@ -523,6 +470,9 @@ macro_rules! unreachable {
     });
     ($msg:expr) => ({
         unreachable!("{}", $msg)
+    });
+    ($msg:expr,) => ({
+        unreachable!($msg)
     });
     ($fmt:expr, $($arg:tt)*) => ({
         panic!(concat!("internal error: entered unreachable code: ", $fmt), $($arg)*)
@@ -603,7 +553,10 @@ mod builtin {
     #[stable(feature = "compile_error_macro", since = "1.20.0")]
     #[macro_export]
     #[cfg(dox)]
-    macro_rules! compile_error { ($msg:expr) => ({ /* compiler built-in */ }) }
+    macro_rules! compile_error {
+        ($msg:expr) => ({ /* compiler built-in */ });
+        ($msg:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// The core macro for formatted string creation & output.
     ///
@@ -639,7 +592,10 @@ mod builtin {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[macro_export]
     #[cfg(dox)]
-    macro_rules! option_env { ($name:expr) => ({ /* compiler built-in */ }) }
+    macro_rules! option_env {
+        ($name:expr) => ({ /* compiler built-in */ });
+        ($name:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// Concatenate identifiers into one identifier.
     ///
@@ -650,8 +606,8 @@ mod builtin {
     #[macro_export]
     #[cfg(dox)]
     macro_rules! concat_idents {
-        ($($e:ident),*) => ({ /* compiler built-in */ });
-        ($($e:ident,)*) => ({ /* compiler built-in */ });
+        ($($e:ident),+) => ({ /* compiler built-in */ });
+        ($($e:ident,)+) => ({ /* compiler built-in */ });
     }
 
     /// Concatenates literals into a static string slice.
@@ -715,7 +671,10 @@ mod builtin {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[macro_export]
     #[cfg(dox)]
-    macro_rules! include_str { ($file:expr) => ({ /* compiler built-in */ }) }
+    macro_rules! include_str {
+        ($file:expr) => ({ /* compiler built-in */ });
+        ($file:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// Includes a file as a reference to a byte array.
     ///
@@ -725,7 +684,10 @@ mod builtin {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[macro_export]
     #[cfg(dox)]
-    macro_rules! include_bytes { ($file:expr) => ({ /* compiler built-in */ }) }
+    macro_rules! include_bytes {
+        ($file:expr) => ({ /* compiler built-in */ });
+        ($file:expr,) => ({ /* compiler built-in */ });
+    }
 
     /// Expands to a string that represents the current module path.
     ///
@@ -755,5 +717,22 @@ mod builtin {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[macro_export]
     #[cfg(dox)]
-    macro_rules! include { ($file:expr) => ({ /* compiler built-in */ }) }
+    macro_rules! include {
+        ($file:expr) => ({ /* compiler built-in */ });
+        ($file:expr,) => ({ /* compiler built-in */ });
+    }
+
+    /// Ensure that a boolean expression is `true` at runtime.
+    ///
+    /// For more information, see the documentation for [`std::assert!`].
+    ///
+    /// [`std::assert!`]: ../std/macro.assert.html
+    #[macro_export]
+    #[stable(feature = "rust1", since = "1.0.0")]
+    #[cfg(dox)]
+    macro_rules! assert {
+        ($cond:expr) => ({ /* compiler built-in */ });
+        ($cond:expr,) => ({ /* compiler built-in */ });
+        ($cond:expr, $($arg:tt)+) => ({ /* compiler built-in */ });
+    }
 }

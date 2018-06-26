@@ -12,8 +12,8 @@
 // in the type of `p` includes the points after `&v[0]` up to (but not
 // including) the call to `use_x`. The `else` branch is not included.
 
-// compile-flags:-Znll -Zverbose
-//                     ^^^^^^^^^ force compiler to dump more region information
+// compile-flags:-Zborrowck=mir -Zverbose
+//                              ^^^^^^^^^ force compiler to dump more region information
 
 #![allow(warnings)]
 
@@ -41,7 +41,7 @@ fn main() {
 //            | Live variables on entry to bb2[0]: [_1, _3]
 //        _2 = &'_#2r _1[_3];
 //            | Live variables on entry to bb2[1]: [_2]
-//        switchInt(const true) -> [0u8: bb4, otherwise: bb3];
+//        switchInt(const true) -> [false: bb4, otherwise: bb3];
 //    }
 // END rustc.main.nll.0.mir
 // START rustc.main.nll.0.mir

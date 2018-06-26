@@ -13,7 +13,6 @@
 pub use self::StructType::*;
 pub use self::TypeBound::*;
 
-use syntax::abi;
 use syntax::ast;
 use syntax::ast::{Name, NodeId};
 use syntax::attr;
@@ -149,11 +148,9 @@ pub struct Function {
     pub vis: hir::Visibility,
     pub stab: Option<attr::Stability>,
     pub depr: Option<attr::Deprecation>,
-    pub unsafety: hir::Unsafety,
-    pub constness: hir::Constness,
+    pub header: hir::FnHeader,
     pub whence: Span,
     pub generics: hir::Generics,
-    pub abi: abi::Abi,
     pub body: hir::BodyId,
 }
 
@@ -196,11 +193,12 @@ pub struct Constant {
 }
 
 pub struct Trait {
+    pub is_auto: hir::IsAuto,
     pub unsafety: hir::Unsafety,
     pub name: Name,
     pub items: hir::HirVec<hir::TraitItem>,
     pub generics: hir::Generics,
-    pub bounds: hir::HirVec<hir::TyParamBound>,
+    pub bounds: hir::HirVec<hir::GenericBound>,
     pub attrs: hir::HirVec<ast::Attribute>,
     pub id: ast::NodeId,
     pub whence: Span,
@@ -209,6 +207,7 @@ pub struct Trait {
     pub depr: Option<attr::Deprecation>,
 }
 
+#[derive(Debug)]
 pub struct Impl {
     pub unsafety: hir::Unsafety,
     pub polarity: hir::ImplPolarity,

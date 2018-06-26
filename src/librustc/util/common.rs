@@ -10,19 +10,26 @@
 
 #![allow(non_camel_case_types)]
 
+use rustc_data_structures::sync::Lock;
+
 use std::cell::{RefCell, Cell};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fmt::Debug;
 use std::hash::{Hash, BuildHasher};
 use std::iter::repeat;
+use std::panic;
+use std::env;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use std::sync::mpsc::{Sender};
 use syntax_pos::{SpanData};
-use ty::maps::{QueryMsg};
+use ty::TyCtxt;
 use dep_graph::{DepNode};
+use proc_macro;
+use lazy_static;
+use session::Session;
 
 // The name of the associated type for `Fn` return types
 pub const FN_OUTPUT_NAME: &'static str = "Output";
@@ -34,8 +41,40 @@ pub struct ErrorReported;
 
 thread_local!(static TIME_DEPTH: Cell<usize> = Cell::new(0));
 
-/// Initialized for -Z profile-queries
-thread_local!(static PROFQ_CHAN: RefCell<Option<Sender<ProfileQueriesMsg>>> = RefCell::new(None));
+lazy_static! {
+    static ref DEFAULT_HOOK: Box<dyn Fn(&panic::PanicInfo) + Sync + Send + 'static> = {
+        let hook = panic::take_hook();
+        panic::set_hook(Box::new(panic_hook));
+        hook
+    };
+}
+
+fn panic_hook(info: &panic::PanicInfo) {
+    if !proc_macro::__internal::in_sess() {
+        (*DEFAULT_HOOK)(info);
+
+        let backtrace = env::var_os("RUST_BACKTRACE").map(|x| &x != "0").unwrap_or(false);
+
+        if backtrace {
+            TyCtxt::try_print_query_stack();
+        }
+
+        #[cfg(windows)]
+        unsafe {
+            if env::var("RUSTC_BREAK_ON_ICE").is_ok() {
+                extern "system" {
+                    fn DebugBreak();
+                }
+                // Trigger a debugger if we crashed during bootstrap
+                DebugBreak();
+            }
+        }
+    }
+}
+
+pub fn install_panic_hook() {
+    lazy_static::initialize(&DEFAULT_HOOK);
+}
 
 /// Parameters to the `Dump` variant of type `ProfileQueriesMsg`.
 #[derive(Clone,Debug)]
@@ -46,6 +85,13 @@ pub struct ProfQDumpParams {
     pub ack:Sender<()>,
     /// toggle dumping a log file with every `ProfileQueriesMsg`
     pub dump_profq_msg_log:bool,
+}
+
+#[allow(bad_style)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryMsg {
+    pub query: &'static str,
+    pub msg: Option<String>,
 }
 
 /// A sequence of these messages induce a trace of query-based incremental compilation.
@@ -76,29 +122,23 @@ pub enum ProfileQueriesMsg {
 }
 
 /// If enabled, send a message to the profile-queries thread
-pub fn profq_msg(msg: ProfileQueriesMsg) {
-    PROFQ_CHAN.with(|sender|{
-        if let Some(s) = sender.borrow().as_ref() {
-            s.send(msg).unwrap()
-        } else {
-            // Do nothing.
-            //
-            // FIXME(matthewhammer): Multi-threaded translation phase triggers the panic below.
-            // From backtrace: rustc_trans::back::write::spawn_work::{{closure}}.
-            //
-            // panic!("no channel on which to send profq_msg: {:?}", msg)
-        }
-    })
+pub fn profq_msg(sess: &Session, msg: ProfileQueriesMsg) {
+    if let Some(s) = sess.profile_channel.borrow().as_ref() {
+        s.send(msg).unwrap()
+    } else {
+        // Do nothing
+    }
 }
 
 /// Set channel for profile queries channel
-pub fn profq_set_chan(s: Sender<ProfileQueriesMsg>) -> bool {
-    PROFQ_CHAN.with(|chan|{
-        if chan.borrow().is_none() {
-            *chan.borrow_mut() = Some(s);
-            true
-        } else { false }
-    })
+pub fn profq_set_chan(sess: &Session, s: Sender<ProfileQueriesMsg>) -> bool {
+    let mut channel = sess.profile_channel.borrow_mut();
+    if channel.is_none() {
+        *channel = Some(s);
+        true
+    } else {
+        false
+    }
 }
 
 /// Read the current depth of `time()` calls. This is used to
@@ -114,7 +154,13 @@ pub fn set_time_depth(depth: usize) {
     TIME_DEPTH.with(|slot| slot.set(depth));
 }
 
-pub fn time<T, F>(do_it: bool, what: &str, f: F) -> T where
+pub fn time<T, F>(sess: &Session, what: &str, f: F) -> T where
+    F: FnOnce() -> T,
+{
+    time_ext(sess.time_passes(), Some(sess), what, f)
+}
+
+pub fn time_ext<T, F>(do_it: bool, sess: Option<&Session>, what: &str, f: F) -> T where
     F: FnOnce() -> T,
 {
     if !do_it { return f(); }
@@ -125,15 +171,19 @@ pub fn time<T, F>(do_it: bool, what: &str, f: F) -> T where
         r
     });
 
-    if cfg!(debug_assertions) {
-        profq_msg(ProfileQueriesMsg::TimeBegin(what.to_string()))
-    };
+    if let Some(sess) = sess {
+        if cfg!(debug_assertions) {
+            profq_msg(sess, ProfileQueriesMsg::TimeBegin(what.to_string()))
+        }
+    }
     let start = Instant::now();
     let rv = f();
     let dur = start.elapsed();
-    if cfg!(debug_assertions) {
-        profq_msg(ProfileQueriesMsg::TimeEnd)
-    };
+    if let Some(sess) = sess {
+        if cfg!(debug_assertions) {
+            profq_msg(sess, ProfileQueriesMsg::TimeEnd)
+        }
+    }
 
     print_time_passes_entry_internal(what, dur);
 
@@ -205,13 +255,14 @@ pub fn to_readable_str(mut val: usize) -> String {
     groups.join("_")
 }
 
-pub fn record_time<T, F>(accu: &Cell<Duration>, f: F) -> T where
+pub fn record_time<T, F>(accu: &Lock<Duration>, f: F) -> T where
     F: FnOnce() -> T,
 {
     let start = Instant::now();
     let rv = f();
     let duration = start.elapsed();
-    accu.set(duration + accu.get());
+    let mut accu = accu.lock();
+    *accu = *accu + duration;
     rv
 }
 
@@ -221,7 +272,8 @@ fn get_resident() -> Option<usize> {
     use std::fs;
 
     let field = 1;
-    let contents = fs::read_string("/proc/self/statm").ok()?;
+    let contents = fs::read("/proc/self/statm").ok()?;
+    let contents = String::from_utf8(contents).ok()?;
     let s = contents.split_whitespace().nth(field)?;
     let npages = s.parse::<usize>().ok()?;
     Some(npages * 4096)

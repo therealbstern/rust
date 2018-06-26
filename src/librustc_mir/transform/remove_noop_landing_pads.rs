@@ -20,17 +20,24 @@ use util::patch::MirPatch;
 /// code for these.
 pub struct RemoveNoopLandingPads;
 
+pub fn remove_noop_landing_pads<'a, 'tcx>(
+    tcx: TyCtxt<'a, 'tcx, 'tcx>,
+    mir: &mut Mir<'tcx>)
+{
+    if tcx.sess.no_landing_pads() {
+        return
+    }
+    debug!("remove_noop_landing_pads({:?})", mir);
+
+    RemoveNoopLandingPads.remove_nop_landing_pads(mir)
+}
+
 impl MirPass for RemoveNoopLandingPads {
     fn run_pass<'a, 'tcx>(&self,
                           tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           _src: MirSource,
                           mir: &mut Mir<'tcx>) {
-        if tcx.sess.no_landing_pads() {
-            return
-        }
-
-        debug!("remove_noop_landing_pads({:?})", mir);
-        self.remove_nop_landing_pads(mir);
+        remove_noop_landing_pads(tcx, mir);
     }
 }
 
@@ -40,9 +47,11 @@ impl RemoveNoopLandingPads {
     {
         for stmt in &mir[bb].statements {
             match stmt.kind {
+                StatementKind::ReadForMatch(_) |
                 StatementKind::StorageLive(_) |
                 StatementKind::StorageDead(_) |
                 StatementKind::EndRegion(_) |
+                StatementKind::UserAssertTy(..) |
                 StatementKind::Nop => {
                     // These are all nops in a landing pad (there's some
                     // borrowck interaction between EndRegion and storage
@@ -68,8 +77,9 @@ impl RemoveNoopLandingPads {
             TerminatorKind::Goto { .. } |
             TerminatorKind::Resume |
             TerminatorKind::SwitchInt { .. } |
-            TerminatorKind::FalseEdges { .. } => {
-                terminator.successors().iter().all(|succ| {
+            TerminatorKind::FalseEdges { .. } |
+            TerminatorKind::FalseUnwind { .. } => {
+                terminator.successors().all(|succ| {
                     nop_landing_pads.contains(succ.index())
                 })
             },

@@ -12,13 +12,13 @@
 // pieces of MIR. The resulting numbers are good approximations but not
 // completely accurate (some things might be counted twice, others missed).
 
-use rustc_const_math::{ConstUsize};
 use rustc::mir::{AggregateKind, AssertMessage, BasicBlock, BasicBlockData};
 use rustc::mir::{Constant, Literal, Location, Local, LocalDecl};
 use rustc::mir::{Place, PlaceElem, PlaceProjection};
 use rustc::mir::{Mir, Operand, ProjectionElem};
 use rustc::mir::{Rvalue, SourceInfo, Statement, StatementKind};
-use rustc::mir::{Terminator, TerminatorKind, VisibilityScope, VisibilityScopeData};
+use rustc::mir::{Terminator, TerminatorKind, SourceScope, SourceScopeData};
+use rustc::mir::interpret::EvalErrorKind;
 use rustc::mir::visit as mir_visit;
 use rustc::ty::{self, ClosureSubsts, TyCtxt};
 use rustc::util::nodemap::{FxHashMap};
@@ -72,10 +72,10 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.super_basic_block_data(block, data);
     }
 
-    fn visit_visibility_scope_data(&mut self,
-                                   scope_data: &VisibilityScopeData) {
-        self.record("VisibilityScopeData", scope_data);
-        self.super_visibility_scope_data(scope_data);
+    fn visit_source_scope_data(&mut self,
+                                   scope_data: &SourceScopeData) {
+        self.record("SourceScopeData", scope_data);
+        self.super_source_scope_data(scope_data);
     }
 
     fn visit_statement(&mut self,
@@ -85,12 +85,14 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.record("Statement", statement);
         self.record(match statement.kind {
             StatementKind::Assign(..) => "StatementKind::Assign",
+            StatementKind::ReadForMatch(..) => "StatementKind::ReadForMatch",
             StatementKind::EndRegion(..) => "StatementKind::EndRegion",
             StatementKind::Validate(..) => "StatementKind::Validate",
             StatementKind::SetDiscriminant { .. } => "StatementKind::SetDiscriminant",
             StatementKind::StorageLive(..) => "StatementKind::StorageLive",
             StatementKind::StorageDead(..) => "StatementKind::StorageDead",
             StatementKind::InlineAsm { .. } => "StatementKind::InlineAsm",
+            StatementKind::UserAssertTy(..) => "StatementKind::UserAssertTy",
             StatementKind::Nop => "StatementKind::Nop",
         }, &statement.kind);
         self.super_statement(block, statement, location);
@@ -123,6 +125,7 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
             TerminatorKind::GeneratorDrop => "TerminatorKind::GeneratorDrop",
             TerminatorKind::Yield { .. } => "TerminatorKind::Yield",
             TerminatorKind::FalseEdges { .. } => "TerminatorKind::FalseEdges",
+            TerminatorKind::FalseUnwind { .. } => "TerminatorKind::FalseUnwind",
         }, kind);
         self.super_terminator_kind(block, kind, location);
     }
@@ -132,14 +135,18 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
                             location: Location) {
         self.record("AssertMessage", msg);
         self.record(match *msg {
-            AssertMessage::BoundsCheck { .. } => "AssertMessage::BoundsCheck",
-            AssertMessage::Math(..) => "AssertMessage::Math",
-            AssertMessage::GeneratorResumedAfterReturn => {
+            EvalErrorKind::BoundsCheck { .. } => "AssertMessage::BoundsCheck",
+            EvalErrorKind::Overflow(..) => "AssertMessage::Overflow",
+            EvalErrorKind::OverflowNeg => "AssertMessage::OverflowNeg",
+            EvalErrorKind::DivisionByZero => "AssertMessage::DivisionByZero",
+            EvalErrorKind::RemainderByZero => "AssertMessage::RemainderByZero",
+            EvalErrorKind::GeneratorResumedAfterReturn => {
                 "AssertMessage::GeneratorResumedAfterReturn"
             }
-            AssertMessage::GeneratorResumedAfterPanic => {
+            EvalErrorKind::GeneratorResumedAfterPanic => {
                 "AssertMessage::GeneratorResumedAfterPanic"
             }
+            _ => bug!(),
         }, msg);
         self.super_assert_message(msg, location);
     }
@@ -264,13 +271,6 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.super_const(constant);
     }
 
-    fn visit_const_usize(&mut self,
-                         const_usize: &ConstUsize,
-                         _: Location) {
-        self.record("ConstUsize", const_usize);
-        self.super_const_usize(const_usize);
-    }
-
     fn visit_local_decl(&mut self,
                         local: Local,
                         local_decl: &LocalDecl<'tcx>) {
@@ -278,9 +278,9 @@ impl<'a, 'tcx> mir_visit::Visitor<'tcx> for StatCollector<'a, 'tcx> {
         self.super_local_decl(local, local_decl);
     }
 
-    fn visit_visibility_scope(&mut self,
-                              scope: &VisibilityScope) {
+    fn visit_source_scope(&mut self,
+                              scope: &SourceScope) {
         self.record("VisiblityScope", scope);
-        self.super_visibility_scope(scope);
+        self.super_source_scope(scope);
     }
 }

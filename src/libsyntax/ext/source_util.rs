@@ -24,7 +24,7 @@ use util::small_vector::SmallVector;
 use std::fs::File;
 use std::io::prelude::*;
 use std::path::PathBuf;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 
 // These macros all relate to the file system; they either return
 // the column/row/filename of the expression, or they include
@@ -116,9 +116,10 @@ pub fn expand_include<'cx>(cx: &'cx mut ExtCtxt, sp: Span, tts: &[tokenstream::T
             while self.p.token != token::Eof {
                 match panictry!(self.p.parse_item()) {
                     Some(item) => ret.push(item),
-                    None => panic!(self.p.diagnostic().span_fatal(self.p.span,
+                    None => self.p.diagnostic().span_fatal(self.p.span,
                                                            &format!("expected item, found `{}`",
-                                                                    self.p.this_token_to_string())))
+                                                                    self.p.this_token_to_string()))
+                                               .raise()
                 }
             }
             Some(ret)
@@ -183,7 +184,7 @@ pub fn expand_include_bytes(cx: &mut ExtCtxt, sp: Span, tts: &[tokenstream::Toke
             // dependency information, but don't enter it's contents
             cx.codemap().new_filemap_and_lines(&file, "");
 
-            base::MacEager::expr(cx.expr_lit(sp, ast::LitKind::ByteStr(Rc::new(bytes))))
+            base::MacEager::expr(cx.expr_lit(sp, ast::LitKind::ByteStr(Lrc::new(bytes))))
         }
     }
 }

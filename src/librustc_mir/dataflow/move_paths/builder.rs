@@ -119,8 +119,8 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
     }
 
     fn create_move_path(&mut self, place: &Place<'tcx>) {
-        // This is an assignment, not a move, so this not being a valid
-        // move path is OK.
+        // This is an non-moving access (such as an overwrite or
+        // drop), so this not being a valid move path is OK.
         let _ = self.move_path_for(place);
     }
 
@@ -135,8 +135,9 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
         let place_ty = proj.base.ty(mir, tcx).to_ty(tcx);
         match place_ty.sty {
             ty::TyRef(..) | ty::TyRawPtr(..) =>
-                return Err(MoveError::cannot_move_out_of(mir.source_info(self.loc).span,
-                                                         BorrowedContent)),
+                return Err(MoveError::cannot_move_out_of(
+                    mir.source_info(self.loc).span,
+                    BorrowedContent { target_ty: place.ty(mir, tcx).to_ty(tcx) })),
             ty::TyAdt(adt, _) if adt.has_dtor(tcx) && !adt.is_box() =>
                 return Err(MoveError::cannot_move_out_of(mir.source_info(self.loc).span,
                                                          InteriorOfTypeWithDestructor {
@@ -278,6 +279,9 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
                 }
                 self.gather_rvalue(rval);
             }
+            StatementKind::ReadForMatch(ref place) => {
+                self.create_move_path(place);
+            }
             StatementKind::InlineAsm { ref outputs, ref inputs, ref asm } => {
                 for (output, kind) in outputs.iter().zip(&asm.outputs) {
                     if !kind.is_indirect {
@@ -298,6 +302,7 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
             }
             StatementKind::EndRegion(_) |
             StatementKind::Validate(..) |
+            StatementKind::UserAssertTy(..) |
             StatementKind::Nop => {}
         }
     }
@@ -346,15 +351,19 @@ impl<'b, 'a, 'gcx, 'tcx> Gatherer<'b, 'a, 'gcx, 'tcx> {
             TerminatorKind::Abort |
             TerminatorKind::GeneratorDrop |
             TerminatorKind::FalseEdges { .. } |
+            TerminatorKind::FalseUnwind { .. } |
             TerminatorKind::Unreachable => { }
 
             TerminatorKind::Return => {
                 self.gather_move(&Place::Local(RETURN_PLACE));
             }
 
-            TerminatorKind::Assert { .. } |
-            TerminatorKind::SwitchInt { .. } => {
-                // branching terminators - these don't move anything
+            TerminatorKind::Assert { ref cond, .. } => {
+                self.gather_operand(cond);
+            }
+
+            TerminatorKind::SwitchInt { ref discr, .. } => {
+                self.gather_operand(discr);
             }
 
             TerminatorKind::Yield { ref value, .. } => {

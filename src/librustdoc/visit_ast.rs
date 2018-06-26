@@ -13,7 +13,6 @@
 
 use std::mem;
 
-use syntax::abi;
 use syntax::ast;
 use syntax::attr;
 use syntax_pos::Span;
@@ -24,12 +23,12 @@ use rustc::hir::def_id::{DefId, LOCAL_CRATE};
 use rustc::middle::cstore::{LoadedMacro, CrateStore};
 use rustc::middle::privacy::AccessLevel;
 use rustc::ty::Visibility;
-use rustc::util::nodemap::FxHashSet;
+use rustc::util::nodemap::{FxHashSet, FxHashMap};
 
 use rustc::hir;
 
 use core;
-use clean::{self, AttributesExt, NestedAttributesExt};
+use clean::{self, AttributesExt, NestedAttributesExt, def_id_to_path};
 use doctree::*;
 
 // looks to me like the first two of these are actually
@@ -40,22 +39,22 @@ use doctree::*;
 // also, is there some reason that this doesn't use the 'visit'
 // framework from syntax?
 
-pub struct RustdocVisitor<'a, 'tcx: 'a> {
-    cstore: &'tcx CrateStore,
+pub struct RustdocVisitor<'a, 'tcx: 'a, 'rcx: 'a> {
+    pub cstore: &'a CrateStore,
     pub module: Module,
     pub attrs: hir::HirVec<ast::Attribute>,
-    pub cx: &'a core::DocContext<'a, 'tcx>,
+    pub cx: &'a core::DocContext<'a, 'tcx, 'rcx>,
     view_item_stack: FxHashSet<ast::NodeId>,
     inlining: bool,
     /// Is the current module and all of its parents public?
     inside_public_path: bool,
-    reexported_macros: FxHashSet<DefId>,
+    exact_paths: Option<FxHashMap<DefId, Vec<String>>>,
 }
 
-impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
-    pub fn new(cstore: &'tcx CrateStore,
-               cx: &'a core::DocContext<'a, 'tcx>) -> RustdocVisitor<'a, 'tcx> {
-        // If the root is reexported, terminate all recursion.
+impl<'a, 'tcx, 'rcx> RustdocVisitor<'a, 'tcx, 'rcx> {
+    pub fn new(cstore: &'a CrateStore,
+               cx: &'a core::DocContext<'a, 'tcx, 'rcx>) -> RustdocVisitor<'a, 'tcx, 'rcx> {
+        // If the root is re-exported, terminate all recursion.
         let mut stack = FxHashSet();
         stack.insert(ast::CRATE_NODE_ID);
         RustdocVisitor {
@@ -65,8 +64,18 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
             view_item_stack: stack,
             inlining: false,
             inside_public_path: true,
-            reexported_macros: FxHashSet(),
+            exact_paths: Some(FxHashMap()),
             cstore,
+        }
+    }
+
+    fn store_path(&mut self, did: DefId) {
+        // We can't use the entry api, as that keeps the mutable borrow of self active
+        // when we try to use cx
+        let exact_paths = self.exact_paths.as_mut().unwrap();
+        if exact_paths.get(&did).is_none() {
+            let path = def_id_to_path(self.cx, did, self.cx.crate_name.clone());
+            exact_paths.insert(did, path);
         }
     }
 
@@ -94,6 +103,8 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
             krate.exported_macros.iter().map(|def| self.visit_local_macro(def)).collect();
         self.module.macros.extend(macro_exports);
         self.module.is_crate = true;
+
+        self.cx.renderinfo.borrow_mut().exact_paths = self.exact_paths.take().unwrap();
     }
 
     pub fn visit_variant_data(&mut self, item: &hir::Item,
@@ -160,9 +171,7 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
 
     pub fn visit_fn(&mut self, item: &hir::Item,
                     name: ast::Name, fd: &hir::FnDecl,
-                    unsafety: &hir::Unsafety,
-                    constness: hir::Constness,
-                    abi: &abi::Abi,
+                    header: hir::FnHeader,
                     gen: &hir::Generics,
                     body: hir::BodyId) -> Function {
         debug!("Visiting fn");
@@ -176,9 +185,7 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
             name,
             whence: item.span,
             generics: gen.clone(),
-            unsafety: *unsafety,
-            constness,
-            abi: *abi,
+            header,
             body,
         }
     }
@@ -207,14 +214,16 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
         if let Some(exports) = self.cx.tcx.module_exports(def_id) {
             for export in exports.iter().filter(|e| e.vis == Visibility::Public) {
                 if let Def::Macro(def_id, ..) = export.def {
-                    if def_id.krate == LOCAL_CRATE || self.reexported_macros.contains(&def_id) {
+                    // FIXME(50647): this eager macro inlining does not take
+                    // doc(hidden)/doc(no_inline) into account
+                    if def_id.krate == LOCAL_CRATE {
                         continue // These are `krate.exported_macros`, handled in `self.visit()`.
                     }
 
                     let imported_from = self.cx.tcx.original_crate_name(def_id.krate);
                     let def = match self.cstore.load_macro_untracked(def_id, self.cx.sess()) {
                         LoadedMacro::MacroDef(macro_def) => macro_def,
-                        // FIXME(jseyfried): document proc macro reexports
+                        // FIXME(jseyfried): document proc macro re-exports
                         LoadedMacro::ProcMacro(..) => continue,
                     };
 
@@ -225,14 +234,15 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                         unreachable!()
                     };
 
+                    debug!("inlining macro {}", def.ident.name);
                     om.macros.push(Macro {
                         def_id,
                         attrs: def.attrs.clone().into(),
                         name: def.ident.name,
-                        whence: def.span,
+                        whence: self.cx.tcx.def_span(def_id),
                         matchers,
-                        stab: self.stability(def.id),
-                        depr: self.deprecation(def.id),
+                        stab: self.cx.tcx.lookup_stability(def_id).cloned(),
+                        depr: self.cx.tcx.lookup_deprecation(def_id),
                         imported_from: Some(imported_from),
                     })
                 }
@@ -283,17 +293,6 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
         // Don't inline doc(hidden) imports so they can be stripped at a later stage.
         let is_no_inline = use_attrs.lists("doc").has_word("no_inline") ||
                            use_attrs.lists("doc").has_word("hidden");
-
-        // Memoize the non-inlined `pub use`'d macros so we don't push an extra
-        // declaration in `visit_mod_contents()`
-        if !def_did.is_local() {
-            if let Def::Macro(did, _) = def {
-                if please_inline { return true }
-                debug!("memoizing non-inlined macro export: {:?}", def);
-                self.reexported_macros.insert(did);
-                return false;
-            }
-        }
 
         // For cross-crate impl inlining we need to know whether items are
         // reachable in documentation - a previously nonreachable item can be
@@ -361,6 +360,11 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                 });
                 true
             }
+            hir_map::NodeStructCtor(_) if !glob => {
+                // struct constructors always show up alongside their struct definitions, we've
+                // already processed that so just discard this
+                true
+            }
             _ => false,
         };
         self.view_item_stack.remove(&def_node_id);
@@ -371,6 +375,12 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                       renamed: Option<ast::Name>, om: &mut Module) {
         debug!("Visiting item {:?}", item);
         let name = renamed.unwrap_or(item.name);
+
+        if item.vis == hir::Public {
+            let def_id = self.cx.tcx.hir.local_def_id(item.id);
+            self.store_path(def_id);
+        }
+
         match item.node {
             hir::ItemForeignMod(ref fm) => {
                 // If inlining we only want to include public functions.
@@ -386,13 +396,13 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
             // If we're inlining, skip private items.
             _ if self.inlining && item.vis != hir::Public => {}
             hir::ItemGlobalAsm(..) => {}
-            hir::ItemExternCrate(ref p) => {
+            hir::ItemExternCrate(orig_name) => {
                 let def_id = self.cx.tcx.hir.local_def_id(item.id);
                 om.extern_crates.push(ExternCrate {
                     cnum: self.cx.tcx.extern_mod_stmt_cnum(def_id)
                                 .unwrap_or(LOCAL_CRATE),
                     name,
-                    path: p.map(|x|x.to_string()),
+                    path: orig_name.map(|x|x.to_string()),
                     vis: item.vis.clone(),
                     attrs: item.attrs.clone(),
                     whence: item.span,
@@ -448,9 +458,8 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                 om.structs.push(self.visit_variant_data(item, name, sd, gen)),
             hir::ItemUnion(ref sd, ref gen) =>
                 om.unions.push(self.visit_union_data(item, name, sd, gen)),
-            hir::ItemFn(ref fd, ref unsafety, constness, ref abi, ref gen, body) =>
-                om.fns.push(self.visit_fn(item, name, &**fd, unsafety,
-                                          constness, abi, gen, body)),
+            hir::ItemFn(ref fd, header, ref gen, body) =>
+                om.fns.push(self.visit_fn(item, name, &**fd, header, gen, body)),
             hir::ItemTy(ref ty, ref gen) => {
                 let t = Typedef {
                     ty: ty.clone(),
@@ -494,11 +503,12 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                 };
                 om.constants.push(s);
             },
-            hir::ItemTrait(_, unsafety, ref gen, ref b, ref item_ids) => {
+            hir::ItemTrait(is_auto, unsafety, ref gen, ref b, ref item_ids) => {
                 let items = item_ids.iter()
                                     .map(|ti| self.cx.tcx.hir.trait_item(ti.id).clone())
                                     .collect();
                 let t = Trait {
+                    is_auto,
                     unsafety,
                     name,
                     items,
@@ -548,11 +558,15 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                     om.impls.push(i);
                 }
             },
+            hir::ItemExistential(_) => {
+                // FIXME(oli-obk): actually generate docs for real existential items
+            }
         }
     }
 
     // convert each exported_macro into a doc item
     fn visit_local_macro(&self, def: &hir::MacroDef) -> Macro {
+        debug!("visit_local_macro: {}", def.name);
         let tts = def.body.trees().collect::<Vec<_>>();
         // Extract the spans of all matchers. They represent the "interface" of the macro.
         let matchers = tts.chunks(4).map(|arm| arm[0].span()).collect();

@@ -13,12 +13,12 @@ use rustc::ty;
 use lint::{LateContext, LintContext, LintArray};
 use lint::{LintPass, LateLintPass};
 
-use syntax::abi::Abi;
+use rustc_target::spec::abi::Abi;
 use syntax::ast;
 use syntax::attr;
 use syntax_pos::Span;
 
-use rustc::hir::{self, PatKind};
+use rustc::hir::{self, GenericParamKind, PatKind};
 use rustc::hir::intravisit::FnKind;
 
 #[derive(PartialEq)]
@@ -147,9 +147,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonCamelCaseTypes {
     }
 
     fn check_generic_param(&mut self, cx: &LateContext, param: &hir::GenericParam) {
-        if let hir::GenericParam::Type(ref gen) = *param {
-            if gen.synthetic.is_none() {
-                self.check_case(cx, "type parameter", gen.name, gen.span);
+        match param.kind {
+            GenericParamKind::Lifetime { .. } => {}
+            GenericParamKind::Type { synthetic, .. } => {
+                if synthetic.is_none() {
+                    self.check_case(cx, "type parameter", param.name.name(), param.span);
+                }
             }
         }
     }
@@ -253,13 +256,12 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonSnakeCase {
     }
 
     fn check_generic_param(&mut self, cx: &LateContext, param: &hir::GenericParam) {
-        if let hir::GenericParam::Lifetime(ref ld) = *param {
-            self.check_snake_case(
-                cx,
-                "lifetime",
-                &ld.lifetime.name.name().as_str(),
-                Some(ld.lifetime.span)
-            );
+        match param.kind {
+            GenericParamKind::Lifetime { .. } => {
+                let name = param.name.name().as_str();
+                self.check_snake_case(cx, "lifetime", &name, Some(param.span));
+            }
+            GenericParamKind::Type { .. } => {}
         }
     }
 
@@ -282,9 +284,9 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonSnakeCase {
                     _ => (),
                 }
             }
-            FnKind::ItemFn(name, _, _, _, abi, _, attrs) => {
+            FnKind::ItemFn(name, _, header, _, attrs) => {
                 // Skip foreign-ABI #[no_mangle] functions (Issue #31924)
-                if abi != Abi::Rust && attr::find_by_name(attrs, "no_mangle").is_some() {
+                if header.abi != Abi::Rust && attr::find_by_name(attrs, "no_mangle").is_some() {
                     return;
                 }
                 self.check_snake_case(cx, "function", &name.as_str(), Some(span))
@@ -324,7 +326,7 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonSnakeCase {
                         _: &hir::Generics,
                         _: ast::NodeId) {
         for sf in s.fields() {
-            self.check_snake_case(cx, "structure field", &sf.name.as_str(), Some(sf.span));
+            self.check_snake_case(cx, "structure field", &sf.ident.as_str(), Some(sf.span));
         }
     }
 }
@@ -368,6 +370,9 @@ impl<'a, 'tcx> LateLintPass<'a, 'tcx> for NonUpperCaseGlobals {
     fn check_item(&mut self, cx: &LateContext, it: &hir::Item) {
         match it.node {
             hir::ItemStatic(..) => {
+                if attr::find_by_name(&it.attrs, "no_mangle").is_some() {
+                    return;
+                }
                 NonUpperCaseGlobals::check_upper_case(cx, "static variable", it.name, it.span);
             }
             hir::ItemConst(..) => {

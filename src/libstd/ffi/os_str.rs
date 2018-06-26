@@ -61,7 +61,7 @@ use sys_common::{AsInner, IntoInner, FromInner};
 /// # Conversions
 ///
 /// See the [module's toplevel documentation about conversions][conversions] for a discussion on
-/// the traits which `OsString` implements for conversions from/to native representations.
+/// the traits which `OsString` implements for [conversions] from/to native representations.
 ///
 /// [`OsStr`]: struct.OsStr.html
 /// [`&OsStr`]: struct.OsStr.html
@@ -74,6 +74,7 @@ use sys_common::{AsInner, IntoInner, FromInner};
 /// [`new`]: #method.new
 /// [`push`]: #method.push
 /// [`as_os_str`]: #method.as_os_str
+/// [conversions]: index.html#conversions
 #[derive(Clone)]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct OsString {
@@ -89,7 +90,7 @@ pub struct OsString {
 /// references; the latter are owned strings.
 ///
 /// See the [module's toplevel documentation about conversions][conversions] for a discussion on
-/// the traits which `OsStr` implements for conversions from/to native representations.
+/// the traits which `OsStr` implements for [conversions] from/to native representations.
 ///
 /// [`OsString`]: struct.OsString.html
 /// [`&str`]: ../primitive.str.html
@@ -293,6 +294,36 @@ impl OsString {
     #[stable(feature = "osstring_shrink_to_fit", since = "1.19.0")]
     pub fn shrink_to_fit(&mut self) {
         self.inner.shrink_to_fit()
+    }
+
+    /// Shrinks the capacity of the `OsString` with a lower bound.
+    ///
+    /// The capacity will remain at least as large as both the length
+    /// and the supplied value.
+    ///
+    /// Panics if the current capacity is smaller than the supplied
+    /// minimum capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(shrink_to)]
+    /// use std::ffi::OsString;
+    ///
+    /// let mut s = OsString::from("foo");
+    ///
+    /// s.reserve(100);
+    /// assert!(s.capacity() >= 100);
+    ///
+    /// s.shrink_to(10);
+    /// assert!(s.capacity() >= 10);
+    /// s.shrink_to(0);
+    /// assert!(s.capacity() >= 3);
+    /// ```
+    #[inline]
+    #[unstable(feature = "shrink_to", reason = "new API", issue="0")]
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        self.inner.shrink_to(min_capacity)
     }
 
     /// Converts this `OsString` into a boxed [`OsStr`].
@@ -630,6 +661,38 @@ impl<'a> From<&'a OsStr> for Rc<OsStr> {
     fn from(s: &OsStr) -> Rc<OsStr> {
         let rc = s.inner.into_rc();
         unsafe { Rc::from_raw(Rc::into_raw(rc) as *const OsStr) }
+    }
+}
+
+#[stable(feature = "cow_from_osstr", since = "1.28.0")]
+impl<'a> From<OsString> for Cow<'a, OsStr> {
+    #[inline]
+    fn from(s: OsString) -> Cow<'a, OsStr> {
+        Cow::Owned(s)
+    }
+}
+
+#[stable(feature = "cow_from_osstr", since = "1.28.0")]
+impl<'a> From<&'a OsStr> for Cow<'a, OsStr> {
+    #[inline]
+    fn from(s: &'a OsStr) -> Cow<'a, OsStr> {
+        Cow::Borrowed(s)
+    }
+}
+
+#[stable(feature = "cow_from_osstr", since = "1.28.0")]
+impl<'a> From<&'a OsString> for Cow<'a, OsStr> {
+    #[inline]
+    fn from(s: &'a OsString) -> Cow<'a, OsStr> {
+        Cow::Borrowed(s.as_os_str())
+    }
+}
+
+#[stable(feature = "osstring_from_cow_osstr", since = "1.28.0")]
+impl<'a> From<Cow<'a, OsStr>> for OsString {
+    #[inline]
+    fn from(s: Cow<'a, OsStr>) -> Self {
+        s.into_owned()
     }
 }
 

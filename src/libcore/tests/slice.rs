@@ -11,6 +11,24 @@
 use core::result::Result::{Ok, Err};
 
 #[test]
+fn test_position() {
+    let b = [1, 2, 3, 5, 5];
+    assert!(b.iter().position(|&v| v == 9) == None);
+    assert!(b.iter().position(|&v| v == 5) == Some(3));
+    assert!(b.iter().position(|&v| v == 3) == Some(2));
+    assert!(b.iter().position(|&v| v == 0) == None);
+}
+
+#[test]
+fn test_rposition() {
+    let b = [1, 2, 3, 5, 5];
+    assert!(b.iter().rposition(|&v| v == 9) == None);
+    assert!(b.iter().rposition(|&v| v == 5) == Some(4));
+    assert!(b.iter().rposition(|&v| v == 3) == Some(2));
+    assert!(b.iter().rposition(|&v| v == 0) == None);
+}
+
+#[test]
 fn test_binary_search() {
     let b: [i32; 0] = [];
     assert_eq!(b.binary_search(&5), Err(0));
@@ -358,48 +376,224 @@ fn test_windows_zip() {
     assert_eq!(res, [14, 18, 22, 26]);
 }
 
-#[test]
-fn get_range() {
-    let v: &[i32] = &[0, 1, 2, 3, 4, 5];
-    assert_eq!(v.get(..), Some(&[0, 1, 2, 3, 4, 5][..]));
-    assert_eq!(v.get(..2), Some(&[0, 1][..]));
-    assert_eq!(v.get(2..), Some(&[2, 3, 4, 5][..]));
-    assert_eq!(v.get(1..4), Some(&[1, 2, 3][..]));
-    assert_eq!(v.get(7..), None);
-    assert_eq!(v.get(7..10), None);
-}
+// The current implementation of SliceIndex fails to handle methods
+// orthogonally from range types; therefore, it is worth testing
+// all of the indexing operations on each input.
+mod slice_index {
+    // This checks all six indexing methods, given an input range that
+    // should succeed. (it is NOT suitable for testing invalid inputs)
+    macro_rules! assert_range_eq {
+        ($arr:expr, $range:expr, $expected:expr)
+        => {
+            let mut arr = $arr;
+            let mut expected = $expected;
+            {
+                let s: &[_] = &arr;
+                let expected: &[_] = &expected;
 
-#[test]
-fn get_mut_range() {
-    let v: &mut [i32] = &mut [0, 1, 2, 3, 4, 5];
-    assert_eq!(v.get_mut(..), Some(&mut [0, 1, 2, 3, 4, 5][..]));
-    assert_eq!(v.get_mut(..2), Some(&mut [0, 1][..]));
-    assert_eq!(v.get_mut(2..), Some(&mut [2, 3, 4, 5][..]));
-    assert_eq!(v.get_mut(1..4), Some(&mut [1, 2, 3][..]));
-    assert_eq!(v.get_mut(7..), None);
-    assert_eq!(v.get_mut(7..10), None);
-}
+                assert_eq!(&s[$range], expected, "(in assertion for: index)");
+                assert_eq!(s.get($range), Some(expected), "(in assertion for: get)");
+                unsafe {
+                    assert_eq!(
+                        s.get_unchecked($range), expected,
+                        "(in assertion for: get_unchecked)",
+                    );
+                }
+            }
+            {
+                let s: &mut [_] = &mut arr;
+                let expected: &mut [_] = &mut expected;
 
-#[test]
-fn get_unchecked_range() {
-    unsafe {
-        let v: &[i32] = &[0, 1, 2, 3, 4, 5];
-        assert_eq!(v.get_unchecked(..), &[0, 1, 2, 3, 4, 5][..]);
-        assert_eq!(v.get_unchecked(..2), &[0, 1][..]);
-        assert_eq!(v.get_unchecked(2..), &[2, 3, 4, 5][..]);
-        assert_eq!(v.get_unchecked(1..4), &[1, 2, 3][..]);
+                assert_eq!(
+                    &mut s[$range], expected,
+                    "(in assertion for: index_mut)",
+                );
+                assert_eq!(
+                    s.get_mut($range), Some(&mut expected[..]),
+                    "(in assertion for: get_mut)",
+                );
+                unsafe {
+                    assert_eq!(
+                        s.get_unchecked_mut($range), expected,
+                        "(in assertion for: get_unchecked_mut)",
+                    );
+                }
+            }
+        }
     }
-}
 
-#[test]
-fn get_unchecked_mut_range() {
-    unsafe {
-        let v: &mut [i32] = &mut [0, 1, 2, 3, 4, 5];
-        assert_eq!(v.get_unchecked_mut(..), &mut [0, 1, 2, 3, 4, 5][..]);
-        assert_eq!(v.get_unchecked_mut(..2), &mut [0, 1][..]);
-        assert_eq!(v.get_unchecked_mut(2..), &mut[2, 3, 4, 5][..]);
-        assert_eq!(v.get_unchecked_mut(1..4), &mut [1, 2, 3][..]);
+    // Make sure the macro can actually detect bugs,
+    // because if it can't, then what are we even doing here?
+    //
+    // (Be aware this only demonstrates the ability to detect bugs
+    //  in the FIRST method that panics, as the macro is not designed
+    //  to be used in `should_panic`)
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn assert_range_eq_can_fail_by_panic() {
+        assert_range_eq!([0, 1, 2], 0..5, [0, 1, 2]);
     }
+
+    // (Be aware this only demonstrates the ability to detect bugs
+    //  in the FIRST method it calls, as the macro is not designed
+    //  to be used in `should_panic`)
+    #[test]
+    #[should_panic(expected = "==")]
+    fn assert_range_eq_can_fail_by_inequality() {
+        assert_range_eq!([0, 1, 2], 0..2, [0, 1, 2]);
+    }
+
+    // Test cases for bad index operations.
+    //
+    // This generates `should_panic` test cases for Index/IndexMut
+    // and `None` test cases for get/get_mut.
+    macro_rules! panic_cases {
+        ($(
+            // each test case needs a unique name to namespace the tests
+            in mod $case_name:ident {
+                data: $data:expr;
+
+                // optional:
+                //
+                // one or more similar inputs for which data[input] succeeds,
+                // and the corresponding output as an array.  This helps validate
+                // "critical points" where an input range straddles the boundary
+                // between valid and invalid.
+                // (such as the input `len..len`, which is just barely valid)
+                $(
+                    good: data[$good:expr] == $output:expr;
+                )*
+
+                bad: data[$bad:expr];
+                message: $expect_msg:expr;
+            }
+        )*) => {$(
+            mod $case_name {
+                #[test]
+                fn pass() {
+                    let mut v = $data;
+
+                    $( assert_range_eq!($data, $good, $output); )*
+
+                    {
+                        let v: &[_] = &v;
+                        assert_eq!(v.get($bad), None, "(in None assertion for get)");
+                    }
+
+                    {
+                        let v: &mut [_] = &mut v;
+                        assert_eq!(v.get_mut($bad), None, "(in None assertion for get_mut)");
+                    }
+                }
+
+                #[test]
+                #[should_panic(expected = $expect_msg)]
+                fn index_fail() {
+                    let v = $data;
+                    let v: &[_] = &v;
+                    let _v = &v[$bad];
+                }
+
+                #[test]
+                #[should_panic(expected = $expect_msg)]
+                fn index_mut_fail() {
+                    let mut v = $data;
+                    let v: &mut [_] = &mut v;
+                    let _v = &mut v[$bad];
+                }
+            }
+        )*};
+    }
+
+    #[test]
+    fn simple() {
+        let v = [0, 1, 2, 3, 4, 5];
+
+        assert_range_eq!(v, .., [0, 1, 2, 3, 4, 5]);
+        assert_range_eq!(v, ..2, [0, 1]);
+        assert_range_eq!(v, ..=1, [0, 1]);
+        assert_range_eq!(v, 2.., [2, 3, 4, 5]);
+        assert_range_eq!(v, 1..4, [1, 2, 3]);
+        assert_range_eq!(v, 1..=3, [1, 2, 3]);
+    }
+
+    panic_cases! {
+        in mod rangefrom_len {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[6..] == [];
+            bad: data[7..];
+            message: "but ends at"; // perhaps not ideal
+        }
+
+        in mod rangeto_len {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[..6] == [0, 1, 2, 3, 4, 5];
+            bad: data[..7];
+            message: "out of range";
+        }
+
+        in mod rangetoinclusive_len {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[..=5] == [0, 1, 2, 3, 4, 5];
+            bad: data[..=6];
+            message: "out of range";
+        }
+
+        in mod range_len_len {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[6..6] == [];
+            bad: data[7..7];
+            message: "out of range";
+        }
+
+        in mod rangeinclusive_len_len {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[6..=5] == [];
+            bad: data[7..=6];
+            message: "out of range";
+        }
+    }
+
+    panic_cases! {
+        in mod range_neg_width {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[4..4] == [];
+            bad: data[4..3];
+            message: "but ends at";
+        }
+
+        in mod rangeinclusive_neg_width {
+            data: [0, 1, 2, 3, 4, 5];
+
+            good: data[4..=3] == [];
+            bad: data[4..=2];
+            message: "but ends at";
+        }
+    }
+
+    panic_cases! {
+        in mod rangeinclusive_overflow {
+            data: [0, 1];
+
+            // note: using 0 specifically ensures that the result of overflowing is 0..0,
+            //       so that `get` doesn't simply return None for the wrong reason.
+            bad: data[0 ..= ::std::usize::MAX];
+            message: "maximum usize";
+        }
+
+        in mod rangetoinclusive_overflow {
+            data: [0, 1];
+
+            bad: data[..= ::std::usize::MAX];
+            message: "maximum usize";
+        }
+    } // panic_cases!
 }
 
 #[test]
@@ -461,4 +655,194 @@ fn test_rotate_right() {
     for i in 0..N {
         assert_eq!(a[(i + 42) % N], i);
     }
+}
+
+#[test]
+#[cfg(not(target_arch = "wasm32"))]
+fn sort_unstable() {
+    use core::cmp::Ordering::{Equal, Greater, Less};
+    use core::slice::heapsort;
+    use rand::{Rng, XorShiftRng};
+
+    let mut v = [0; 600];
+    let mut tmp = [0; 600];
+    let mut rng = XorShiftRng::new_unseeded();
+
+    for len in (2..25).chain(500..510) {
+        let v = &mut v[0..len];
+        let tmp = &mut tmp[0..len];
+
+        for &modulus in &[5, 10, 100, 1000] {
+            for _ in 0..100 {
+                for i in 0..len {
+                    v[i] = rng.gen::<i32>() % modulus;
+                }
+
+                // Sort in default order.
+                tmp.copy_from_slice(v);
+                tmp.sort_unstable();
+                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
+
+                // Sort in ascending order.
+                tmp.copy_from_slice(v);
+                tmp.sort_unstable_by(|a, b| a.cmp(b));
+                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
+
+                // Sort in descending order.
+                tmp.copy_from_slice(v);
+                tmp.sort_unstable_by(|a, b| b.cmp(a));
+                assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
+
+                // Test heapsort using `<` operator.
+                tmp.copy_from_slice(v);
+                heapsort(tmp, |a, b| a < b);
+                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
+
+                // Test heapsort using `>` operator.
+                tmp.copy_from_slice(v);
+                heapsort(tmp, |a, b| a > b);
+                assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
+            }
+        }
+    }
+
+    // Sort using a completely random comparison function.
+    // This will reorder the elements *somehow*, but won't panic.
+    for i in 0..v.len() {
+        v[i] = i as i32;
+    }
+    v.sort_unstable_by(|_, _| *rng.choose(&[Less, Equal, Greater]).unwrap());
+    v.sort_unstable();
+    for i in 0..v.len() {
+        assert_eq!(v[i], i as i32);
+    }
+
+    // Should not panic.
+    [0i32; 0].sort_unstable();
+    [(); 10].sort_unstable();
+    [(); 100].sort_unstable();
+
+    let mut v = [0xDEADBEEFu64];
+    v.sort_unstable();
+    assert!(v == [0xDEADBEEF]);
+}
+
+pub mod memchr {
+    use core::slice::memchr::{memchr, memrchr};
+
+    // test fallback implementations on all platforms
+    #[test]
+    fn matches_one() {
+        assert_eq!(Some(0), memchr(b'a', b"a"));
+    }
+
+    #[test]
+    fn matches_begin() {
+        assert_eq!(Some(0), memchr(b'a', b"aaaa"));
+    }
+
+    #[test]
+    fn matches_end() {
+        assert_eq!(Some(4), memchr(b'z', b"aaaaz"));
+    }
+
+    #[test]
+    fn matches_nul() {
+        assert_eq!(Some(4), memchr(b'\x00', b"aaaa\x00"));
+    }
+
+    #[test]
+    fn matches_past_nul() {
+        assert_eq!(Some(5), memchr(b'z', b"aaaa\x00z"));
+    }
+
+    #[test]
+    fn no_match_empty() {
+        assert_eq!(None, memchr(b'a', b""));
+    }
+
+    #[test]
+    fn no_match() {
+        assert_eq!(None, memchr(b'a', b"xyz"));
+    }
+
+    #[test]
+    fn matches_one_reversed() {
+        assert_eq!(Some(0), memrchr(b'a', b"a"));
+    }
+
+    #[test]
+    fn matches_begin_reversed() {
+        assert_eq!(Some(3), memrchr(b'a', b"aaaa"));
+    }
+
+    #[test]
+    fn matches_end_reversed() {
+        assert_eq!(Some(0), memrchr(b'z', b"zaaaa"));
+    }
+
+    #[test]
+    fn matches_nul_reversed() {
+        assert_eq!(Some(4), memrchr(b'\x00', b"aaaa\x00"));
+    }
+
+    #[test]
+    fn matches_past_nul_reversed() {
+        assert_eq!(Some(0), memrchr(b'z', b"z\x00aaaa"));
+    }
+
+    #[test]
+    fn no_match_empty_reversed() {
+        assert_eq!(None, memrchr(b'a', b""));
+    }
+
+    #[test]
+    fn no_match_reversed() {
+        assert_eq!(None, memrchr(b'a', b"xyz"));
+    }
+
+    #[test]
+    fn each_alignment_reversed() {
+        let mut data = [1u8; 64];
+        let needle = 2;
+        let pos = 40;
+        data[pos] = needle;
+        for start in 0..16 {
+            assert_eq!(Some(pos - start), memrchr(needle, &data[start..]));
+        }
+    }
+}
+
+#[test]
+fn test_align_to_simple() {
+    let bytes = [1u8, 2, 3, 4, 5, 6, 7];
+    let (prefix, aligned, suffix) = unsafe { bytes.align_to::<u16>() };
+    assert_eq!(aligned.len(), 3);
+    assert!(prefix == [1] || suffix == [7]);
+    let expect1 = [1 << 8 | 2, 3 << 8 | 4, 5 << 8 | 6];
+    let expect2 = [1 | 2 << 8, 3 | 4 << 8, 5 | 6 << 8];
+    let expect3 = [2 << 8 | 3, 4 << 8 | 5, 6 << 8 | 7];
+    let expect4 = [2 | 3 << 8, 4 | 5 << 8, 6 | 7 << 8];
+    assert!(aligned == expect1 || aligned == expect2 || aligned == expect3 || aligned == expect4,
+            "aligned={:?} expected={:?} || {:?} || {:?} || {:?}",
+            aligned, expect1, expect2, expect3, expect4);
+}
+
+#[test]
+fn test_align_to_zst() {
+    let bytes = [1, 2, 3, 4, 5, 6, 7];
+    let (prefix, aligned, suffix) = unsafe { bytes.align_to::<()>() };
+    assert_eq!(aligned.len(), 0);
+    assert!(prefix == [1, 2, 3, 4, 5, 6, 7] || suffix == [1, 2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
+fn test_align_to_non_trivial() {
+    #[repr(align(8))] struct U64(u64, u64);
+    #[repr(align(8))] struct U64U64U32(u64, u64, u32);
+    let data = [U64(1, 2), U64(3, 4), U64(5, 6), U64(7, 8), U64(9, 10), U64(11, 12), U64(13, 14),
+                U64(15, 16)];
+    let (prefix, aligned, suffix) = unsafe { data.align_to::<U64U64U32>() };
+    assert_eq!(aligned.len(), 4);
+    assert_eq!(prefix.len() + suffix.len(), 2);
 }

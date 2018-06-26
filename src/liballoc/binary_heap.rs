@@ -155,9 +155,9 @@
 #![allow(missing_docs)]
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use core::ops::{Deref, DerefMut, Place, Placer, InPlace};
+use core::ops::{Deref, DerefMut};
 use core::iter::{FromIterator, FusedIterator};
-use core::mem::{swap, size_of};
+use core::mem::{swap, size_of, ManuallyDrop};
 use core::ptr;
 use core::fmt;
 
@@ -509,6 +509,31 @@ impl<T: Ord> BinaryHeap<T> {
         self.data.shrink_to_fit();
     }
 
+    /// Discards capacity with a lower bound.
+    ///
+    /// The capacity will remain at least as large as both the length
+    /// and the supplied value.
+    ///
+    /// Panics if the current capacity is smaller than the supplied
+    /// minimum capacity.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// #![feature(shrink_to)]
+    /// use std::collections::BinaryHeap;
+    /// let mut heap: BinaryHeap<i32> = BinaryHeap::with_capacity(100);
+    ///
+    /// assert!(heap.capacity() >= 100);
+    /// heap.shrink_to(10);
+    /// assert!(heap.capacity() >= 10);
+    /// ```
+    #[inline]
+    #[unstable(feature = "shrink_to", reason = "new API", issue="0")]
+    pub fn shrink_to(&mut self, min_capacity: usize) {
+        self.data.shrink_to(min_capacity)
+    }
+
     /// Removes the greatest item from the binary heap and returns it, or `None` if it
     /// is empty.
     ///
@@ -839,8 +864,7 @@ impl<T: Ord> BinaryHeap<T> {
 /// position with the value that was originally removed.
 struct Hole<'a, T: 'a> {
     data: &'a mut [T],
-    /// `elt` is always `Some` from new until drop.
-    elt: Option<T>,
+    elt: ManuallyDrop<T>,
     pos: usize,
 }
 
@@ -854,7 +878,7 @@ impl<'a, T> Hole<'a, T> {
         let elt = ptr::read(&data[pos]);
         Hole {
             data,
-            elt: Some(elt),
+            elt: ManuallyDrop::new(elt),
             pos,
         }
     }
@@ -867,7 +891,7 @@ impl<'a, T> Hole<'a, T> {
     /// Returns a reference to the element removed.
     #[inline]
     fn element(&self) -> &T {
-        self.elt.as_ref().unwrap()
+        &self.elt
     }
 
     /// Returns a reference to the element at `index`.
@@ -900,7 +924,7 @@ impl<'a, T> Drop for Hole<'a, T> {
         // fill the hole again
         unsafe {
             let pos = self.pos;
-            ptr::write(self.data.get_unchecked_mut(pos), self.elt.take().unwrap());
+            ptr::copy_nonoverlapping(&*self.elt, self.data.get_unchecked_mut(pos), 1);
         }
     }
 }
@@ -964,7 +988,7 @@ impl<'a, T> ExactSizeIterator for Iter<'a, T> {
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T> FusedIterator for Iter<'a, T> {}
 
 /// An owning iterator over the elements of a `BinaryHeap`.
@@ -1019,7 +1043,7 @@ impl<T> ExactSizeIterator for IntoIter<T> {
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<T> FusedIterator for IntoIter<T> {}
 
 /// A draining iterator over the elements of a `BinaryHeap`.
@@ -1065,7 +1089,7 @@ impl<'a, T: 'a> ExactSizeIterator for Drain<'a, T> {
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<'a, T: 'a> FusedIterator for Drain<'a, T> {}
 
 #[stable(feature = "binary_heap_extras_15", since = "1.5.0")]
@@ -1168,69 +1192,5 @@ impl<T: Ord> BinaryHeap<T> {
 impl<'a, T: 'a + Ord + Copy> Extend<&'a T> for BinaryHeap<T> {
     fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
         self.extend(iter.into_iter().cloned());
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-pub struct BinaryHeapPlace<'a, T: 'a>
-where T: Clone + Ord {
-    heap: *mut BinaryHeap<T>,
-    place: vec::PlaceBack<'a, T>,
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T: Clone + Ord + fmt::Debug> fmt::Debug for BinaryHeapPlace<'a, T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_tuple("BinaryHeapPlace")
-         .field(&self.place)
-         .finish()
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T: 'a> Placer<T> for &'a mut BinaryHeap<T>
-where T: Clone + Ord {
-    type Place = BinaryHeapPlace<'a, T>;
-
-    fn make_place(self) -> Self::Place {
-        let ptr = self as *mut BinaryHeap<T>;
-        let place = Placer::make_place(self.data.place_back());
-        BinaryHeapPlace {
-            heap: ptr,
-            place,
-        }
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> Place<T> for BinaryHeapPlace<'a, T>
-where T: Clone + Ord {
-    fn pointer(&mut self) -> *mut T {
-        self.place.pointer()
-    }
-}
-
-#[unstable(feature = "collection_placement",
-           reason = "placement protocol is subject to change",
-           issue = "30172")]
-impl<'a, T> InPlace<T> for BinaryHeapPlace<'a, T>
-where T: Clone + Ord {
-    type Owner = &'a T;
-
-    unsafe fn finalize(self) -> &'a T {
-        self.place.finalize();
-
-        let heap: &mut BinaryHeap<T> = &mut *self.heap;
-        let len = heap.len();
-        let i = heap.sift_up(0, len - 1);
-        heap.data.get_unchecked(i)
     }
 }

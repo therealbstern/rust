@@ -14,29 +14,43 @@
 //! but is not as ugly as it is right now.
 
 use rustc::mir::{BasicBlock, Location};
+use rustc::ty::RegionVid;
+use rustc_data_structures::indexed_set::Iter;
 
-use dataflow::{MaybeInitializedLvals, MaybeUninitializedLvals};
-use dataflow::{EverInitializedLvals, MovingOutStatements};
-use dataflow::{ActiveBorrows, FlowAtLocation, FlowsAtLocation};
+use borrow_check::location::LocationIndex;
+
+use polonius_engine::Output;
+
+use dataflow::move_paths::indexes::BorrowIndex;
 use dataflow::move_paths::HasMoveData;
+use dataflow::Borrows;
+use dataflow::{EverInitializedPlaces, MovingOutStatements};
+use dataflow::{FlowAtLocation, FlowsAtLocation};
+use dataflow::{MaybeInitializedPlaces, MaybeUninitializedPlaces};
+use either::Either;
 use std::fmt;
+use std::rc::Rc;
 
 // (forced to be `pub` due to its use as an associated type below.)
-pub(crate) struct Flows<'b, 'gcx: 'tcx, 'tcx: 'b> {
-    pub borrows: FlowAtLocation<ActiveBorrows<'b, 'gcx, 'tcx>>,
-    pub inits: FlowAtLocation<MaybeInitializedLvals<'b, 'gcx, 'tcx>>,
-    pub uninits: FlowAtLocation<MaybeUninitializedLvals<'b, 'gcx, 'tcx>>,
+crate struct Flows<'b, 'gcx: 'tcx, 'tcx: 'b> {
+    borrows: FlowAtLocation<Borrows<'b, 'gcx, 'tcx>>,
+    pub inits: FlowAtLocation<MaybeInitializedPlaces<'b, 'gcx, 'tcx>>,
+    pub uninits: FlowAtLocation<MaybeUninitializedPlaces<'b, 'gcx, 'tcx>>,
     pub move_outs: FlowAtLocation<MovingOutStatements<'b, 'gcx, 'tcx>>,
-    pub ever_inits: FlowAtLocation<EverInitializedLvals<'b, 'gcx, 'tcx>>,
+    pub ever_inits: FlowAtLocation<EverInitializedPlaces<'b, 'gcx, 'tcx>>,
+
+    /// Polonius Output
+    pub polonius_output: Option<Rc<Output<RegionVid, BorrowIndex, LocationIndex>>>,
 }
 
 impl<'b, 'gcx, 'tcx> Flows<'b, 'gcx, 'tcx> {
-    pub fn new(
-        borrows: FlowAtLocation<ActiveBorrows<'b, 'gcx, 'tcx>>,
-        inits: FlowAtLocation<MaybeInitializedLvals<'b, 'gcx, 'tcx>>,
-        uninits: FlowAtLocation<MaybeUninitializedLvals<'b, 'gcx, 'tcx>>,
+    crate fn new(
+        borrows: FlowAtLocation<Borrows<'b, 'gcx, 'tcx>>,
+        inits: FlowAtLocation<MaybeInitializedPlaces<'b, 'gcx, 'tcx>>,
+        uninits: FlowAtLocation<MaybeUninitializedPlaces<'b, 'gcx, 'tcx>>,
         move_outs: FlowAtLocation<MovingOutStatements<'b, 'gcx, 'tcx>>,
-        ever_inits: FlowAtLocation<EverInitializedLvals<'b, 'gcx, 'tcx>>,
+        ever_inits: FlowAtLocation<EverInitializedPlaces<'b, 'gcx, 'tcx>>,
+        polonius_output: Option<Rc<Output<RegionVid, BorrowIndex, LocationIndex>>>,
     ) -> Self {
         Flows {
             borrows,
@@ -44,7 +58,23 @@ impl<'b, 'gcx, 'tcx> Flows<'b, 'gcx, 'tcx> {
             uninits,
             move_outs,
             ever_inits,
+            polonius_output,
         }
+    }
+
+    crate fn borrows_in_scope(
+        &self,
+        location: LocationIndex,
+    ) -> impl Iterator<Item = BorrowIndex> + '_ {
+        if let Some(ref polonius) = self.polonius_output {
+            Either::Left(polonius.errors_at(location).iter().cloned())
+        } else {
+            Either::Right(self.borrows.iter_incoming())
+        }
+    }
+
+    crate fn with_outgoing_borrows(&self, op: impl FnOnce(Iter<BorrowIndex>)) {
+        self.borrows.with_iter_outgoing(op)
     }
 }
 
@@ -55,7 +85,7 @@ macro_rules! each_flow {
         FlowAtLocation::$meth(&mut $this.uninits, $arg);
         FlowAtLocation::$meth(&mut $this.move_outs, $arg);
         FlowAtLocation::$meth(&mut $this.ever_inits, $arg);
-    }
+    };
 }
 
 impl<'b, 'gcx, 'tcx> FlowsAtLocation for Flows<'b, 'gcx, 'tcx> {
@@ -87,9 +117,8 @@ impl<'b, 'gcx, 'tcx> fmt::Display for Flows<'b, 'gcx, 'tcx> {
                 s.push_str(", ");
             };
             saw_one = true;
-            let borrow_data = &self.borrows.operator().borrows()[borrow.borrow_index()];
-            s.push_str(&format!("{}{}", borrow_data,
-                                if borrow.is_activation() { "@active" } else { "" }));
+            let borrow_data = &self.borrows.operator().borrows()[borrow];
+            s.push_str(&format!("{}", borrow_data));
         });
         s.push_str("] ");
 
@@ -100,7 +129,7 @@ impl<'b, 'gcx, 'tcx> fmt::Display for Flows<'b, 'gcx, 'tcx> {
                 s.push_str(", ");
             };
             saw_one = true;
-            let borrow_data = &self.borrows.operator().borrows()[borrow.borrow_index()];
+            let borrow_data = &self.borrows.operator().borrows()[borrow];
             s.push_str(&format!("{}", borrow_data));
         });
         s.push_str("] ");
@@ -124,8 +153,7 @@ impl<'b, 'gcx, 'tcx> fmt::Display for Flows<'b, 'gcx, 'tcx> {
                 s.push_str(", ");
             };
             saw_one = true;
-            let move_path =
-                &self.uninits.operator().move_data().move_paths[mpi_uninit];
+            let move_path = &self.uninits.operator().move_data().move_paths[mpi_uninit];
             s.push_str(&format!("{}", move_path));
         });
         s.push_str("] ");
@@ -149,8 +177,7 @@ impl<'b, 'gcx, 'tcx> fmt::Display for Flows<'b, 'gcx, 'tcx> {
                 s.push_str(", ");
             };
             saw_one = true;
-            let ever_init =
-                &self.ever_inits.operator().move_data().inits[mpi_ever_init];
+            let ever_init = &self.ever_inits.operator().move_data().inits[mpi_ever_init];
             s.push_str(&format!("{:?}", ever_init));
         });
         s.push_str("]");

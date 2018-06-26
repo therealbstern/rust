@@ -19,7 +19,7 @@ use clean;
 /// discriminants. JavaScript then is used to decode them into the original value.
 /// Consequently, every change to this type should be synchronized to
 /// the `itemTypes` mapping table in `static/main.js`.
-#[derive(Copy, PartialEq, Clone)]
+#[derive(Copy, PartialEq, Clone, Debug)]
 pub enum ItemType {
     Module          = 0,
     ExternCrate     = 1,
@@ -42,6 +42,7 @@ pub enum ItemType {
     AssociatedConst = 18,
     Union           = 19,
     ForeignType     = 20,
+    Keyword         = 21,
 }
 
 
@@ -50,6 +51,7 @@ pub enum NameSpace {
     Type,
     Value,
     Macro,
+    Keyword,
 }
 
 impl<'a> From<&'a clean::Item> for ItemType {
@@ -83,6 +85,7 @@ impl<'a> From<&'a clean::Item> for ItemType {
             clean::AssociatedConstItem(..) => ItemType::AssociatedConst,
             clean::AssociatedTypeItem(..)  => ItemType::AssociatedType,
             clean::ForeignTypeItem         => ItemType::ForeignType,
+            clean::KeywordItem(..)         => ItemType::Keyword,
             clean::StrippedItem(..)        => unreachable!(),
         }
     }
@@ -102,6 +105,7 @@ impl From<clean::TypeKind> for ItemType {
             clean::TypeKind::Variant  => ItemType::Variant,
             clean::TypeKind::Typedef  => ItemType::Typedef,
             clean::TypeKind::Foreign  => ItemType::ForeignType,
+            clean::TypeKind::Macro  => ItemType::Macro,
         }
     }
 }
@@ -130,6 +134,7 @@ impl ItemType {
             ItemType::Constant        => "constant",
             ItemType::AssociatedConst => "associatedconstant",
             ItemType::ForeignType     => "foreigntype",
+            ItemType::Keyword         => "keyword",
         }
     }
 
@@ -158,6 +163,8 @@ impl ItemType {
             ItemType::AssociatedConst => NameSpace::Value,
 
             ItemType::Macro => NameSpace::Macro,
+
+            ItemType::Keyword => NameSpace::Keyword,
         }
     }
 }
@@ -171,6 +178,7 @@ impl fmt::Display for ItemType {
 pub const NAMESPACE_TYPE: &'static str = "t";
 pub const NAMESPACE_VALUE: &'static str = "v";
 pub const NAMESPACE_MACRO: &'static str = "m";
+pub const NAMESPACE_KEYWORD: &'static str = "k";
 
 impl NameSpace {
     pub fn to_static_str(&self) -> &'static str {
@@ -178,6 +186,7 @@ impl NameSpace {
             NameSpace::Type => NAMESPACE_TYPE,
             NameSpace::Value => NAMESPACE_VALUE,
             NameSpace::Macro => NAMESPACE_MACRO,
+            NameSpace::Keyword => NAMESPACE_KEYWORD,
         }
     }
 }

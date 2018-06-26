@@ -1,20 +1,21 @@
-error[E0265]: recursive constant
-  --> $DIR/issue-36163.rs:11:1
-   |
-11 | const A: i32 = Foo::B; //~ ERROR E0265
-   | ^^^^^^^^^^^^^^^^^^^^^^ recursion not allowed in constant
-
-error[E0265]: recursive constant
+error[E0391]: cycle detected when processing `Foo::B::{{constant}}`
   --> $DIR/issue-36163.rs:14:9
    |
-14 |     B = A, //~ ERROR E0265
-   |         ^ recursion not allowed in constant
-
-error[E0265]: recursive constant
-  --> $DIR/issue-36163.rs:18:9
+LL |     B = A, //~ ERROR E0391
+   |         ^
    |
-18 |     C = Bar::C, //~ ERROR E0265
-   |         ^^^^^^ recursion not allowed in constant
+note: ...which requires processing `A`...
+  --> $DIR/issue-36163.rs:11:18
+   |
+LL | const A: isize = Foo::B as isize;
+   |                  ^^^^^^^^^^^^^^^
+   = note: ...which again requires processing `Foo::B::{{constant}}`, completing the cycle
+note: cycle used when const-evaluating `Foo::B::{{constant}}`
+  --> $DIR/issue-36163.rs:14:9
+   |
+LL |     B = A, //~ ERROR E0391
+   |         ^
 
-error: aborting due to 3 previous errors
+error: aborting due to previous error
 
+For more information about this error, try `rustc --explain E0391`.

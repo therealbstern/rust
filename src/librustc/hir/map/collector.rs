@@ -9,14 +9,16 @@
 // except according to those terms.
 
 use super::*;
-
 use dep_graph::{DepGraph, DepKind, DepNodeIndex};
+use hir::def_id::{LOCAL_CRATE, CrateNum};
 use hir::intravisit::{Visitor, NestedVisitorMap};
 use hir::svh::Svh;
+use ich::Fingerprint;
 use middle::cstore::CrateStore;
 use session::CrateDisambiguator;
 use std::iter::repeat;
 use syntax::ast::{NodeId, CRATE_NODE_ID};
+use syntax::codemap::CodeMap;
 use syntax_pos::Span;
 
 use ich::StableHashingContext;
@@ -77,26 +79,23 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
                 body_ids: _,
             } = *krate;
 
-            root_mod_sig_dep_index = dep_graph.with_task(
+            root_mod_sig_dep_index = dep_graph.input_task(
                 root_mod_def_path_hash.to_dep_node(DepKind::Hir),
                 &hcx,
                 HirItemLike { item_like: (module, attrs, span), hash_bodies: false },
-                identity_fn
             ).1;
-            root_mod_full_dep_index = dep_graph.with_task(
+            root_mod_full_dep_index = dep_graph.input_task(
                 root_mod_def_path_hash.to_dep_node(DepKind::HirBody),
                 &hcx,
                 HirItemLike { item_like: (module, attrs, span), hash_bodies: true },
-                identity_fn
             ).1;
         }
 
         {
-            dep_graph.with_task(
+            dep_graph.input_task(
                 DepNode::new_no_params(DepKind::AllLocalTraitImpls),
                 &hcx,
                 &krate.trait_impls,
-                identity_fn
             );
         }
 
@@ -120,20 +119,24 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
         collector
     }
 
-    pub(super) fn finalize_and_compute_crate_hash(self,
+    pub(super) fn finalize_and_compute_crate_hash(mut self,
                                                   crate_disambiguator: CrateDisambiguator,
-                                                  cstore: &CrateStore,
+                                                  cstore: &dyn CrateStore,
+                                                  codemap: &CodeMap,
                                                   commandline_args_hash: u64)
                                                   -> (Vec<MapEntry<'hir>>, Svh) {
-        let mut node_hashes: Vec<_> = self
+        self
+            .hir_body_nodes
+            .sort_unstable_by(|&(ref d1, _), &(ref d2, _)| d1.cmp(d2));
+
+        let node_hashes = self
             .hir_body_nodes
             .iter()
-            .map(|&(def_path_hash, dep_node_index)| {
-                (def_path_hash, self.dep_graph.fingerprint_of(dep_node_index))
-            })
-            .collect();
-
-        node_hashes.sort_unstable_by(|&(ref d1, _), &(ref d2, _)| d1.cmp(d2));
+            .fold(Fingerprint::ZERO, |fingerprint , &(def_path_hash, dep_node_index)| {
+                fingerprint.combine(
+                    def_path_hash.0.combine(self.dep_graph.fingerprint_of(dep_node_index))
+                )
+            });
 
         let mut upstream_crates: Vec<_> = cstore.crates_untracked().iter().map(|&cnum| {
             let name = cstore.crate_name_untracked(cnum).as_str();
@@ -147,14 +150,27 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
             (name1, dis1).cmp(&(name2, dis2))
         });
 
+        // We hash the final, remapped names of all local source files so we
+        // don't have to include the path prefix remapping commandline args.
+        // If we included the full mapping in the SVH, we could only have
+        // reproducible builds by compiling from the same directory. So we just
+        // hash the result of the mapping instead of the mapping itself.
+        let mut source_file_names: Vec<_> = codemap
+            .files()
+            .iter()
+            .filter(|filemap| CrateNum::from_u32(filemap.crate_of_origin) == LOCAL_CRATE)
+            .map(|filemap| filemap.name_hash)
+            .collect();
+
+        source_file_names.sort_unstable();
+
         let (_, crate_dep_node_index) = self
             .dep_graph
-            .with_task(DepNode::new_no_params(DepKind::Krate),
+            .input_task(DepNode::new_no_params(DepKind::Krate),
                        &self.hcx,
-                       ((node_hashes, upstream_crates),
+                       (((node_hashes, upstream_crates), source_file_names),
                         (commandline_args_hash,
-                         crate_disambiguator.to_fingerprint())),
-                       identity_fn);
+                         crate_disambiguator.to_fingerprint())));
 
         let svh = Svh::new(self.dep_graph
                                .fingerprint_of(crate_dep_node_index)
@@ -186,6 +202,7 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
             NodeImplItem(n) => EntryImplItem(parent, dep_node_index, n),
             NodeVariant(n) => EntryVariant(parent, dep_node_index, n),
             NodeField(n) => EntryField(parent, dep_node_index, n),
+            NodeAnonConst(n) => EntryAnonConst(parent, dep_node_index, n),
             NodeExpr(n) => EntryExpr(parent, dep_node_index, n),
             NodeStmt(n) => EntryStmt(parent, dep_node_index, n),
             NodeTy(n) => EntryTy(parent, dep_node_index, n),
@@ -195,7 +212,7 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
             NodeBlock(n) => EntryBlock(parent, dep_node_index, n),
             NodeStructCtor(n) => EntryStructCtor(parent, dep_node_index, n),
             NodeLifetime(n) => EntryLifetime(parent, dep_node_index, n),
-            NodeTyParam(n) => EntryTyParam(parent, dep_node_index, n),
+            NodeGenericParam(n) => EntryGenericParam(parent, dep_node_index, n),
             NodeVisibility(n) => EntryVisibility(parent, dep_node_index, n),
             NodeLocal(n) => EntryLocal(parent, dep_node_index, n),
             NodeMacroDef(n) => EntryMacroDef(dep_node_index, n),
@@ -247,18 +264,16 @@ impl<'a, 'hir> NodeCollector<'a, 'hir> {
 
         let def_path_hash = self.definitions.def_path_hash(dep_node_owner);
 
-        self.current_signature_dep_index = self.dep_graph.with_task(
+        self.current_signature_dep_index = self.dep_graph.input_task(
             def_path_hash.to_dep_node(DepKind::Hir),
             &self.hcx,
             HirItemLike { item_like, hash_bodies: false },
-            identity_fn
         ).1;
 
-        self.current_full_dep_index = self.dep_graph.with_task(
+        self.current_full_dep_index = self.dep_graph.input_task(
             def_path_hash.to_dep_node(DepKind::HirBody),
             &self.hcx,
             HirItemLike { item_like, hash_bodies: true },
-            identity_fn
         ).1;
 
         self.hir_body_nodes.push((def_path_hash, self.current_full_dep_index));
@@ -331,12 +346,9 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
         });
     }
 
-    fn visit_generics(&mut self, generics: &'hir Generics) {
-        for ty_param in generics.ty_params() {
-            self.insert(ty_param.id, NodeTyParam(ty_param));
-        }
-
-        intravisit::walk_generics(self, generics);
+    fn visit_generic_param(&mut self, param: &'hir GenericParam) {
+        self.insert(param.id, NodeGenericParam(param));
+        intravisit::walk_generic_param(self, param);
     }
 
     fn visit_trait_item(&mut self, ti: &'hir TraitItem) {
@@ -373,6 +385,14 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
 
         self.with_parent(pat.id, |this| {
             intravisit::walk_pat(this, pat);
+        });
+    }
+
+    fn visit_anon_const(&mut self, constant: &'hir AnonConst) {
+        self.insert(constant.id, NodeAnonConst(constant));
+
+        self.with_parent(constant.id, |this| {
+            intravisit::walk_anon_const(this, constant);
         });
     }
 
@@ -436,7 +456,7 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
     fn visit_vis(&mut self, visibility: &'hir Visibility) {
         match *visibility {
             Visibility::Public |
-            Visibility::Crate |
+            Visibility::Crate(_) |
             Visibility::Inherited => {}
             Visibility::Restricted { id, .. } => {
                 self.insert(id, NodeVisibility(visibility));
@@ -500,12 +520,6 @@ impl<'a, 'hir> Visitor<'hir> for NodeCollector<'a, 'hir> {
     }
 }
 
-// We use this with DepGraph::with_task(). Since we are handling only input
-// values here, the "task" computing them just passes them through.
-fn identity_fn<T>(_: &StableHashingContext, item_like: T) -> T {
-    item_like
-}
-
 // This is a wrapper structure that allows determining if span values within
 // the wrapped item should be hashed or not.
 struct HirItemLike<T> {
@@ -513,7 +527,7 @@ struct HirItemLike<T> {
     hash_bodies: bool,
 }
 
-impl<'hir, T> HashStable<StableHashingContext<'hir>> for HirItemLike<T>
+impl<'a, 'hir, T> HashStable<StableHashingContext<'hir>> for HirItemLike<T>
     where T: HashStable<StableHashingContext<'hir>>
 {
     fn hash_stable<W: StableHasherResult>(&self,

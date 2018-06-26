@@ -29,17 +29,17 @@ mod abs_domain;
 // (which is likely to yield a subtle off-by-one error).
 pub(crate) mod indexes {
     use std::fmt;
-    use core::nonzero::NonZero;
+    use std::num::NonZeroUsize;
     use rustc_data_structures::indexed_vec::Idx;
 
     macro_rules! new_index {
         ($Index:ident, $debug_name:expr) => {
-            #[derive(Copy, Clone, PartialEq, Eq, Hash)]
-            pub struct $Index(NonZero<usize>);
+            #[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+            pub struct $Index(NonZeroUsize);
 
             impl Idx for $Index {
                 fn new(idx: usize) -> Self {
-                    $Index(NonZero::new(idx + 1).unwrap())
+                    $Index(NonZeroUsize::new(idx + 1).unwrap())
                 }
                 fn index(self) -> usize {
                     self.0.get() - 1
@@ -65,9 +65,6 @@ pub(crate) mod indexes {
 
     /// Index into Borrows.locations
     new_index!(BorrowIndex, "bw");
-
-    /// Index into Reservations/Activations bitvector
-    new_index!(ReserveOrActivateIndex, "ra");
 }
 
 pub use self::indexes::MovePathIndex;
@@ -86,7 +83,7 @@ impl MoveOutIndex {
 /// It follows a tree structure.
 ///
 /// Given `struct X { m: M, n: N }` and `x: X`, moves like `drop x.m;`
-/// move *out* of the l-value `x.m`.
+/// move *out* of the place `x.m`.
 ///
 /// The MovePaths representing `x.m` and `x.n` are siblings (that is,
 /// one of them will link to the other via the `next_sibling` field,
@@ -222,7 +219,7 @@ impl fmt::Debug for Init {
     }
 }
 
-/// Tables mapping from an l-value to its MovePathIndex.
+/// Tables mapping from a place to its MovePathIndex.
 #[derive(Debug)]
 pub struct MovePathLookup<'tcx> {
     locals: IndexVec<Local, MovePathIndex>,
@@ -247,7 +244,7 @@ pub enum LookupResult {
 impl<'tcx> MovePathLookup<'tcx> {
     // Unlike the builder `fn move_path_for` below, this lookup
     // alternative will *not* create a MovePath on the fly for an
-    // unknown l-value, but will rather return the nearest available
+    // unknown place, but will rather return the nearest available
     // parent.
     pub fn find(&self, place: &Place<'tcx>) -> LookupResult {
         match *place {
@@ -280,9 +277,23 @@ pub struct IllegalMoveOrigin<'tcx> {
 
 #[derive(Debug)]
 pub(crate) enum IllegalMoveOriginKind<'tcx> {
+    /// Illegal move due to attempt to move from `static` variable.
     Static,
-    BorrowedContent,
+
+    /// Illegal move due to attempt to move from behind a reference.
+    BorrowedContent {
+        /// The content's type: if erroneous code was trying to move
+        /// from `*x` where `x: &T`, then this will be `T`.
+        target_ty: ty::Ty<'tcx>,
+    },
+
+    /// Illegal move due to attempt to move from field of an ADT that
+    /// implements `Drop`. Rust maintains invariant that all `Drop`
+    /// ADT's remain fully-initialized so that user-defined destructor
+    /// can safely read from all of the ADT's fields.
     InteriorOfTypeWithDestructor { container_ty: ty::Ty<'tcx> },
+
+    /// Illegal move due to attempt to move out of a slice or array.
     InteriorOfSliceOrArray { ty: ty::Ty<'tcx>, is_index: bool, },
 }
 

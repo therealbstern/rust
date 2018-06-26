@@ -19,7 +19,6 @@
        html_root_url = "https://doc.rust-lang.org/nightly/",
        html_playground_url = "https://play.rust-lang.org/",
        test(attr(deny(warnings))))]
-#![deny(warnings)]
 
 pub use self::Piece::*;
 pub use self::Position::*;
@@ -73,7 +72,7 @@ pub struct FormatSpec<'a> {
 /// Enum describing where an argument for a format can be located.
 #[derive(Copy, Clone, PartialEq)]
 pub enum Position<'a> {
-    /// The arugment is implied to be located at an index
+    /// The argument is implied to be located at an index
     ArgumentImplicitlyIs(usize),
     /// The argument is located at a specific index given in the format
     ArgumentIs(usize),
@@ -108,6 +107,10 @@ pub enum Flag {
     /// For numbers, this means that the number will be padded with zeroes,
     /// and the sign (`+` or `-`) will precede them.
     FlagSignAwareZeroPad,
+    /// For Debug / `?`, format integers in lower-case hexadecimal.
+    FlagDebugLowerHex,
+    /// For Debug / `?`, format integers in upper-case hexadecimal.
+    FlagDebugUpperHex,
 }
 
 /// A count is used for the precision and width parameters of an integer, and
@@ -124,6 +127,14 @@ pub enum Count<'a> {
     CountImplied,
 }
 
+pub struct ParseError {
+    pub description: string::String,
+    pub note: Option<string::String>,
+    pub label: string::String,
+    pub start: usize,
+    pub end: usize,
+}
+
 /// The parser structure for interpreting the input format string. This is
 /// modeled as an iterator over `Piece` structures to form a stream of tokens
 /// being output.
@@ -134,7 +145,7 @@ pub struct Parser<'a> {
     input: &'a str,
     cur: iter::Peekable<str::CharIndices<'a>>,
     /// Error messages accumulated during parsing
-    pub errors: Vec<(string::String, Option<string::String>)>,
+    pub errors: Vec<ParseError>,
     /// Current position of implicit positional argument pointer
     curarg: usize,
 }
@@ -157,12 +168,17 @@ impl<'a> Iterator for Parser<'a> {
                 }
                 '}' => {
                     self.cur.next();
+                    let pos = pos + 1;
                     if self.consume('}') {
-                        Some(String(self.string(pos + 1)))
+                        Some(String(self.string(pos)))
                     } else {
-                        self.err_with_note("unmatched `}` found",
-                                           "if you intended to print `}`, \
-                                           you can escape it using `}}`");
+                        self.err_with_note(
+                            "unmatched `}` found",
+                            "unmatched `}`",
+                            "if you intended to print `}`, you can escape it using `}}`",
+                            pos,
+                            pos,
+                        );
                         None
                     }
                 }
@@ -188,15 +204,40 @@ impl<'a> Parser<'a> {
     /// Notifies of an error. The message doesn't actually need to be of type
     /// String, but I think it does when this eventually uses conditions so it
     /// might as well start using it now.
-    fn err(&mut self, msg: &str) {
-        self.errors.push((msg.to_owned(), None));
+    fn err<S1: Into<string::String>, S2: Into<string::String>>(
+        &mut self,
+        description: S1,
+        label: S2,
+        start: usize,
+        end: usize,
+    ) {
+        self.errors.push(ParseError {
+            description: description.into(),
+            note: None,
+            label: label.into(),
+            start,
+            end,
+        });
     }
 
     /// Notifies of an error. The message doesn't actually need to be of type
     /// String, but I think it does when this eventually uses conditions so it
     /// might as well start using it now.
-    fn err_with_note(&mut self, msg: &str, note: &str) {
-        self.errors.push((msg.to_owned(), Some(note.to_owned())));
+    fn err_with_note<S1: Into<string::String>, S2: Into<string::String>, S3: Into<string::String>>(
+        &mut self,
+        description: S1,
+        label: S2,
+        note: S3,
+        start: usize,
+        end: usize,
+    ) {
+        self.errors.push(ParseError {
+            description: description.into(),
+            note: Some(note.into()),
+            label: label.into(),
+            start,
+            end,
+        });
     }
 
     /// Optionally consumes the specified character. If the character is not at
@@ -219,19 +260,26 @@ impl<'a> Parser<'a> {
     /// found, an error is emitted.
     fn must_consume(&mut self, c: char) {
         self.ws();
-        if let Some(&(_, maybe)) = self.cur.peek() {
+        if let Some(&(pos, maybe)) = self.cur.peek() {
             if c == maybe {
                 self.cur.next();
             } else {
-                self.err(&format!("expected `{:?}`, found `{:?}`", c, maybe));
+                self.err(format!("expected `{:?}`, found `{:?}`", c, maybe),
+                         format!("expected `{}`", c),
+                         pos + 1,
+                         pos + 1);
             }
         } else {
-            let msg = &format!("expected `{:?}` but string was terminated", c);
+            let msg = format!("expected `{:?}` but string was terminated", c);
+            let pos = self.input.len() + 1; // point at closing `"`
             if c == '}' {
                 self.err_with_note(msg,
-                                   "if you intended to print `{`, you can escape it using `{{`");
+                                   format!("expected `{:?}`", c),
+                                   "if you intended to print `{`, you can escape it using `{{`",
+                                   pos,
+                                   pos);
             } else {
-                self.err(msg);
+                self.err(msg, format!("expected `{:?}`", c), pos, pos);
             }
         }
     }
@@ -297,6 +345,15 @@ impl<'a> Parser<'a> {
         } else {
             match self.cur.peek() {
                 Some(&(_, c)) if c.is_alphabetic() => Some(ArgumentNamed(self.word())),
+                Some(&(pos, c)) if c == '_' => {
+                    let invalid_name = self.string(pos);
+                    self.err_with_note(format!("invalid argument name `{}`", invalid_name),
+                                       "invalid argument name",
+                                       "argument names cannot start with an underscore",
+                                       pos + 1, // add 1 to account for leading `{`
+                                       pos + 1 + invalid_name.len());
+                    Some(ArgumentNamed(invalid_name))
+                },
 
                 // This is an `ArgumentNext`.
                 // Record the fact and do the resolution after parsing the
@@ -377,8 +434,22 @@ impl<'a> Parser<'a> {
                 spec.precision = self.count();
             }
         }
-        // Finally the actual format specifier
-        if self.consume('?') {
+        // Optional radix followed by the actual format specifier
+        if self.consume('x') {
+            if self.consume('?') {
+                spec.flags |= 1 << (FlagDebugLowerHex as u32);
+                spec.ty = "?";
+            } else {
+                spec.ty = "x";
+            }
+        } else if self.consume('X') {
+            if self.consume('?') {
+                spec.flags |= 1 << (FlagDebugUpperHex as u32);
+                spec.ty = "?";
+            } else {
+                spec.ty = "X";
+            }
+        } else if self.consume('?') {
             spec.ty = "?";
         } else {
             spec.ty = self.word();

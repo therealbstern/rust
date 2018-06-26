@@ -14,11 +14,12 @@
 /// "file-scoped", or "module-level" assembly. These synonyms
 /// all correspond to LLVM's module-level inline assembly instruction.
 ///
-/// For example, `global_asm!("some assembly here")` translates to
+/// For example, `global_asm!("some assembly here")` codegens to
 /// LLVM's `module asm "some assembly here"`. All of LLVM's caveats
 /// therefore apply.
 
 use syntax::ast;
+use syntax::codemap::respan;
 use syntax::ext::base;
 use syntax::ext::base::*;
 use syntax::feature_gate;
@@ -59,7 +60,7 @@ pub fn expand_global_asm<'cx>(cx: &'cx mut ExtCtxt,
             asm,
             ctxt: cx.backtrace(),
         })),
-        vis: ast::Visibility::Inherited,
+        vis: respan(sp.shrink_to_lo(), ast::VisibilityKind::Inherited),
         span: sp,
         tokens: None,
     })))

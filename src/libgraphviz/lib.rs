@@ -287,7 +287,6 @@
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        test(attr(allow(unused_variables), deny(warnings))))]
-#![deny(warnings)]
 
 #![feature(str_escape)]
 
@@ -708,6 +707,12 @@ impl<'a> IntoCow<'a, str> for String {
 impl<'a> IntoCow<'a, str> for &'a str {
     fn into_cow(self) -> Cow<'a, str> {
         Cow::Borrowed(self)
+    }
+}
+
+impl<'a> IntoCow<'a, str> for Cow<'a, str> {
+    fn into_cow(self) -> Cow<'a, str> {
+        self
     }
 }
 

@@ -139,6 +139,8 @@ fn check(cache: &mut Cache,
        file.ends_with("util/struct.ThinVec.html") ||
        file.ends_with("util/struct.RcSlice.html") ||
        file.ends_with("layout/struct.TyLayout.html") ||
+       file.ends_with("humantime/struct.Timestamp.html") ||
+       file.ends_with("log/index.html") ||
        file.ends_with("ty/struct.Slice.html") ||
        file.ends_with("ty/enum.Attributes.html") ||
        file.ends_with("ty/struct.SymbolName.html") {
@@ -192,7 +194,17 @@ fn check(cache: &mut Cache,
             for part in Path::new(base).join(url).components() {
                 match part {
                     Component::Prefix(_) |
-                    Component::RootDir => panic!(),
+                    Component::RootDir => {
+                        // Avoid absolute paths as they make the docs not
+                        // relocatable by making assumptions on where the docs
+                        // are hosted relative to the site root.
+                        *errors = true;
+                        println!("{}:{}: absolute path - {}",
+                                 pretty_file.display(),
+                                 i + 1,
+                                 Path::new(base).join(url).display());
+                        return;
+                    }
                     Component::CurDir => {}
                     Component::ParentDir => { path.pop(); }
                     Component::Normal(s) => { path.push(s); }
@@ -242,6 +254,11 @@ fn check(cache: &mut Cache,
                 // interpreted by javascript, so we're ignoring these
                 if fragment.splitn(2, '-')
                            .all(|f| f.chars().all(|c| c.is_numeric())) {
+                    return;
+                }
+
+                // These appear to be broken in mdbook right now?
+                if fragment.starts_with("-") {
                     return;
                 }
 

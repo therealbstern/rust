@@ -10,7 +10,7 @@
 
 use convert::TryFrom;
 use mem;
-use ops::{self, Add, Sub};
+use ops::{self, Add, Sub, Try};
 use usize;
 
 use super::{FusedIterator, TrustedLen};
@@ -91,7 +91,7 @@ macro_rules! step_impl_unsigned {
             #[inline]
             #[allow(unreachable_patterns)]
             fn add_usize(&self, n: usize) -> Option<Self> {
-                match <$t>::try_from(n) {
+                match <$t>::private_try_from(n) {
                     Ok(n_as_t) => self.checked_add(n_as_t),
                     Err(_) => None,
                 }
@@ -123,7 +123,7 @@ macro_rules! step_impl_signed {
             #[inline]
             #[allow(unreachable_patterns)]
             fn add_usize(&self, n: usize) -> Option<Self> {
-                match <$unsigned>::try_from(n) {
+                match <$unsigned>::private_try_from(n) {
                     Ok(n_as_unsigned) => {
                         // Wrapping in unsigned space handles cases like
                         // `-120_i8.add_usize(200) == Some(80_i8)`,
@@ -186,9 +186,7 @@ macro_rules! range_exact_iter_impl {
 
 macro_rules! range_incl_exact_iter_impl {
     ($($t:ty)*) => ($(
-        #[unstable(feature = "inclusive_range",
-                   reason = "recently added, follows RFC",
-                   issue = "28237")]
+        #[stable(feature = "inclusive_range", since = "1.26.0")]
         impl ExactSizeIterator for ops::RangeInclusive<$t> { }
     )*)
 }
@@ -202,9 +200,7 @@ macro_rules! range_trusted_len_impl {
 
 macro_rules! range_incl_trusted_len_impl {
     ($($t:ty)*) => ($(
-        #[unstable(feature = "inclusive_range",
-                   reason = "recently added, follows RFC",
-                   issue = "28237")]
+        #[unstable(feature = "trusted_len", issue = "37572")]
         unsafe impl TrustedLen for ops::RangeInclusive<$t> { }
     )*)
 }
@@ -295,7 +291,7 @@ impl<A: Step> DoubleEndedIterator for ops::Range<A> {
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<A: Step> FusedIterator for ops::Range<A> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -322,28 +318,29 @@ impl<A: Step> Iterator for ops::RangeFrom<A> {
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "fused", since = "1.26.0")]
 impl<A: Step> FusedIterator for ops::RangeFrom<A> {}
 
-#[unstable(feature = "inclusive_range", reason = "recently added, follows RFC", issue = "28237")]
+#[unstable(feature = "trusted_len", issue = "37572")]
+unsafe impl<A: Step> TrustedLen for ops::RangeFrom<A> {}
+
+#[stable(feature = "inclusive_range", since = "1.26.0")]
 impl<A: Step> Iterator for ops::RangeInclusive<A> {
     type Item = A;
 
     #[inline]
     fn next(&mut self) -> Option<A> {
-        use cmp::Ordering::*;
-
-        match self.start.partial_cmp(&self.end) {
-            Some(Less) => {
+        if self.start <= self.end {
+            if self.start < self.end {
                 let n = self.start.add_one();
                 Some(mem::replace(&mut self.start, n))
-            },
-            Some(Equal) => {
+            } else {
                 let last = self.start.replace_one();
                 self.end.replace_zero();
                 Some(last)
-            },
-            _ => None,
+            }
+        } else {
+            None
         }
     }
 
@@ -397,28 +394,141 @@ impl<A: Step> Iterator for ops::RangeInclusive<A> {
     fn max(mut self) -> Option<A> {
         self.next_back()
     }
-}
 
-#[unstable(feature = "inclusive_range", reason = "recently added, follows RFC", issue = "28237")]
-impl<A: Step> DoubleEndedIterator for ops::RangeInclusive<A> {
     #[inline]
-    fn next_back(&mut self) -> Option<A> {
-        use cmp::Ordering::*;
-
-        match self.start.partial_cmp(&self.end) {
-            Some(Less) => {
-                let n = self.end.sub_one();
-                Some(mem::replace(&mut self.end, n))
-            },
-            Some(Equal) => {
-                let last = self.end.replace_zero();
-                self.start.replace_one();
-                Some(last)
-            },
-            _ => None,
+    fn try_fold<B, F, R>(&mut self, init: B, mut f: F) -> R where
+        Self: Sized, F: FnMut(B, Self::Item) -> R, R: Try<Ok=B>
+    {
+        let mut accum = init;
+        if self.start <= self.end {
+            loop {
+                let (x, done) =
+                    if self.start < self.end {
+                        let n = self.start.add_one();
+                        (mem::replace(&mut self.start, n), false)
+                    } else {
+                        self.end.replace_zero();
+                        (self.start.replace_one(), true)
+                    };
+                accum = f(accum, x)?;
+                if done { break }
+            }
         }
+        Try::from_ok(accum)
     }
 }
 
-#[unstable(feature = "fused", issue = "35602")]
+#[stable(feature = "inclusive_range", since = "1.26.0")]
+impl<A: Step> DoubleEndedIterator for ops::RangeInclusive<A> {
+    #[inline]
+    fn next_back(&mut self) -> Option<A> {
+        if self.start <= self.end {
+            if self.start < self.end {
+                let n = self.end.sub_one();
+                Some(mem::replace(&mut self.end, n))
+            } else {
+                let last = self.end.replace_zero();
+                self.start.replace_one();
+                Some(last)
+            }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn try_rfold<B, F, R>(&mut self, init: B, mut f: F) -> R where
+        Self: Sized, F: FnMut(B, Self::Item) -> R, R: Try<Ok=B>
+    {
+        let mut accum = init;
+        if self.start <= self.end {
+            loop {
+                let (x, done) =
+                    if self.start < self.end {
+                        let n = self.end.sub_one();
+                        (mem::replace(&mut self.end, n), false)
+                    } else {
+                        self.start.replace_one();
+                        (self.end.replace_zero(), true)
+                    };
+                accum = f(accum, x)?;
+                if done { break }
+            }
+        }
+        Try::from_ok(accum)
+    }
+}
+
+#[stable(feature = "fused", since = "1.26.0")]
 impl<A: Step> FusedIterator for ops::RangeInclusive<A> {}
+
+/// Compensate removal of some impls per
+/// https://github.com/rust-lang/rust/pull/49305#issuecomment-376293243
+trait PrivateTryFromUsize: Sized {
+    fn private_try_from(n: usize) -> Result<Self, ()>;
+}
+
+impl<T> PrivateTryFromUsize for T where T: TryFrom<usize> {
+    #[inline]
+    fn private_try_from(n: usize) -> Result<Self, ()> {
+        T::try_from(n).map_err(|_| ())
+    }
+}
+
+// no possible bounds violation
+macro_rules! try_from_unbounded {
+    ($($target:ty),*) => {$(
+        impl PrivateTryFromUsize for $target {
+            #[inline]
+            fn private_try_from(value: usize) -> Result<Self, ()> {
+                Ok(value as $target)
+            }
+        }
+    )*}
+}
+
+// unsigned to signed (only positive bound)
+#[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
+macro_rules! try_from_upper_bounded {
+    ($($target:ty),*) => {$(
+        impl PrivateTryFromUsize for $target {
+            #[inline]
+            fn private_try_from(u: usize) -> Result<$target, ()> {
+                if u > (<$target>::max_value() as usize) {
+                    Err(())
+                } else {
+                    Ok(u as $target)
+                }
+            }
+        }
+    )*}
+}
+
+
+#[cfg(target_pointer_width = "16")]
+mod ptr_try_from_impls {
+    use super::PrivateTryFromUsize;
+
+    try_from_unbounded!(u16, u32, u64, u128);
+    try_from_unbounded!(i32, i64, i128);
+}
+
+#[cfg(target_pointer_width = "32")]
+mod ptr_try_from_impls {
+    use super::PrivateTryFromUsize;
+
+    try_from_upper_bounded!(u16);
+    try_from_unbounded!(u32, u64, u128);
+    try_from_upper_bounded!(i32);
+    try_from_unbounded!(i64, i128);
+}
+
+#[cfg(target_pointer_width = "64")]
+mod ptr_try_from_impls {
+    use super::PrivateTryFromUsize;
+
+    try_from_upper_bounded!(u16, u32);
+    try_from_unbounded!(u64, u128);
+    try_from_upper_bounded!(i32, i64);
+    try_from_unbounded!(i128);
+}

@@ -2,10 +2,10 @@ use rustc::mir::BasicBlock;
 use rustc::ty::{self, Ty};
 use syntax::codemap::Span;
 
-use rustc::mir::interpret::{EvalResult, PrimVal, Value};
+use rustc::mir::interpret::{EvalResult, Scalar, Value};
 use interpret::{Machine, ValTy, EvalContext, Place, PlaceExtra};
 
-impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
+impl<'a, 'mir, 'tcx, M: Machine<'mir, 'tcx>> EvalContext<'a, 'mir, 'tcx, M> {
     pub(crate) fn drop_place(
         &mut self,
         place: Place,
@@ -28,7 +28,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
                 ptr,
                 align: _,
                 extra: PlaceExtra::Length(len),
-            } => ptr.to_value_with_len(len),
+            } => ptr.to_value_with_len(len, self.tcx.tcx),
             Place::Ptr {
                 ptr,
                 align: _,
@@ -52,7 +52,7 @@ impl<'a, 'tcx, M: Machine<'tcx>> EvalContext<'a, 'tcx, M> {
         let instance = match ty.sty {
             ty::TyDynamic(..) => {
                 let vtable = match arg {
-                    Value::ByValPair(_, PrimVal::Ptr(vtable)) => vtable,
+                    Value::ScalarPair(_, Scalar::Ptr(vtable)) => vtable,
                     _ => bug!("expected fat ptr, got {:?}", arg),
                 };
                 match self.read_drop_type_from_vtable(vtable)? {

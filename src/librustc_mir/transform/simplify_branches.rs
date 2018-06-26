@@ -10,8 +10,7 @@
 
 //! A pass that simplifies branches when their condition is known.
 
-use rustc::ty::{self, TyCtxt};
-use rustc::middle::const_val::ConstVal;
+use rustc::ty::{TyCtxt, ParamEnv};
 use rustc::mir::*;
 use transform::{MirPass, MirSource};
 
@@ -31,7 +30,7 @@ impl MirPass for SimplifyBranches {
     }
 
     fn run_pass<'a, 'tcx>(&self,
-                          _tcx: TyCtxt<'a, 'tcx, 'tcx>,
+                          tcx: TyCtxt<'a, 'tcx, 'tcx>,
                           _src: MirSource,
                           mir: &mut Mir<'tcx>) {
         for block in mir.basic_blocks_mut() {
@@ -39,11 +38,12 @@ impl MirPass for SimplifyBranches {
             terminator.kind = match terminator.kind {
                 TerminatorKind::SwitchInt { discr: Operand::Constant(box Constant {
                     literal: Literal::Value { ref value }, ..
-                }), ref values, ref targets, .. } => {
-                    if let Some(ref constint) = value.val.to_const_int() {
+                }), switch_ty, ref values, ref targets, .. } => {
+                    let switch_ty = ParamEnv::empty().and(switch_ty);
+                    if let Some(constint) = value.assert_bits(tcx, switch_ty) {
                         let (otherwise, targets) = targets.split_last().unwrap();
                         let mut ret = TerminatorKind::Goto { target: *otherwise };
-                        for (v, t) in values.iter().zip(targets.iter()) {
+                        for (&v, t) in values.iter().zip(targets.iter()) {
                             if v == constint {
                                 ret = TerminatorKind::Goto { target: *t };
                                 break;
@@ -56,12 +56,15 @@ impl MirPass for SimplifyBranches {
                 },
                 TerminatorKind::Assert { target, cond: Operand::Constant(box Constant {
                     literal: Literal::Value {
-                        value: &ty::Const { val: ConstVal::Bool(cond), .. }
+                        value
                     }, ..
-                }), expected, .. } if cond == expected => {
+                }), expected, .. } if (value.assert_bool(tcx) == Some(true)) == expected => {
                     TerminatorKind::Goto { target: target }
                 },
                 TerminatorKind::FalseEdges { real_target, .. } => {
+                    TerminatorKind::Goto { target: real_target }
+                },
+                TerminatorKind::FalseUnwind { real_target, .. } => {
                     TerminatorKind::Goto { target: real_target }
                 },
                 _ => continue

@@ -179,7 +179,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
     fn expr(&mut self, expr: &hir::Expr, pred: CFGIndex) -> CFGIndex {
         match expr.node {
-            hir::ExprBlock(ref blk) => {
+            hir::ExprBlock(ref blk, _) => {
                 let blk_exit = self.block(&blk, pred);
                 self.add_ast_node(expr.hir_id.local_id, &[blk_exit])
             }
@@ -335,7 +335,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_unreachable_node()
             }
 
-            hir::ExprAgain(destination) => {
+            hir::ExprContinue(destination) => {
                 let (target_scope, cont_dest) =
                     self.find_scope_edge(expr, destination, ScopeCfKind::Continue);
                 let a = self.add_ast_node(expr.hir_id.local_id, &[pred]);
@@ -389,7 +389,6 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             hir::ExprType(ref e, _) |
             hir::ExprUnary(_, ref e) |
             hir::ExprField(ref e, _) |
-            hir::ExprTupField(ref e, _) |
             hir::ExprYield(ref e) |
             hir::ExprRepeat(ref e, _) => {
                 self.straightline(expr, pred, Some(&**e).into_iter())
@@ -453,13 +452,13 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         // The CFG for match expression is quite complex, so no ASCII
         // art for it (yet).
         //
-        // The CFG generated below matches roughly what trans puts
-        // out. Each pattern and guard is visited in parallel, with
+        // The CFG generated below matches roughly what MIR contains.
+        // Each pattern and guard is visited in parallel, with
         // arms containing multiple patterns generating multiple nodes
         // for the same guard expression. The guard expressions chain
         // into each other from top to bottom, with a specific
         // exception to allow some additional valid programs
-        // (explained below). Trans differs slightly in that the
+        // (explained below). MIR differs slightly in that the
         // pattern matching may continue after a guard but the visible
         // behaviour should be the same.
         //
@@ -473,8 +472,6 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
         // Keep track of the previous guard expressions
         let mut prev_guards = Vec::new();
-        // Track if the previous pattern contained bindings or wildcards
-        let mut prev_has_bindings = false;
 
         for arm in arms {
             // Add an exit node for when we've visited all the
@@ -493,39 +490,15 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                     // Visit the guard expression
                     let guard_exit = self.expr(&guard, guard_start);
 
-                    let this_has_bindings = pat.contains_bindings_or_wild();
-
-                    // If both this pattern and the previous pattern
-                    // were free of bindings, they must consist only
-                    // of "constant" patterns. Note we cannot match an
-                    // all-constant pattern, fail the guard, and then
-                    // match *another* all-constant pattern. This is
-                    // because if the previous pattern matches, then
-                    // we *cannot* match this one, unless all the
-                    // constants are the same (which is rejected by
-                    // `check_match`).
-                    //
-                    // We can use this to be smarter about the flow
-                    // along guards. If the previous pattern matched,
-                    // then we know we will not visit the guard in
-                    // this one (whether or not the guard succeeded),
-                    // if the previous pattern failed, then we know
-                    // the guard for that pattern will not have been
-                    // visited. Thus, it is not possible to visit both
-                    // the previous guard and the current one when
-                    // both patterns consist only of constant
-                    // sub-patterns.
-                    //
-                    // However, if the above does not hold, then all
-                    // previous guards need to be wired to visit the
-                    // current guard pattern.
-                    if prev_has_bindings || this_has_bindings {
-                        while let Some(prev) = prev_guards.pop() {
-                            self.add_contained_edge(prev, guard_start);
-                        }
+                    // #47295: We used to have very special case code
+                    // here for when a pair of arms are both formed
+                    // solely from constants, and if so, not add these
+                    // edges.  But this was not actually sound without
+                    // other constraints that we stopped enforcing at
+                    // some point.
+                    while let Some(prev) = prev_guards.pop() {
+                        self.add_contained_edge(prev, guard_start);
                     }
-
-                    prev_has_bindings = this_has_bindings;
 
                     // Push the guard onto the list of previous guards
                     prev_guards.push(guard_exit);
@@ -609,19 +582,16 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                   scope_cf_kind: ScopeCfKind) -> (region::Scope, CFGIndex) {
 
         match destination.target_id {
-            hir::ScopeTarget::Block(block_expr_id) => {
+            Ok(loop_id) => {
                 for b in &self.breakable_block_scopes {
-                    if b.block_expr_id == self.tcx.hir.node_to_hir_id(block_expr_id).local_id {
-                        let scope_id = self.tcx.hir.node_to_hir_id(block_expr_id).local_id;
+                    if b.block_expr_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
+                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
                         return (region::Scope::Node(scope_id), match scope_cf_kind {
                             ScopeCfKind::Break => b.break_index,
                             ScopeCfKind::Continue => bug!("can't continue to block"),
                         });
                     }
                 }
-                span_bug!(expr.span, "no block expr for id {}", block_expr_id);
-            }
-            hir::ScopeTarget::Loop(hir::LoopIdResult::Ok(loop_id)) => {
                 for l in &self.loop_scopes {
                     if l.loop_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
                         let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
@@ -631,10 +601,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                         });
                     }
                 }
-                span_bug!(expr.span, "no loop scope for id {}", loop_id);
+                span_bug!(expr.span, "no scope for id {}", loop_id);
             }
-            hir::ScopeTarget::Loop(hir::LoopIdResult::Err(err)) =>
-                span_bug!(expr.span, "loop scope error: {}",  err),
+            Err(err) => span_bug!(expr.span, "scope error: {}",  err),
         }
     }
 }

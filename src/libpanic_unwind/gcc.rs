@@ -143,7 +143,7 @@ const UNWIND_DATA_REG: (i32, i32) = (24, 25); // I0, I1
 // The personality routine for most of our targets, except ARM, which has a slightly different ABI
 // (however, iOS goes here as it uses SjLj unwinding).  Also, the 64-bit Windows implementation
 // lives in seh64_gnu.rs
-#[cfg(all(any(target_os = "ios", not(target_arch = "arm"))))]
+#[cfg(all(any(target_os = "ios", target_os = "netbsd", not(target_arch = "arm"))))]
 #[lang = "eh_personality"]
 #[no_mangle]
 #[allow(unused)]
@@ -184,7 +184,7 @@ unsafe extern "C" fn rust_eh_personality(version: c_int,
 
 // ARM EHABI personality routine.
 // http://infocenter.arm.com/help/topic/com.arm.doc.ihi0038b/IHI0038B_ehabi.pdf
-#[cfg(all(target_arch = "arm", not(target_os = "ios")))]
+#[cfg(all(target_arch = "arm", not(target_os = "ios"), not(target_os = "netbsd")))]
 #[lang = "eh_personality"]
 #[no_mangle]
 unsafe extern "C" fn rust_eh_personality(state: uw::_Unwind_State,
@@ -286,7 +286,7 @@ unsafe fn find_eh_action(context: *mut uw::_Unwind_Context)
 // See docs in the `unwind` module.
 #[cfg(all(target_os="windows", target_arch = "x86", target_env="gnu"))]
 #[lang = "eh_unwind_resume"]
-#[unwind]
+#[unwind(allowed)]
 unsafe extern "C" fn rust_eh_unwind_resume(panic_ctx: *mut u8) -> ! {
     uw::_Unwind_Resume(panic_ctx as *mut uw::_Unwind_Exception);
 }

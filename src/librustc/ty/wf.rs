@@ -9,7 +9,7 @@
 // except according to those terms.
 
 use hir::def_id::DefId;
-use middle::const_val::{ConstVal, ConstAggregate};
+use middle::const_val::ConstVal;
 use infer::InferCtxt;
 use ty::subst::Substs;
 use traits;
@@ -76,10 +76,6 @@ pub fn predicate_obligations<'a, 'gcx, 'tcx>(infcx: &InferCtxt<'a, 'gcx, 'tcx>,
     match *predicate {
         ty::Predicate::Trait(ref t) => {
             wf.compute_trait_ref(&t.skip_binder().trait_ref, Elaborate::None); // (*)
-        }
-        ty::Predicate::Equate(ref t) => {
-            wf.compute(t.skip_binder().0);
-            wf.compute(t.skip_binder().1);
         }
         ty::Predicate::RegionOutlives(..) => {
         }
@@ -221,28 +217,7 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
     fn compute_const(&mut self, constant: &'tcx ty::Const<'tcx>) {
         self.require_sized(constant.ty, traits::ConstSized);
         match constant.val {
-            ConstVal::Integral(_) |
-            ConstVal::Float(_) |
-            ConstVal::Str(_) |
-            ConstVal::ByteStr(_) |
-            ConstVal::Bool(_) |
-            ConstVal::Char(_) |
-            ConstVal::Variant(_) |
-            ConstVal::Function(..) => {}
-            ConstVal::Aggregate(ConstAggregate::Struct(fields)) => {
-                for &(_, v) in fields {
-                    self.compute_const(v);
-                }
-            }
-            ConstVal::Aggregate(ConstAggregate::Tuple(fields)) |
-            ConstVal::Aggregate(ConstAggregate::Array(fields)) => {
-                for v in fields {
-                    self.compute_const(v);
-                }
-            }
-            ConstVal::Aggregate(ConstAggregate::Repeat(v, _)) => {
-                self.compute_const(v);
-            }
+            ConstVal::Value(_) => {}
             ConstVal::Unevaluated(def_id, substs) => {
                 let obligations = self.nominal_obligations(def_id, substs);
                 self.out.extend(obligations);
@@ -283,6 +258,7 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
                 ty::TyFloat(..) |
                 ty::TyError |
                 ty::TyStr |
+                ty::TyGeneratorWitness(..) |
                 ty::TyNever |
                 ty::TyParam(_) |
                 ty::TyForeign(..) => {
@@ -299,7 +275,7 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
                     self.compute_const(len);
                 }
 
-                ty::TyTuple(ref tys, _) => {
+                ty::TyTuple(ref tys) => {
                     if let Some((_last, rest)) = tys.split_last() {
                         for elem in rest {
                             self.require_sized(elem, traits::TupleElem);
@@ -322,17 +298,17 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
                     self.out.extend(obligations);
                 }
 
-                ty::TyRef(r, mt) => {
+                ty::TyRef(r, rty, _) => {
                     // WfReference
-                    if !r.has_escaping_regions() && !mt.ty.has_escaping_regions() {
+                    if !r.has_escaping_regions() && !rty.has_escaping_regions() {
                         let cause = self.cause(traits::ReferenceOutlivesReferent(ty));
                         self.out.push(
                             traits::Obligation::new(
                                 cause,
                                 param_env,
                                 ty::Predicate::TypeOutlives(
-                                    ty::Binder(
-                                        ty::OutlivesPredicate(mt.ty, r)))));
+                                    ty::Binder::dummy(
+                                        ty::OutlivesPredicate(rty, r)))));
                     }
                 }
 
@@ -516,7 +492,8 @@ impl<'a, 'gcx, 'tcx> WfPredicates<'a, 'gcx, 'tcx> {
 
             for implicit_bound in implicit_bounds {
                 let cause = self.cause(traits::ObjectTypeBound(ty, explicit_bound));
-                let outlives = ty::Binder(ty::OutlivesPredicate(explicit_bound, implicit_bound));
+                let outlives = ty::Binder::dummy(
+                    ty::OutlivesPredicate(explicit_bound, implicit_bound));
                 self.out.push(traits::Obligation::new(cause,
                                                       self.param_env,
                                                       outlives.to_predicate()));

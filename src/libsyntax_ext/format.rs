@@ -79,7 +79,7 @@ struct Context<'a, 'b: 'a> {
     /// final generated static argument array. We record the starting indices
     /// corresponding to each positional argument, and number of references
     /// consumed so far for each argument, to facilitate correct `Position`
-    /// mapping in `trans_piece`. In effect this can be seen as a "flattened"
+    /// mapping in `build_piece`. In effect this can be seen as a "flattened"
     /// version of `arg_unique_types`.
     ///
     /// Again with the example described above in docstring for `args`:
@@ -108,7 +108,7 @@ struct Context<'a, 'b: 'a> {
 
     /// Current position of the implicit positional arg pointer, as if it
     /// still existed in this phase of processing.
-    /// Used only for `all_pieces_simple` tracking in `trans_piece`.
+    /// Used only for `all_pieces_simple` tracking in `build_piece`.
     curarg: usize,
     /// Keep track of invalid references to positional arguments
     invalid_refs: Vec<usize>,
@@ -149,7 +149,7 @@ fn parse_args(ecx: &mut ExtCtxt,
         if named || (p.token.is_ident() && p.look_ahead(1, |t| *t == token::Eq)) {
             named = true;
             let ident = match p.token {
-                token::Ident(i) => {
+                token::Ident(i, _) => {
                     p.bump();
                     i
                 }
@@ -166,7 +166,7 @@ fn parse_args(ecx: &mut ExtCtxt,
                     return None;
                 }
             };
-            let name: &str = &ident.name.as_str();
+            let name: &str = &ident.as_str();
 
             panictry!(p.expect(&token::Eq));
             let e = panictry!(p.parse_expr());
@@ -373,7 +373,7 @@ impl<'a, 'b> Context<'a, 'b> {
         ecx.std_path(&["fmt", "rt", "v1", s])
     }
 
-    fn trans_count(&self, c: parse::Count) -> P<ast::Expr> {
+    fn build_count(&self, c: parse::Count) -> P<ast::Expr> {
         let sp = self.macsp;
         let count = |c, arg| {
             let mut path = Context::rtpath(self.ecx, "Count");
@@ -401,17 +401,17 @@ impl<'a, 'b> Context<'a, 'b> {
         }
     }
 
-    /// Translate the accumulated string literals to a literal expression
-    fn trans_literal_string(&mut self) -> P<ast::Expr> {
+    /// Build a literal expression from the accumulated string literals
+    fn build_literal_string(&mut self) -> P<ast::Expr> {
         let sp = self.fmtsp;
         let s = Symbol::intern(&self.literal);
         self.literal.clear();
         self.ecx.expr_str(sp, s)
     }
 
-    /// Translate a `parse::Piece` to a static `rt::Argument` or append
+    /// Build a static `rt::Argument` from a `parse::Piece` or append
     /// to the `literal` string.
-    fn trans_piece(&mut self,
+    fn build_piece(&mut self,
                    piece: &parse::Piece,
                    arg_index_consumed: &mut Vec<usize>)
                    -> Option<P<ast::Expr>> {
@@ -422,7 +422,7 @@ impl<'a, 'b> Context<'a, 'b> {
                 None
             }
             parse::NextArgument(ref arg) => {
-                // Translate the position
+                // Build the position
                 let pos = {
                     let pos = |c, arg| {
                         let mut path = Context::rtpath(self.ecx, "Position");
@@ -486,7 +486,7 @@ impl<'a, 'b> Context<'a, 'b> {
                     self.all_pieces_simple = false;
                 }
 
-                // Translate the format
+                // Build the format
                 let fill = self.ecx.expr_lit(sp, ast::LitKind::Char(fill));
                 let align = |name| {
                     let mut p = Context::rtpath(self.ecx, "Alignment");
@@ -501,8 +501,8 @@ impl<'a, 'b> Context<'a, 'b> {
                 };
                 let align = self.ecx.expr_path(align);
                 let flags = self.ecx.expr_u32(sp, arg.format.flags);
-                let prec = self.trans_count(arg.format.precision);
-                let width = self.trans_count(arg.format.width);
+                let prec = self.build_count(arg.format.precision);
+                let width = self.build_count(arg.format.width);
                 let path = self.ecx.path_global(sp, Context::rtpath(self.ecx, "FormatSpec"));
                 let fmt =
                     self.ecx.expr_struct(sp,
@@ -543,6 +543,10 @@ impl<'a, 'b> Context<'a, 'b> {
         let mut pats = Vec::new();
         let mut heads = Vec::new();
 
+        let names_pos: Vec<_> = (0..self.args.len()).map(|i| {
+            self.ecx.ident_of(&format!("arg{}", i)).gensym()
+        }).collect();
+
         // First, build up the static array which will become our precompiled
         // format "string"
         let pieces = self.ecx.expr_vec_slice(self.fmtsp, self.str_pieces);
@@ -560,7 +564,7 @@ impl<'a, 'b> Context<'a, 'b> {
         // of each variable because we don't want to move out of the arguments
         // passed to this function.
         for (i, e) in self.args.into_iter().enumerate() {
-            let name = self.ecx.ident_of(&format!("__arg{}", i));
+            let name = names_pos[i];
             let span =
                 DUMMY_SP.with_ctxt(e.span.ctxt().apply_mark(self.ecx.current_expansion.mark));
             pats.push(self.ecx.pat_ident(span, name));
@@ -570,14 +574,12 @@ impl<'a, 'b> Context<'a, 'b> {
             heads.push(self.ecx.expr_addr_of(e.span, e));
         }
         for pos in self.count_args {
-            let name = self.ecx.ident_of(&match pos {
-                Exact(i) => format!("__arg{}", i),
-                _ => panic!("should never happen"),
-            });
-            let span = match pos {
-                Exact(i) => spans_pos[i],
+            let index = match pos {
+                Exact(i) => i,
                 _ => panic!("should never happen"),
             };
+            let name = names_pos[index];
+            let span = spans_pos[index];
             counts.push(Context::format_arg(self.ecx, self.macsp, span, &Count, name));
         }
 
@@ -641,7 +643,7 @@ impl<'a, 'b> Context<'a, 'b> {
                   ty: &ArgumentType,
                   arg: ast::Ident)
                   -> P<ast::Expr> {
-        sp = sp.with_ctxt(sp.ctxt().apply_mark(ecx.current_expansion.mark));
+        sp = sp.apply_mark(ecx.current_expansion.mark);
         let arg = ecx.expr_ident(sp, arg);
         let trait_ = match *ty {
             Placeholder(ref tyname) => {
@@ -678,7 +680,7 @@ pub fn expand_format_args<'cx>(ecx: &'cx mut ExtCtxt,
                                mut sp: Span,
                                tts: &[tokenstream::TokenTree])
                                -> Box<base::MacResult + 'cx> {
-    sp = sp.with_ctxt(sp.ctxt().apply_mark(ecx.current_expansion.mark));
+    sp = sp.apply_mark(ecx.current_expansion.mark);
     match parse_args(ecx, sp, tts) {
         Some((efmt, args, names)) => {
             MacEager::expr(expand_preparsed_format_args(ecx, sp, efmt, args, names))
@@ -700,7 +702,7 @@ pub fn expand_preparsed_format_args(ecx: &mut ExtCtxt,
     let arg_types: Vec<_> = (0..args.len()).map(|_| Vec::new()).collect();
     let arg_unique_types: Vec<_> = (0..args.len()).map(|_| Vec::new()).collect();
     let mut macsp = ecx.call_site();
-    macsp = macsp.with_ctxt(macsp.ctxt().apply_mark(ecx.current_expansion.mark));
+    macsp = macsp.apply_mark(ecx.current_expansion.mark);
     let msg = "format argument must be a string literal.";
     let fmt = match expr_to_spanned_string(ecx, efmt, msg) {
         Some(fmt) => fmt,
@@ -732,18 +734,13 @@ pub fn expand_preparsed_format_args(ecx: &mut ExtCtxt,
     let mut parser = parse::Parser::new(fmt_str);
     let mut pieces = vec![];
 
-    loop {
-        match parser.next() {
-            Some(mut piece) => {
-                if !parser.errors.is_empty() {
-                    break;
-                }
-                cx.verify_piece(&piece);
-                cx.resolve_name_inplace(&mut piece);
-                pieces.push(piece);
-            }
-            None => break,
+    while let Some(mut piece) = parser.next() {
+        if !parser.errors.is_empty() {
+            break;
         }
+        cx.verify_piece(&piece);
+        cx.resolve_name_inplace(&mut piece);
+        pieces.push(piece);
     }
 
     let numbered_position_args = pieces.iter().any(|arg: &parse::Piece| {
@@ -762,24 +759,27 @@ pub fn expand_preparsed_format_args(ecx: &mut ExtCtxt,
 
     let mut arg_index_consumed = vec![0usize; cx.arg_index_map.len()];
     for piece in pieces {
-        if let Some(piece) = cx.trans_piece(&piece, &mut arg_index_consumed) {
-            let s = cx.trans_literal_string();
+        if let Some(piece) = cx.build_piece(&piece, &mut arg_index_consumed) {
+            let s = cx.build_literal_string();
             cx.str_pieces.push(s);
             cx.pieces.push(piece);
         }
     }
 
     if !parser.errors.is_empty() {
-        let (err, note) = parser.errors.remove(0);
-        let mut e = cx.ecx.struct_span_err(cx.fmtsp, &format!("invalid format string: {}", err));
-        if let Some(note) = note {
+        let err = parser.errors.remove(0);
+        let sp = cx.fmtsp.from_inner_byte_pos(err.start, err.end);
+        let mut e = cx.ecx.struct_span_err(sp, &format!("invalid format string: {}",
+                                                        err.description));
+        e.span_label(sp, err.label + " in format string");
+        if let Some(note) = err.note {
             e.note(&note);
         }
         e.emit();
         return DummyResult::raw_expr(sp);
     }
     if !cx.literal.is_empty() {
-        let s = cx.trans_literal_string();
+        let s = cx.build_literal_string();
         cx.str_pieces.push(s);
     }
 
@@ -814,15 +814,11 @@ pub fn expand_preparsed_format_args(ecx: &mut ExtCtxt,
                 let (sp, msg) = errs.into_iter().next().unwrap();
                 cx.ecx.struct_span_err(sp, msg)
             } else {
-                let mut diag = cx.ecx.struct_span_err(cx.fmtsp,
-                    "multiple unused formatting arguments");
-
-                // Ignoring message, as it gets repetitive
-                // Then use MultiSpan to not clutter up errors
-                for (sp, _) in errs {
-                    diag.span_label(sp, "unused");
-                }
-
+                let mut diag = cx.ecx.struct_span_err(
+                    errs.iter().map(|&(sp, _)| sp).collect::<Vec<Span>>(),
+                    "multiple unused formatting arguments"
+                );
+                diag.span_label(cx.fmtsp, "multiple unused arguments in this statement");
                 diag
             }
         };

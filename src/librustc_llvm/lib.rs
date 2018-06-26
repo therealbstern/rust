@@ -16,7 +16,6 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 
 #![feature(box_syntax)]
 #![feature(concat_idents)]
@@ -105,7 +104,6 @@ impl FromStr for ArchiveKind {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "gnu" => Ok(ArchiveKind::K_GNU),
-            "mips64" => Ok(ArchiveKind::K_MIPS64),
             "bsd" => Ok(ArchiveKind::K_BSD),
             "coff" => Ok(ArchiveKind::K_COFF),
             _ => Err(()),
@@ -140,7 +138,7 @@ pub fn SetFunctionCallConv(fn_: ValueRef, cc: CallConv) {
     }
 }
 
-// Externally visible symbols that might appear in multiple translation units need to appear in
+// Externally visible symbols that might appear in multiple codegen units need to appear in
 // their own comdat section so that the duplicates can be discarded at link time. This can for
 // example happen for generics when using multiple codegen units. This function simply uses the
 // value's name as the comdat value to make sure that it is in a 1-to-1 relationship to the
@@ -221,6 +219,8 @@ fn mk_target_data(string_rep: &str) -> TargetData {
 pub struct ObjectFile {
     pub llof: ObjectFileRef,
 }
+
+unsafe impl Send for ObjectFile {}
 
 impl ObjectFile {
     // This will take ownership of llmb

@@ -10,8 +10,6 @@
 
 // Test inclusive range syntax.
 
-#![feature(inclusive_range_syntax, inclusive_range, iterator_step_by)]
-
 use std::ops::{RangeInclusive, RangeToInclusive};
 
 fn foo() -> isize { 42 }

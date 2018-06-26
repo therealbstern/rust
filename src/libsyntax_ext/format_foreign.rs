@@ -272,6 +272,11 @@ pub mod printf {
             self.s = tail;
             Some(sub)
         }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            // Substitutions are at least 2 characters long.
+            (0, Some(self.s.len() / 2))
+        }
     }
 
     enum State {
@@ -692,7 +697,7 @@ pub mod printf {
 
         /// Check that the translations are what we expect.
         #[test]
-        fn test_trans() {
+        fn test_translation() {
             assert_eq_pnsat!("%c", Some("{}"));
             assert_eq_pnsat!("%d", Some("{}"));
             assert_eq_pnsat!("%u", Some("{}"));
@@ -781,6 +786,10 @@ pub mod shell {
                 },
                 None => None,
             }
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            (0, Some(self.s.len()))
         }
     }
 
@@ -891,7 +900,7 @@ pub mod shell {
         }
 
         #[test]
-        fn test_trans() {
+        fn test_translation() {
             assert_eq_pnsat!("$0", Some("{0}"));
             assert_eq_pnsat!("$9", Some("{9}"));
             assert_eq_pnsat!("$1", Some("{1}"));
@@ -980,7 +989,7 @@ mod strcursor {
     }
 
     impl<'a> std::fmt::Debug for StrCursor<'a> {
-        fn fmt(&self, fmt: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
             write!(fmt, "StrCursor({:?} | {:?})", self.slice_before(), self.slice_after())
         }
     }

@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use syntax::abi::{Abi};
+use rustc_target::spec::abi::{Abi};
 use syntax::ast;
 use syntax_pos::Span;
 
@@ -22,7 +22,7 @@ use dataflow::{do_dataflow, DebugFormatted};
 use dataflow::MoveDataParamEnv;
 use dataflow::BitDenotation;
 use dataflow::DataflowResults;
-use dataflow::{DefinitelyInitializedLvals, MaybeInitializedLvals, MaybeUninitializedLvals};
+use dataflow::{DefinitelyInitializedPlaces, MaybeInitializedPlaces, MaybeUninitializedPlaces};
 use dataflow::move_paths::{MovePathIndex, LookupResult};
 use dataflow::move_paths::{HasMoveData, MoveData};
 use dataflow;
@@ -50,15 +50,15 @@ impl MirPass for SanityCheck {
         let dead_unwinds = IdxSetBuf::new_empty(mir.basic_blocks().len());
         let flow_inits =
             do_dataflow(tcx, mir, id, &attributes, &dead_unwinds,
-                        MaybeInitializedLvals::new(tcx, mir, &mdpe),
+                        MaybeInitializedPlaces::new(tcx, mir, &mdpe),
                         |bd, i| DebugFormatted::new(&bd.move_data().move_paths[i]));
         let flow_uninits =
             do_dataflow(tcx, mir, id, &attributes, &dead_unwinds,
-                        MaybeUninitializedLvals::new(tcx, mir, &mdpe),
+                        MaybeUninitializedPlaces::new(tcx, mir, &mdpe),
                         |bd, i| DebugFormatted::new(&bd.move_data().move_paths[i]));
         let flow_def_inits =
             do_dataflow(tcx, mir, id, &attributes, &dead_unwinds,
-                        DefinitelyInitializedLvals::new(tcx, mir, &mdpe),
+                        DefinitelyInitializedPlaces::new(tcx, mir, &mdpe),
                         |bd, i| DebugFormatted::new(&bd.move_data().move_paths[i]));
 
         if has_rustc_mir_with(&attributes, "rustc_peek_maybe_init").is_some() {
@@ -158,11 +158,13 @@ fn each_block<'a, 'tcx, O>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
             mir::StatementKind::Assign(ref place, ref rvalue) => {
                 (place, rvalue)
             }
+            mir::StatementKind::ReadForMatch(_) |
             mir::StatementKind::StorageLive(_) |
             mir::StatementKind::StorageDead(_) |
             mir::StatementKind::InlineAsm { .. } |
             mir::StatementKind::EndRegion(_) |
             mir::StatementKind::Validate(..) |
+            mir::StatementKind::UserAssertTy(..) |
             mir::StatementKind::Nop => continue,
             mir::StatementKind::SetDiscriminant{ .. } =>
                 span_bug!(stmt.source_info.span,

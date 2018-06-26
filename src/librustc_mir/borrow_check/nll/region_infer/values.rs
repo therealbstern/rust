@@ -8,16 +8,17 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use std::rc::Rc;
-use rustc_data_structures::bitvec::BitMatrix;
+use borrow_check::nll::region_infer::TrackCauses;
+use rustc::mir::{BasicBlock, Location, Mir};
+use rustc::ty::RegionVid;
+use rustc_data_structures::bitvec::SparseBitMatrix;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::indexed_vec::Idx;
 use rustc_data_structures::indexed_vec::IndexVec;
-use rustc::mir::{BasicBlock, Location, Mir};
-use rustc::ty::RegionVid;
-use syntax::codemap::Span;
+use std::fmt::Debug;
+use std::rc::Rc;
 
-use super::{Cause, CauseExt, TrackCauses};
+use super::Cause;
 
 /// Maps between the various kinds of elements of a region value to
 /// the internal indices that w use.
@@ -69,14 +70,7 @@ impl RegionValueElements {
 
     /// Iterates over the `RegionElementIndex` for all points in the CFG.
     pub(super) fn all_point_indices<'a>(&'a self) -> impl Iterator<Item = RegionElementIndex> + 'a {
-        (0..self.num_points).map(move |i| {
-            RegionElementIndex::new(i + self.num_universal_regions)
-        })
-    }
-
-    /// Iterates over the `RegionElementIndex` for all points in the CFG.
-    pub(super) fn all_universal_region_indices(&self) -> impl Iterator<Item = RegionElementIndex> {
-        (0..self.num_universal_regions).map(move |i| RegionElementIndex::new(i))
+        (0..self.num_points).map(move |i| RegionElementIndex::new(i + self.num_universal_regions))
     }
 
     /// Converts a particular `RegionElementIndex` to the `RegionElement` it represents.
@@ -132,7 +126,7 @@ impl RegionValueElements {
 }
 
 /// A newtype for the integers that represent one of the possible
-/// elements in a region. These are the rows in the `BitMatrix` that
+/// elements in a region. These are the rows in the `SparseBitMatrix` that
 /// is used to store the values of all regions. They have the following
 /// convention:
 ///
@@ -150,12 +144,11 @@ pub(super) enum RegionElement {
     /// A point in the control-flow graph.
     Location(Location),
 
-    /// An in-scope, universally quantified region (e.g., a liftime parameter).
+    /// An in-scope, universally quantified region (e.g., a lifetime parameter).
     UniversalRegion(RegionVid),
 }
 
-
-pub(super) trait ToElementIndex {
+pub(super) trait ToElementIndex: Debug + Copy {
     fn to_element_index(self, elements: &RegionValueElements) -> RegionElementIndex;
 }
 
@@ -184,29 +177,27 @@ impl ToElementIndex for RegionElementIndex {
 }
 
 /// Stores the values for a set of regions. These are stored in a
-/// compact `BitMatrix` representation, with one row per region
+/// compact `SparseBitMatrix` representation, with one row per region
 /// variable. The columns consist of either universal regions or
 /// points in the CFG.
-#[derive(Clone)]
 pub(super) struct RegionValues {
     elements: Rc<RegionValueElements>,
-    matrix: BitMatrix,
+    matrix: SparseBitMatrix<RegionVid, RegionElementIndex>,
 
     /// If cause tracking is enabled, maps from a pair (r, e)
     /// consisting of a region `r` that contains some element `e` to
     /// the reason that the element is contained. There should be an
-    /// entry for every bit set to 1 in `BitMatrix`.
+    /// entry for every bit set to 1 in `SparseBitMatrix`.
     causes: Option<CauseMap>,
 }
 
-type CauseMap = FxHashMap<(RegionVid, RegionElementIndex), Rc<Cause>>;
+type CauseMap = FxHashMap<(RegionVid, RegionElementIndex), Cause>;
 
 impl RegionValues {
-    pub(super) fn new(
-        elements: &Rc<RegionValueElements>,
-        num_region_variables: usize,
-        track_causes: TrackCauses,
-    ) -> Self {
+    /// Creates a new set of "region values" that tracks causal information.
+    /// Each of the regions in num_region_variables will be initialized with an
+    /// empty set of points and no causal information.
+    pub(super) fn new(elements: &Rc<RegionValueElements>, num_region_variables: usize) -> Self {
         assert!(
             elements.num_universal_regions <= num_region_variables,
             "universal regions are a subset of the region variables"
@@ -214,9 +205,26 @@ impl RegionValues {
 
         Self {
             elements: elements.clone(),
-            matrix: BitMatrix::new(num_region_variables, elements.num_elements()),
+            matrix: SparseBitMatrix::new(
+                RegionVid::new(num_region_variables),
+                RegionElementIndex::new(elements.num_elements()),
+            ),
+            causes: Some(CauseMap::default()),
+        }
+    }
+
+    /// Duplicates the region values. If track_causes is false, then the
+    /// resulting value will not track causal information (and any existing
+    /// causal information is dropped). Otherwise, the causal information is
+    /// preserved and maintained. Tracking the causal information makes region
+    /// propagation significantly slower, so we prefer not to do it until an
+    /// error is reported.
+    pub(super) fn duplicate(&self, track_causes: TrackCauses) -> Self {
+        Self {
+            elements: self.elements.clone(),
+            matrix: self.matrix.clone(),
             causes: if track_causes.0 {
-                Some(CauseMap::default())
+                self.causes.clone()
             } else {
                 None
             },
@@ -225,9 +233,20 @@ impl RegionValues {
 
     /// Adds the given element to the value for the given region. Returns true if
     /// the element is newly added (i.e., was not already present).
-    pub(super) fn add<E: ToElementIndex>(&mut self, r: RegionVid, elem: E, cause: &Cause) -> bool {
+    pub(super) fn add_element<E: ToElementIndex>(
+        &mut self,
+        r: RegionVid,
+        elem: E,
+        cause: &Cause,
+    ) -> bool {
         let i = self.elements.index(elem);
         self.add_internal(r, i, |_| cause.clone())
+    }
+
+    /// Add all elements in `r_from` to `r_to` (because e.g. `r_to:
+    /// r_from`).
+    pub(super) fn add_region(&mut self, r_to: RegionVid, r_from: RegionVid) -> bool {
+        self.matrix.merge(r_from, r_to)
     }
 
     /// Internal method to add an element to a region.
@@ -238,11 +257,11 @@ impl RegionValues {
     where
         F: FnOnce(&CauseMap) -> Cause,
     {
-        if self.matrix.add(r.index(), i.index()) {
+        if self.matrix.add(r, i) {
             debug!("add(r={:?}, i={:?})", r, self.elements.to_element(i));
 
             if let Some(causes) = &mut self.causes {
-                let cause = Rc::new(make_cause(causes));
+                let cause = make_cause(causes);
                 causes.insert((r, i), cause);
             }
 
@@ -251,8 +270,11 @@ impl RegionValues {
             if let Some(causes) = &mut self.causes {
                 let cause = make_cause(causes);
                 let old_cause = causes.get_mut(&(r, i)).unwrap();
-                if cause < **old_cause {
-                    *old_cause = Rc::new(cause);
+                // #49998: compare using root cause alone to avoid
+                // useless traffic from similar outlives chains.
+
+                if cause < *old_cause {
+                    *old_cause = cause;
                     return true;
                 }
             }
@@ -261,61 +283,20 @@ impl RegionValues {
         }
     }
 
-    /// Adds `elem` to `to_region` because of a relation:
-    ///
-    ///     to_region: from_region @ constraint_location
-    ///
-    /// that was added by the cod at `constraint_span`.
-    pub(super) fn add_due_to_outlives<T: ToElementIndex>(
-        &mut self,
-        from_region: RegionVid,
-        to_region: RegionVid,
-        elem: T,
-        constraint_location: Location,
-        constraint_span: Span,
-    ) -> bool {
-        let elem = self.elements.index(elem);
-        self.add_internal(to_region, elem, |causes| {
-            causes[&(from_region, elem)].outlives(constraint_location, constraint_span)
-        })
-    }
-
-    /// Adds all the universal regions outlived by `from_region` to
-    /// `to_region`.
-    pub(super) fn add_universal_regions_outlived_by(
-        &mut self,
-        from_region: RegionVid,
-        to_region: RegionVid,
-        constraint_location: Location,
-        constraint_span: Span,
-    ) -> bool {
-        // We could optimize this by improving `BitMatrix::merge` so
-        // it does not always merge an entire row. That would
-        // complicate causal tracking though.
-        debug!(
-            "add_universal_regions_outlived_by(from_region={:?}, to_region={:?})",
-            from_region,
-            to_region
-        );
-        let mut changed = false;
-        for elem in self.elements.all_universal_region_indices() {
-            if self.contains(from_region, elem) {
-                changed |= self.add_due_to_outlives(
-                    from_region,
-                    to_region,
-                    elem,
-                    constraint_location,
-                    constraint_span,
-                );
-            }
-        }
-        changed
-    }
-
     /// True if the region `r` contains the given element.
     pub(super) fn contains<E: ToElementIndex>(&self, r: RegionVid, elem: E) -> bool {
         let i = self.elements.index(elem);
-        self.matrix.contains(r.index(), i.index())
+        self.matrix.contains(r, i)
+    }
+
+    /// True if `sup_region` contains all the CFG points that
+    /// `sub_region` contains. Ignores universal regions.
+    pub(super) fn contains_points(&self, sup_region: RegionVid, sub_region: RegionVid) -> bool {
+        // This could be done faster by comparing the bitsets. But I
+        // am lazy.
+        self.element_indices_contained_in(sub_region)
+            .skip_while(|&i| self.elements.to_universal_region(i).is_some())
+            .all(|e| self.contains(sup_region, e))
     }
 
     /// Iterate over the value of the region `r`, yielding up element
@@ -325,9 +306,7 @@ impl RegionValues {
         &'a self,
         r: RegionVid,
     ) -> impl Iterator<Item = RegionElementIndex> + 'a {
-        self.matrix
-            .iter(r.index())
-            .map(move |i| RegionElementIndex::new(i))
+        self.matrix.iter(r).map(move |i| i)
     }
 
     /// Returns just the universal regions that are contained in a given region's value.
@@ -415,9 +394,7 @@ impl RegionValues {
             assert_eq!(location1.block, location2.block);
             str.push_str(&format!(
                 "{:?}[{}..={}]",
-                location1.block,
-                location1.statement_index,
-                location2.statement_index
+                location1.block, location1.statement_index, location2.statement_index
             ));
         }
     }
@@ -427,7 +404,7 @@ impl RegionValues {
     ///
     /// Returns None if cause tracking is disabled or `elem` is not
     /// actually found in `r`.
-    pub(super) fn cause<T: ToElementIndex>(&self, r: RegionVid, elem: T) -> Option<Rc<Cause>> {
+    pub(super) fn cause<T: ToElementIndex>(&self, r: RegionVid, elem: T) -> Option<Cause> {
         let index = self.elements.index(elem);
         if let Some(causes) = &self.causes {
             causes.get(&(r, index)).cloned()

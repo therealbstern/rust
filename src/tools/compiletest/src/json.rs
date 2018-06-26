@@ -9,15 +9,15 @@
 // except according to those terms.
 
 use errors::{Error, ErrorKind};
-use rustc_serialize::json;
-use std::str::FromStr;
-use std::path::Path;
 use runtest::ProcRes;
+use serde_json;
+use std::path::Path;
+use std::str::FromStr;
 
 // These structs are a subset of the ones found in
 // `syntax::json`.
 
-#[derive(RustcEncodable, RustcDecodable)]
+#[derive(Deserialize)]
 struct Diagnostic {
     message: String,
     code: Option<DiagnosticCode>,
@@ -27,7 +27,7 @@ struct Diagnostic {
     rendered: Option<String>,
 }
 
-#[derive(RustcEncodable, RustcDecodable, Clone)]
+#[derive(Deserialize, Clone)]
 struct DiagnosticSpan {
     file_name: String,
     line_start: usize,
@@ -40,7 +40,7 @@ struct DiagnosticSpan {
     expansion: Option<Box<DiagnosticSpanMacroExpansion>>,
 }
 
-#[derive(RustcEncodable, RustcDecodable, Clone)]
+#[derive(Deserialize, Clone)]
 struct DiagnosticSpanMacroExpansion {
     /// span where macro was applied to generate this code
     span: DiagnosticSpan,
@@ -49,7 +49,7 @@ struct DiagnosticSpanMacroExpansion {
     macro_decl_name: String,
 }
 
-#[derive(RustcEncodable, RustcDecodable, Clone)]
+#[derive(Deserialize, Clone)]
 struct DiagnosticCode {
     /// The code itself.
     code: String,
@@ -58,26 +58,30 @@ struct DiagnosticCode {
 }
 
 pub fn extract_rendered(output: &str, proc_res: &ProcRes) -> String {
-    output.lines()
-        .filter_map(|line| if line.starts_with('{') {
-            match json::decode::<Diagnostic>(line) {
-                Ok(diagnostic) => diagnostic.rendered,
-                Err(error) => {
-                    proc_res.fatal(Some(&format!("failed to decode compiler output as json: \
-                                                `{}`\noutput: {}\nline: {}",
-                                                error,
-                                                line,
-                                                output)));
+    output
+        .lines()
+        .filter_map(|line| {
+            if line.starts_with('{') {
+                match serde_json::from_str::<Diagnostic>(line) {
+                    Ok(diagnostic) => diagnostic.rendered,
+                    Err(error) => {
+                        proc_res.fatal(Some(&format!(
+                            "failed to decode compiler output as json: \
+                             `{}`\noutput: {}\nline: {}",
+                            error, line, output
+                        )));
+                    }
                 }
+            } else {
+                None
             }
-        } else {
-            None
         })
         .collect()
 }
 
 pub fn parse_output(file_name: &str, output: &str, proc_res: &ProcRes) -> Vec<Error> {
-    output.lines()
+    output
+        .lines()
         .flat_map(|line| parse_line(file_name, line, output, proc_res))
         .collect()
 }
@@ -86,18 +90,18 @@ fn parse_line(file_name: &str, line: &str, output: &str, proc_res: &ProcRes) -> 
     // The compiler sometimes intermingles non-JSON stuff into the
     // output.  This hack just skips over such lines. Yuck.
     if line.starts_with('{') {
-        match json::decode::<Diagnostic>(line) {
+        match serde_json::from_str::<Diagnostic>(line) {
             Ok(diagnostic) => {
                 let mut expected_errors = vec![];
                 push_expected_errors(&mut expected_errors, &diagnostic, &[], file_name);
                 expected_errors
             }
             Err(error) => {
-                proc_res.fatal(Some(&format!("failed to decode compiler output as json: \
-                                              `{}`\noutput: {}\nline: {}",
-                                             error,
-                                             line,
-                                             output)));
+                proc_res.fatal(Some(&format!(
+                    "failed to decode compiler output as json: \
+                     `{}`\noutput: {}\nline: {}",
+                    error, line, output
+                )));
             }
         }
     } else {
@@ -105,11 +109,14 @@ fn parse_line(file_name: &str, line: &str, output: &str, proc_res: &ProcRes) -> 
     }
 }
 
-fn push_expected_errors(expected_errors: &mut Vec<Error>,
-                        diagnostic: &Diagnostic,
-                        default_spans: &[&DiagnosticSpan],
-                        file_name: &str) {
-    let spans_in_this_file: Vec<_> = diagnostic.spans
+fn push_expected_errors(
+    expected_errors: &mut Vec<Error>,
+    diagnostic: &Diagnostic,
+    default_spans: &[&DiagnosticSpan],
+    file_name: &str,
+) {
+    let spans_in_this_file: Vec<_> = diagnostic
+        .spans
         .iter()
         .filter(|span| Path::new(&span.file_name) == Path::new(&file_name))
         .collect();
@@ -204,8 +211,10 @@ fn push_expected_errors(expected_errors: &mut Vec<Error>,
     }
 
     // Add notes for any labels that appear in the message.
-    for span in spans_in_this_file.iter()
-        .filter(|span| span.label.is_some()) {
+    for span in spans_in_this_file
+        .iter()
+        .filter(|span| span.label.is_some())
+    {
         expected_errors.push(Error {
             line_num: span.line_start,
             kind: Some(ErrorKind::Note),
@@ -219,9 +228,11 @@ fn push_expected_errors(expected_errors: &mut Vec<Error>,
     }
 }
 
-fn push_backtrace(expected_errors: &mut Vec<Error>,
-                  expansion: &DiagnosticSpanMacroExpansion,
-                  file_name: &str) {
+fn push_backtrace(
+    expected_errors: &mut Vec<Error>,
+    expansion: &DiagnosticSpanMacroExpansion,
+    file_name: &str,
+) {
     if Path::new(&expansion.span.file_name) == Path::new(&file_name) {
         expected_errors.push(Error {
             line_num: expansion.span.line_start,

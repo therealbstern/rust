@@ -23,8 +23,14 @@
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetSubtargetInfo.h"
 #include "llvm/Transforms/IPO/PassManagerBuilder.h"
+
+#if LLVM_VERSION_GE(6, 0)
+#include "llvm/CodeGen/TargetSubtargetInfo.h"
+#include "llvm/IR/IntrinsicInst.h"
+#else
+#include "llvm/Target/TargetSubtargetInfo.h"
+#endif
 
 #if LLVM_VERSION_GE(4, 0)
 #include "llvm/Transforms/IPO/AlwaysInliner.h"
@@ -37,6 +43,10 @@
 #endif
 
 #include "llvm-c/Transforms/PassManagerBuilder.h"
+
+#if LLVM_VERSION_GE(4, 0)
+#define PGO_AVAILABLE
+#endif
 
 using namespace llvm;
 using namespace llvm::legacy;
@@ -195,35 +205,26 @@ GEN_SUBTARGETS
 
 extern "C" bool LLVMRustHasFeature(LLVMTargetMachineRef TM,
                                    const char *Feature) {
-#if LLVM_RUSTLLVM
+#if LLVM_VERSION_GE(6, 0)
   TargetMachine *Target = unwrap(TM);
   const MCSubtargetInfo *MCInfo = Target->getMCSubtargetInfo();
-  const FeatureBitset &Bits = MCInfo->getFeatureBits();
-  const ArrayRef<SubtargetFeatureKV> FeatTable = MCInfo->getFeatureTable();
-
-  for (auto &FeatureEntry : FeatTable)
-    if (!strcmp(FeatureEntry.Key, Feature))
-      return (Bits & FeatureEntry.Value) == FeatureEntry.Value;
-#endif
+  return MCInfo->checkFeatures(std::string("+") + Feature);
+#else
   return false;
+#endif
 }
 
 enum class LLVMRustCodeModel {
   Other,
-  Default,
-  JITDefault,
   Small,
   Kernel,
   Medium,
   Large,
+  None,
 };
 
 static CodeModel::Model fromRust(LLVMRustCodeModel Model) {
   switch (Model) {
-  case LLVMRustCodeModel::Default:
-    return CodeModel::Default;
-  case LLVMRustCodeModel::JITDefault:
-    return CodeModel::JITDefault;
   case LLVMRustCodeModel::Small:
     return CodeModel::Small;
   case LLVMRustCodeModel::Kernel:
@@ -360,7 +361,6 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     bool TrapUnreachable,
     bool Singlethread) {
 
-  auto CM = fromRust(RustCM);
   auto OptLevel = fromRust(RustOptLevel);
   auto RM = fromRust(RustReloc);
 
@@ -388,7 +388,7 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   Options.FunctionSections = FunctionSections;
 
   if (TrapUnreachable) {
-    // Tell LLVM to translate `unreachable` into an explicit trap instruction.
+    // Tell LLVM to codegen `unreachable` into an explicit trap instruction.
     // This limits the extent of possible undefined behavior in some cases, as
     // it prevents control flow from "falling through" into whatever code
     // happens to be laid out next in memory.
@@ -399,6 +399,13 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     Options.ThreadModel = ThreadModel::Single;
   }
 
+#if LLVM_VERSION_GE(6, 0)
+  Optional<CodeModel::Model> CM;
+#else
+  CodeModel::Model CM = CodeModel::Model::Default;
+#endif
+  if (RustCM != LLVMRustCodeModel::None)
+    CM = fromRust(RustCM);
   TargetMachine *TM = TheTarget->createTargetMachine(
       Trip.getTriple(), RealCPU, Feature, Options, RM, CM, OptLevel);
   return wrap(TM);
@@ -421,12 +428,31 @@ extern "C" void LLVMRustAddAnalysisPasses(LLVMTargetMachineRef TM,
 
 extern "C" void LLVMRustConfigurePassManagerBuilder(
     LLVMPassManagerBuilderRef PMBR, LLVMRustCodeGenOptLevel OptLevel,
-    bool MergeFunctions, bool SLPVectorize, bool LoopVectorize) {
-  // Ignore mergefunc for now as enabling it causes crashes.
-  // unwrap(PMBR)->MergeFunctions = MergeFunctions;
+    bool MergeFunctions, bool SLPVectorize, bool LoopVectorize, bool PrepareForThinLTO,
+    const char* PGOGenPath, const char* PGOUsePath) {
+#if LLVM_RUSTLLVM
+  unwrap(PMBR)->MergeFunctions = MergeFunctions;
+#endif
   unwrap(PMBR)->SLPVectorize = SLPVectorize;
   unwrap(PMBR)->OptLevel = fromRust(OptLevel);
   unwrap(PMBR)->LoopVectorize = LoopVectorize;
+#if LLVM_VERSION_GE(4, 0)
+  unwrap(PMBR)->PrepareForThinLTO = PrepareForThinLTO;
+#endif
+
+#ifdef PGO_AVAILABLE
+  if (PGOGenPath) {
+    assert(!PGOUsePath);
+    unwrap(PMBR)->EnablePGOInstrGen = true;
+    unwrap(PMBR)->PGOInstrGen = PGOGenPath;
+  }
+  if (PGOUsePath) {
+    assert(!PGOGenPath);
+    unwrap(PMBR)->PGOInstrUse = PGOUsePath;
+  }
+#else
+  assert(!PGOGenPath && !PGOUsePath && "Should've caught earlier");
+#endif
 }
 
 // Unfortunately, the LLVM C API doesn't provide a way to set the `LibraryInfo`
@@ -746,10 +772,6 @@ LLVMRustSetDataLayoutFromTargetMachine(LLVMModuleRef Module,
   unwrap(Module)->setDataLayout(Target->createDataLayout());
 }
 
-extern "C" LLVMTargetDataRef LLVMRustGetModuleDataLayout(LLVMModuleRef M) {
-  return wrap(&unwrap(M)->getDataLayout());
-}
-
 extern "C" void LLVMRustSetModulePIELevel(LLVMModuleRef M) {
   unwrap(M)->setPIELevel(PIELevel::Level::Large);
 }
@@ -757,6 +779,15 @@ extern "C" void LLVMRustSetModulePIELevel(LLVMModuleRef M) {
 extern "C" bool
 LLVMRustThinLTOAvailable() {
 #if LLVM_VERSION_GE(4, 0)
+  return true;
+#else
+  return false;
+#endif
+}
+
+extern "C" bool
+LLVMRustPGOAvailable() {
+#ifdef PGO_AVAILABLE
   return true;
 #else
   return false;
@@ -833,6 +864,10 @@ struct LLVMRustThinLTOData {
   StringMap<FunctionImporter::ImportMapTy> ImportLists;
   StringMap<FunctionImporter::ExportSetTy> ExportLists;
   StringMap<GVSummaryMapTy> ModuleToDefinedGVSummaries;
+
+#if LLVM_VERSION_GE(7, 0)
+  LLVMRustThinLTOData() : Index(/* isPerformingAnalysis = */ false) {}
+#endif
 };
 
 // Just an argument to the `LLVMRustCreateThinLTOData` function below.
@@ -915,7 +950,14 @@ LLVMRustCreateThinLTOData(LLVMRustThinLTOModule *modules,
   //
   // This is copied from `lib/LTO/ThinLTOCodeGenerator.cpp`
 #if LLVM_VERSION_GE(5, 0)
+#if LLVM_VERSION_GE(7, 0)
+  auto deadIsPrevailing = [&](GlobalValue::GUID G) {
+    return PrevailingType::Unknown;
+  };
+  computeDeadSymbols(Ret->Index, Ret->GUIDPreservedSymbols, deadIsPrevailing);
+#else
   computeDeadSymbols(Ret->Index, Ret->GUIDPreservedSymbols);
+#endif
   ComputeCrossModuleImport(
     Ret->Index,
     Ret->ModuleToDefinedGVSummaries,

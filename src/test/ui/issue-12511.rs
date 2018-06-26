@@ -9,11 +9,10 @@
 // except according to those terms.
 
 trait t1 : t2 {
+//~^ ERROR cycle detected
 }
 
 trait t2 : t1 {
-//~^ ERROR unsupported cyclic reference between types/traits detected
-//~| cyclic reference
 }
 
 fn main() { }

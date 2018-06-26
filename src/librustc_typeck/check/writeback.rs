@@ -24,7 +24,7 @@ use rustc::util::nodemap::DefIdSet;
 use syntax::ast;
 use syntax_pos::Span;
 use std::mem;
-use std::rc::Rc;
+use rustc_data_structures::sync::Lrc;
 
 ///////////////////////////////////////////////////////////////////////////
 // Entry point
@@ -43,13 +43,14 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         wbcx.visit_closures();
         wbcx.visit_liberated_fn_sigs();
         wbcx.visit_fru_field_types();
-        wbcx.visit_anon_types();
+        wbcx.visit_anon_types(body.value.span);
         wbcx.visit_cast_types();
         wbcx.visit_free_region_map();
+        wbcx.visit_user_provided_tys();
 
         let used_trait_imports = mem::replace(
             &mut self.tables.borrow_mut().used_trait_imports,
-            Rc::new(DefIdSet()),
+            Lrc::new(DefIdSet()),
         );
         debug!(
             "used_trait_imports({:?}) = {:?}",
@@ -106,7 +107,7 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
 
     fn write_ty_to_tables(&mut self, hir_id: hir::HirId, ty: Ty<'gcx>) {
         debug!("write_ty_to_tables({:?}, {:?})", hir_id, ty);
-        assert!(!ty.needs_infer());
+        assert!(!ty.needs_infer() && !ty.has_skol());
         self.tables.node_types_mut().insert(hir_id, ty);
     }
 
@@ -171,7 +172,7 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
 
             match tables.expr_ty_adjusted(&base).sty {
                 // All valid indexing looks like this
-                ty::TyRef(_, ty::TypeAndMut { ty: ref base_ty, .. }) => {
+                ty::TyRef(_, base_ty, _) => {
                     let index_ty = tables.expr_ty_adjusted(&index);
                     let index_ty = self.fcx.resolve_type_vars_if_possible(&index_ty);
 
@@ -225,13 +226,24 @@ impl<'cx, 'gcx, 'tcx> Visitor<'gcx> for WritebackCx<'cx, 'gcx, 'tcx> {
 
         self.visit_node_id(e.span, e.hir_id);
 
-        if let hir::ExprClosure(_, _, body, _, _) = e.node {
-            let body = self.fcx.tcx.hir.body(body);
-            for arg in &body.arguments {
-                self.visit_node_id(e.span, arg.hir_id);
-            }
+        match e.node {
+            hir::ExprClosure(_, _, body, _, _) => {
+                let body = self.fcx.tcx.hir.body(body);
+                for arg in &body.arguments {
+                    self.visit_node_id(e.span, arg.hir_id);
+                }
 
-            self.visit_body(body);
+                self.visit_body(body);
+            }
+            hir::ExprStruct(_, ref fields, _) => {
+                for field in fields {
+                    self.visit_field_id(field.id);
+                }
+            }
+            hir::ExprField(..) => {
+                self.visit_field_id(e.id);
+            }
+            _ => {}
         }
 
         intravisit::walk_expr(self, e);
@@ -252,6 +264,11 @@ impl<'cx, 'gcx, 'tcx> Visitor<'gcx> for WritebackCx<'cx, 'gcx, 'tcx> {
                     .get(p.hir_id)
                     .expect("missing binding mode");
                 self.tables.pat_binding_modes_mut().insert(p.hir_id, bm);
+            }
+            hir::PatKind::Struct(_, ref fields, _) => {
+                for field in fields {
+                    self.visit_field_id(field.node.id);
+                }
             }
             _ => {}
         };
@@ -341,18 +358,62 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
         self.tables.free_region_map = free_region_map;
     }
 
-    fn visit_anon_types(&mut self) {
-        let gcx = self.tcx().global_tcx();
+    fn visit_user_provided_tys(&mut self) {
+        let fcx_tables = self.fcx.tables.borrow();
+        debug_assert_eq!(fcx_tables.local_id_root, self.tables.local_id_root);
+        let common_local_id_root = fcx_tables.local_id_root.unwrap();
+
+        for (&local_id, c_ty) in fcx_tables.user_provided_tys().iter() {
+            let hir_id = hir::HirId {
+                owner: common_local_id_root.index,
+                local_id,
+            };
+
+            let c_ty = if let Some(c_ty) = self.tcx().lift_to_global(c_ty) {
+                c_ty
+            } else {
+                span_bug!(
+                    hir_id.to_span(&self.fcx.tcx),
+                    "writeback: `{:?}` missing from the global type context",
+                    c_ty
+                );
+            };
+
+            self.tables
+                .user_provided_tys_mut()
+                .insert(hir_id, c_ty.clone());
+        }
+    }
+
+    fn visit_anon_types(&mut self, span: Span) {
         for (&def_id, anon_defn) in self.fcx.anon_types.borrow().iter() {
-            let node_id = gcx.hir.as_local_node_id(def_id).unwrap();
+            let node_id = self.tcx().hir.as_local_node_id(def_id).unwrap();
             let instantiated_ty = self.resolve(&anon_defn.concrete_ty, &node_id);
             let definition_ty = self.fcx.infer_anon_definition_from_instantiation(
                 def_id,
                 anon_defn,
                 instantiated_ty,
             );
-            let hir_id = self.tcx().hir.node_to_hir_id(node_id);
-            self.tables.node_types_mut().insert(hir_id, definition_ty);
+            let old = self.tables.concrete_existential_types.insert(def_id, definition_ty);
+            if let Some(old) = old {
+                if old != definition_ty {
+                    span_bug!(
+                        span,
+                        "visit_anon_types tried to write \
+                        different types for the same existential type: {:?}, {:?}, {:?}",
+                        def_id,
+                        definition_ty,
+                        old,
+                    );
+                }
+            }
+        }
+    }
+
+    fn visit_field_id(&mut self, node_id: ast::NodeId) {
+        let hir_id = self.tcx().hir.node_to_hir_id(node_id);
+        if let Some(index) = self.fcx.tables.borrow_mut().field_indices_mut().remove(hir_id) {
+            self.tables.field_indices_mut().insert(hir_id, index);
         }
     }
 
@@ -380,7 +441,7 @@ impl<'cx, 'gcx, 'tcx> WritebackCx<'cx, 'gcx, 'tcx> {
         if let Some(substs) = self.fcx.tables.borrow().node_substs_opt(hir_id) {
             let substs = self.resolve(&substs, &span);
             debug!("write_substs_to_tcx({:?}, {:?})", hir_id, substs);
-            assert!(!substs.needs_infer());
+            assert!(!substs.needs_infer() && !substs.has_skol());
             self.tables.node_substs_mut().insert(hir_id, substs);
         }
     }
@@ -509,7 +570,7 @@ impl Locatable for DefIndex {
 
 impl Locatable for hir::HirId {
     fn to_span(&self, tcx: &TyCtxt) -> Span {
-        let node_id = tcx.hir.definitions().find_node_for_hir_id(*self);
+        let node_id = tcx.hir.hir_to_node_id(*self);
         tcx.hir.span(node_id)
     }
 }
@@ -542,7 +603,7 @@ impl<'cx, 'gcx, 'tcx> Resolver<'cx, 'gcx, 'tcx> {
     fn report_error(&self, t: Ty<'tcx>) {
         if !self.tcx.sess.has_errors() {
             self.infcx
-                .need_type_info(Some(self.body.id()), self.span.to_span(&self.tcx), t);
+                .need_type_info_err(Some(self.body.id()), self.span.to_span(&self.tcx), t).emit();
         }
     }
 }

@@ -138,7 +138,7 @@ pub fn liveness_of_locals<'tcx>(mir: &Mir<'tcx>, mode: LivenessMode) -> Liveness
         for b in mir.basic_blocks().indices().rev() {
             // outs[b] = ∪ {ins of successors}
             bits.clear();
-            for &successor in mir.basic_blocks()[b].terminator().successors().into_iter() {
+            for &successor in mir.basic_blocks()[b].terminator().successors() {
                 bits.union(&ins[successor]);
             }
             outs[b].clone_from(&bits);
@@ -407,10 +407,7 @@ fn dump_matched_mir_node<'a, 'tcx>(
     result: &LivenessResult,
 ) {
     let mut file_path = PathBuf::new();
-    if let Some(ref file_dir) = tcx.sess.opts.debugging_opts.dump_mir_dir {
-        let p = Path::new(file_dir);
-        file_path.push(p);
-    };
+    file_path.push(Path::new(&tcx.sess.opts.debugging_opts.dump_mir_dir));
     let item_id = tcx.hir.as_local_node_id(source.def_id).unwrap();
     let file_name = format!("rustc.node{}{}-liveness.mir", item_id, pass_name);
     file_path.push(&file_name);
@@ -428,12 +425,12 @@ pub fn write_mir_fn<'a, 'tcx>(
     tcx: TyCtxt<'a, 'tcx, 'tcx>,
     src: MirSource,
     mir: &Mir<'tcx>,
-    w: &mut Write,
+    w: &mut dyn Write,
     result: &LivenessResult,
 ) -> io::Result<()> {
     write_mir_intro(tcx, src, mir, w)?;
     for block in mir.basic_blocks().indices() {
-        let print = |w: &mut Write, prefix, result: &IndexVec<BasicBlock, LocalSet>| {
+        let print = |w: &mut dyn Write, prefix, result: &IndexVec<BasicBlock, LocalSet>| {
             let live: Vec<String> = mir.local_decls
                 .indices()
                 .filter(|i| result[block].contains(i))

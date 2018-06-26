@@ -8,7 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use alloc::boxed::FnBox;
+use boxed::FnBox;
 use cmp;
 use ffi::CStr;
 use io;
@@ -111,12 +111,14 @@ impl Drop for Thread {
 
 #[cfg_attr(test, allow(dead_code))]
 pub mod guard {
-    pub unsafe fn current() -> Option<usize> {
+    pub type Guard = !;
+    pub unsafe fn current() -> Option<Guard> {
         None
     }
-    pub unsafe fn init() -> Option<usize> {
+    pub unsafe fn init() -> Option<Guard> {
         None
     }
+    pub unsafe fn deinit() {}
 }
 
 fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {

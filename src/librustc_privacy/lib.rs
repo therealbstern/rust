@@ -11,25 +11,28 @@
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/")]
-#![deny(warnings)]
 
 #![feature(rustc_diagnostic_macros)]
+
+#![recursion_limit="256"]
 
 #[macro_use] extern crate rustc;
 #[macro_use] extern crate syntax;
 extern crate rustc_typeck;
 extern crate syntax_pos;
+extern crate rustc_data_structures;
 
-use rustc::hir::{self, PatKind};
+use rustc::hir::{self, GenericParamKind, PatKind};
 use rustc::hir::def::Def;
 use rustc::hir::def_id::{CRATE_DEF_INDEX, LOCAL_CRATE, CrateNum, DefId};
 use rustc::hir::intravisit::{self, Visitor, NestedVisitorMap};
 use rustc::hir::itemlikevisit::DeepVisitor;
 use rustc::lint;
 use rustc::middle::privacy::{AccessLevel, AccessLevels};
-use rustc::ty::{self, TyCtxt, Ty, TypeFoldable};
+use rustc::ty::{self, TyCtxt, Ty, TypeFoldable, GenericParamDefKind};
 use rustc::ty::fold::TypeVisitor;
-use rustc::ty::maps::Providers;
+use rustc::ty::query::Providers;
+use rustc::ty::subst::UnpackedKind;
 use rustc::util::nodemap::NodeSet;
 use syntax::ast::{self, CRATE_NODE_ID, Ident};
 use syntax::symbol::keywords;
@@ -37,7 +40,8 @@ use syntax_pos::Span;
 
 use std::cmp;
 use std::mem::replace;
-use std::rc::Rc;
+use rustc_data_structures::fx::FxHashSet;
+use rustc_data_structures::sync::Lrc;
 
 mod diagnostics;
 
@@ -156,6 +160,7 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
             hir::ItemGlobalAsm(..) | hir::ItemFn(..) | hir::ItemMod(..) |
             hir::ItemStatic(..) | hir::ItemStruct(..) |
             hir::ItemTrait(..) | hir::ItemTraitAlias(..) |
+            hir::ItemExistential(..) |
             hir::ItemTy(..) | hir::ItemUnion(..) | hir::ItemUse(..) => {
                 if item.vis == hir::Public { self.prev_level } else { None }
             }
@@ -208,6 +213,7 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
                     }
                 }
             }
+            hir::ItemExistential(..) |
             hir::ItemUse(..) | hir::ItemStatic(..) | hir::ItemConst(..) |
             hir::ItemGlobalAsm(..) | hir::ItemTy(..) | hir::ItemMod(..) | hir::ItemTraitAlias(..) |
             hir::ItemFn(..) | hir::ItemExternCrate(..) => {}
@@ -219,10 +225,12 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
             hir::ItemExternCrate(..) => {}
             // All nested items are checked by visit_item
             hir::ItemMod(..) => {}
-            // Reexports are handled in visit_mod
+            // Re-exports are handled in visit_mod
             hir::ItemUse(..) => {}
             // The interface is empty
             hir::ItemGlobalAsm(..) => {}
+            // Checked by visit_ty
+            hir::ItemExistential(..) => {}
             // Visit everything
             hir::ItemConst(..) | hir::ItemStatic(..) |
             hir::ItemFn(..) | hir::ItemTy(..) => {
@@ -384,10 +392,10 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
     }
 
     fn visit_ty(&mut self, ty: &'tcx hir::Ty) {
-        if let hir::TyImplTraitExistential(..) = ty.node {
-            if self.get(ty.id).is_some() {
-                // Reach the (potentially private) type and the API being exposed.
-                self.reach(ty.id).ty().predicates();
+        if let hir::TyImplTraitExistential(item_id, _, _) = ty.node {
+            if self.get(item_id.id).is_some() {
+                // Reach the (potentially private) type and the API being exposed
+                self.reach(item_id.id).ty().predicates();
             }
         }
 
@@ -397,9 +405,14 @@ impl<'a, 'tcx> Visitor<'tcx> for EmbargoVisitor<'a, 'tcx> {
 
 impl<'b, 'a, 'tcx> ReachEverythingInTheInterfaceVisitor<'b, 'a, 'tcx> {
     fn generics(&mut self) -> &mut Self {
-        for def in &self.ev.tcx.generics_of(self.item_def_id).types {
-            if def.has_default {
-                self.ev.tcx.type_of(def.def_id).visit_with(self);
+        for param in &self.ev.tcx.generics_of(self.item_def_id).params {
+            match param.kind {
+                GenericParamDefKind::Type { has_default, .. } => {
+                    if has_default {
+                        self.ev.tcx.type_of(param.def_id).visit_with(self);
+                    }
+                }
+                GenericParamDefKind::Lifetime => {}
             }
         }
         self
@@ -427,6 +440,10 @@ impl<'b, 'a, 'tcx> ReachEverythingInTheInterfaceVisitor<'b, 'a, 'tcx> {
 
     fn ty(&mut self) -> &mut Self {
         let ty = self.ev.tcx.type_of(self.item_def_id);
+        self.walk_ty(ty)
+    }
+
+    fn walk_ty(&mut self, ty: Ty<'tcx>) -> &mut Self {
         ty.visit_with(self);
         if let ty::TyFnDef(def_id, _) = ty.sty {
             if def_id == self.item_def_id {
@@ -491,14 +508,18 @@ struct NamePrivacyVisitor<'a, 'tcx: 'a> {
 }
 
 impl<'a, 'tcx> NamePrivacyVisitor<'a, 'tcx> {
-    // Checks that a field is accessible.
-    fn check_field(&mut self, span: Span, def: &'tcx ty::AdtDef, field: &'tcx ty::FieldDef) {
-        let ident = Ident { ctxt: span.ctxt().modern(), ..keywords::Invalid.ident() };
+    // Checks that a field in a struct constructor (expression or pattern) is accessible.
+    fn check_field(&mut self,
+                   use_ctxt: Span, // Syntax context of the field name at the use site
+                   span: Span, // Span of the field pattern, e.g. `x: 0`
+                   def: &'tcx ty::AdtDef, // Definition of the struct or enum
+                   field: &'tcx ty::FieldDef) { // Definition of the field
+        let ident = Ident::new(keywords::Invalid.name(), use_ctxt);
         let def_id = self.tcx.adjust_ident(ident, def.did, self.current_item).1;
         if !def.is_enum() && !field.vis.is_accessible_from(def_id, self.tcx) {
             struct_span_err!(self.tcx.sess, span, E0451, "field `{}` of {} `{}` is private",
-                             field.name, def.variant_descr(), self.tcx.item_path_str(def.did))
-                .span_label(span, format!("field `{}` is private", field.name))
+                             field.ident, def.variant_descr(), self.tcx.item_path_str(def.did))
+                .span_label(span, format!("field `{}` is private", field.ident))
                 .emit();
         }
     }
@@ -564,14 +585,21 @@ impl<'a, 'tcx> Visitor<'tcx> for NamePrivacyVisitor<'a, 'tcx> {
                     // If the expression uses FRU we need to make sure all the unmentioned fields
                     // are checked for privacy (RFC 736). Rather than computing the set of
                     // unmentioned fields, just check them all.
-                    for variant_field in &variant.fields {
-                        let field = fields.iter().find(|f| f.name.node == variant_field.name);
-                        let span = if let Some(f) = field { f.span } else { base.span };
-                        self.check_field(span, adt, variant_field);
+                    for (vf_index, variant_field) in variant.fields.iter().enumerate() {
+                        let field = fields.iter().find(|f| {
+                            self.tcx.field_index(f.id, self.tables) == vf_index
+                        });
+                        let (use_ctxt, span) = match field {
+                            Some(field) => (field.ident.span, field.span),
+                            None => (base.span, base.span),
+                        };
+                        self.check_field(use_ctxt, span, adt, variant_field);
                     }
                 } else {
                     for field in fields {
-                        self.check_field(field.span, adt, variant.field_named(field.name.node));
+                        let use_ctxt = field.ident.span;
+                        let index = self.tcx.field_index(field.id, self.tables);
+                        self.check_field(use_ctxt, field.span, adt, &variant.fields[index]);
                     }
                 }
             }
@@ -588,7 +616,9 @@ impl<'a, 'tcx> Visitor<'tcx> for NamePrivacyVisitor<'a, 'tcx> {
                 let adt = self.tables.pat_ty(pat).ty_adt_def().unwrap();
                 let variant = adt.variant_of_def(def);
                 for field in fields {
-                    self.check_field(field.span, adt, variant.field_named(field.node.name));
+                    let use_ctxt = field.node.ident.span;
+                    let index = self.tcx.field_index(field.node.id, self.tables);
+                    self.check_field(use_ctxt, field.span, adt, &variant.fields[index]);
                 }
             }
             _ => {}
@@ -611,6 +641,7 @@ struct TypePrivacyVisitor<'a, 'tcx: 'a> {
     in_body: bool,
     span: Span,
     empty_tables: &'a ty::TypeckTables<'tcx>,
+    visited_anon_tys: FxHashSet<DefId>
 }
 
 impl<'a, 'tcx> TypePrivacyVisitor<'a, 'tcx> {
@@ -781,7 +812,7 @@ impl<'a, 'tcx> Visitor<'tcx> for TypePrivacyVisitor<'a, 'tcx> {
     // Additionally, until better reachability analysis for macros 2.0 is available,
     // we prohibit access to private statics from other crates, this allows to give
     // more code internal visibility at link time. (Access to private functions
-    // is already prohibited by type privacy for funciton types.)
+    // is already prohibited by type privacy for function types.)
     fn visit_qpath(&mut self, qpath: &'tcx hir::QPath, id: ast::NodeId, span: Span) {
         let def = match *qpath {
             hir::QPath::Resolved(_, ref path) => match path.def {
@@ -930,8 +961,15 @@ impl<'a, 'tcx> TypeVisitor<'tcx> for TypePrivacyVisitor<'a, 'tcx> {
                             self.tcx.sess.span_err(self.span, &msg);
                             return true;
                         }
-                        // `Self` here is the same `TyAnon`, so skip it to avoid infinite recursion
-                        for subst in trait_ref.substs.iter().skip(1) {
+                        for subst in trait_ref.substs.iter() {
+                            // Skip repeated `TyAnon`s to avoid infinite recursion.
+                            if let UnpackedKind::Type(ty) = subst.unpack() {
+                                if let ty::TyAnon(def_id, ..) = ty.sty {
+                                    if !self.visited_anon_tys.insert(def_id) {
+                                        continue;
+                                    }
+                                }
+                            }
                             if subst.visit_with(self) {
                                 return true;
                             }
@@ -999,9 +1037,8 @@ impl<'a, 'tcx> ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
         self.access_levels.is_public(trait_id)
     }
 
-    fn check_ty_param_bound(&mut self,
-                            ty_param_bound: &hir::TyParamBound) {
-        if let hir::TraitTyParamBound(ref trait_ref, _) = *ty_param_bound {
+    fn check_generic_bound(&mut self, bound: &hir::GenericBound) {
+        if let hir::GenericBound::Trait(ref trait_ref, _) = *bound {
             if self.path_is_private_type(&trait_ref.trait_ref.path) {
                 self.old_error_set.insert(trait_ref.trait_ref.ref_id);
             }
@@ -1049,7 +1086,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
 
     fn visit_item(&mut self, item: &'tcx hir::Item) {
         match item.node {
-            // contents of a private mod can be reexported, so we need
+            // contents of a private mod can be re-exported, so we need
             // to check internals.
             hir::ItemMod(_) => {}
 
@@ -1063,7 +1100,7 @@ impl<'a, 'tcx> Visitor<'tcx> for ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
                 }
 
                 for bound in bounds.iter() {
-                    self.check_ty_param_bound(bound)
+                    self.check_generic_bound(bound)
                 }
             }
 
@@ -1230,16 +1267,19 @@ impl<'a, 'tcx> Visitor<'tcx> for ObsoleteVisiblePrivateTypesVisitor<'a, 'tcx> {
     }
 
     fn visit_generics(&mut self, generics: &'tcx hir::Generics) {
-        for ty_param in generics.ty_params() {
-            for bound in ty_param.bounds.iter() {
-                self.check_ty_param_bound(bound)
+        generics.params.iter().for_each(|param| match param.kind {
+            GenericParamKind::Lifetime { .. } => {}
+            GenericParamKind::Type { .. } => {
+                for bound in &param.bounds {
+                    self.check_generic_bound(bound);
+                }
             }
-        }
+        });
         for predicate in &generics.where_clause.predicates {
             match predicate {
                 &hir::WherePredicate::BoundPredicate(ref bound_pred) => {
                     for bound in bound_pred.bounds.iter() {
-                        self.check_ty_param_bound(bound)
+                        self.check_generic_bound(bound)
                     }
                 }
                 &hir::WherePredicate::RegionPredicate(_) => {}
@@ -1312,9 +1352,14 @@ struct SearchInterfaceForPrivateItemsVisitor<'a, 'tcx: 'a> {
 
 impl<'a, 'tcx: 'a> SearchInterfaceForPrivateItemsVisitor<'a, 'tcx> {
     fn generics(&mut self) -> &mut Self {
-        for def in &self.tcx.generics_of(self.item_def_id).types {
-            if def.has_default {
-                self.tcx.type_of(def.def_id).visit_with(self);
+        for param in &self.tcx.generics_of(self.item_def_id).params {
+            match param.kind {
+                GenericParamDefKind::Type { has_default, .. } => {
+                    if has_default {
+                        self.tcx.type_of(param.def_id).visit_with(self);
+                    }
+                }
+                GenericParamDefKind::Lifetime => {}
             }
         }
         self
@@ -1511,6 +1556,8 @@ impl<'a, 'tcx> Visitor<'tcx> for PrivateItemsInPublicInterfacesVisitor<'a, 'tcx>
             hir::ItemUse(..) => {}
             // No subitems
             hir::ItemGlobalAsm(..) => {}
+            // Checked in visit_ty
+            hir::ItemExistential(..) => {}
             // Subitems of these items have inherited publicity
             hir::ItemConst(..) | hir::ItemStatic(..) | hir::ItemFn(..) |
             hir::ItemTy(..) => {
@@ -1609,13 +1656,14 @@ impl<'a, 'tcx> Visitor<'tcx> for PrivateItemsInPublicInterfacesVisitor<'a, 'tcx>
     }
 
     fn visit_ty(&mut self, ty: &'tcx hir::Ty) {
-        if let hir::TyImplTraitExistential(..) = ty.node {
+        if let hir::TyImplTraitExistential(ref exist_item, _, _) = ty.node {
             // Check the traits being exposed, as they're separate,
             // e.g. `impl Iterator<Item=T>` has two predicates,
             // `X: Iterator` and `<X as Iterator>::Item == T`,
             // where `X` is the `impl Iterator<Item=T>` itself,
             // stored in `predicates_of`, not in the `Ty` itself.
-            self.check(ty.id, self.inner_visibility).predicates();
+
+            self.check(exist_item.id, self.inner_visibility).predicates();
         }
 
         intravisit::walk_ty(self, ty);
@@ -1634,13 +1682,13 @@ pub fn provide(providers: &mut Providers) {
     };
 }
 
-pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Rc<AccessLevels> {
+pub fn check_crate<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>) -> Lrc<AccessLevels> {
     tcx.privacy_access_levels(LOCAL_CRATE)
 }
 
 fn privacy_access_levels<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
                                    krate: CrateNum)
-                                   -> Rc<AccessLevels> {
+                                   -> Lrc<AccessLevels> {
     assert_eq!(krate, LOCAL_CRATE);
 
     let krate = tcx.hir.krate();
@@ -1664,6 +1712,7 @@ fn privacy_access_levels<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         in_body: false,
         span: krate.span,
         empty_tables: &empty_tables,
+        visited_anon_tys: FxHashSet()
     };
     intravisit::walk_crate(&mut visitor, krate);
 
@@ -1714,8 +1763,7 @@ fn privacy_access_levels<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
         krate.visit_all_item_likes(&mut DeepVisitor::new(&mut visitor));
     }
 
-    Rc::new(visitor.access_levels)
+    Lrc::new(visitor.access_levels)
 }
 
-#[cfg(not(stage0))] // remove after the next snapshot
 __build_diagnostic_array! { librustc_privacy, DIAGNOSTICS }

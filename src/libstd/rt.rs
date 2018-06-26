@@ -23,7 +23,7 @@
 #![doc(hidden)]
 
 
-// Reexport some of our utilities which are expected by other crates.
+// Re-export some of our utilities which are expected by other crates.
 pub use panicking::{begin_panic, begin_panic_fmt, update_panic_count};
 
 // To reduce the generated code of the new `lang_start`, this function is doing
@@ -68,8 +68,23 @@ fn lang_start_internal(main: &(Fn() -> i32 + Sync + ::panic::RefUnwindSafe),
 
 #[cfg(not(test))]
 #[lang = "start"]
-fn lang_start<T: ::termination::Termination + 'static>
+fn lang_start<T: ::process::Termination + 'static>
     (main: fn() -> T, argc: isize, argv: *const *const u8) -> isize
 {
     lang_start_internal(&move || main().report(), argc, argv)
+}
+
+/// Function used for reverting changes to the main stack before setrlimit().
+/// This is POSIX (non-Linux) specific and unlikely to be directly stabilized.
+#[unstable(feature = "rustc_stack_internals", issue = "0")]
+pub unsafe fn deinit_stack_guard() {
+    ::sys::thread::guard::deinit();
+}
+
+/// Function used for resetting the main stack guard address after setrlimit().
+/// This is POSIX specific and unlikely to be directly stabilized.
+#[unstable(feature = "rustc_stack_internals", issue = "0")]
+pub unsafe fn update_stack_guard() {
+    let main_guard = ::sys::thread::guard::init();
+    ::sys_common::thread_info::reset_guard(main_guard);
 }

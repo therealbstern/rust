@@ -106,7 +106,12 @@ use self::Ordering::*;
 /// ```
 #[lang = "eq"]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "can't compare `{Self}` with `{Rhs}`"]
+#[doc(alias = "==")]
+#[doc(alias = "!=")]
+#[rustc_on_unimplemented(
+    message="can't compare `{Self}` with `{Rhs}`",
+    label="no implementation for `{Self} == {Rhs}`",
+)]
 pub trait PartialEq<Rhs: ?Sized = Self> {
     /// This method tests for `self` and `other` values to be equal, and is used
     /// by `==`.
@@ -160,6 +165,8 @@ pub trait PartialEq<Rhs: ?Sized = Self> {
 /// }
 /// impl Eq for Book {}
 /// ```
+#[doc(alias = "==")]
+#[doc(alias = "!=")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Eq: PartialEq<Self> {
     // this method is used solely by #[deriving] to assert
@@ -343,7 +350,7 @@ impl Ordering {
 /// v.sort_by_key(|&num| (num > 3, Reverse(num)));
 /// assert_eq!(v, vec![3, 2, 1, 6, 5, 4]);
 /// ```
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Copy, Clone, Default, Hash)]
 #[stable(feature = "reverse_cmp_key", since = "1.19.0")]
 pub struct Reverse<T>(#[stable(feature = "reverse_cmp_key", since = "1.19.0")] pub T);
 
@@ -427,6 +434,11 @@ impl<T: Ord> Ord for Reverse<T> {
 ///     }
 /// }
 /// ```
+#[lang = "ord"]
+#[doc(alias = "<")]
+#[doc(alias = ">")]
+#[doc(alias = "<=")]
+#[doc(alias = ">=")]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub trait Ord: Eq + PartialOrd<Self> {
     /// This method returns an `Ordering` between `self` and `other`.
@@ -596,9 +608,16 @@ impl PartialOrd for Ordering {
 /// assert_eq!(x < y, true);
 /// assert_eq!(x.lt(&y), true);
 /// ```
-#[lang = "ord"]
+#[lang = "partial_ord"]
 #[stable(feature = "rust1", since = "1.0.0")]
-#[rustc_on_unimplemented = "can't compare `{Self}` with `{Rhs}`"]
+#[doc(alias = ">")]
+#[doc(alias = "<")]
+#[doc(alias = "<=")]
+#[doc(alias = ">=")]
+#[rustc_on_unimplemented(
+    message="can't compare `{Self}` with `{Rhs}`",
+    label="no implementation for `{Self} < {Rhs}` and `{Self} > {Rhs}`",
+)]
 pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     /// This method returns an ordering between `self` and `other` values if one exists.
     ///

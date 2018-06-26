@@ -8,9 +8,8 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// must-compile-successfully
+// compile-pass
 
-#![feature(underscore_lifetimes)]
 #![allow(warnings)]
 
 type Different<'a, 'b> = &'a mut (&'a (), &'b ());

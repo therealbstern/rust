@@ -13,24 +13,20 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::path::{PathBuf, Path};
 
+use errors;
 use getopts;
 use testing;
 use rustc::session::search_paths::SearchPaths;
-use rustc::session::config::Externs;
-use syntax::codemap::{DUMMY_SP, FileName};
-
-use clean::Span;
+use rustc::session::config::{Externs, CodegenOptions};
+use syntax::codemap::DUMMY_SP;
+use syntax::edition::Edition;
 
 use externalfiles::{ExternalHtml, LoadStringError, load_string};
 
-use html_diff;
-
-use html::render::{render_text, reset_ids};
+use html::render::reset_ids;
 use html::escape::Escape;
-use html::render::render_difference;
 use html::markdown;
-use html::markdown::{Markdown, MarkdownWithToc, find_testable_code, old_find_testable_code};
-use html::markdown::RenderType;
+use html::markdown::{Markdown, MarkdownWithToc, find_testable_code};
 use test::{TestOptions, Collector};
 
 /// Separate any lines at the start of the file that begin with `# ` or `%`.
@@ -55,12 +51,7 @@ fn extract_leading_metadata<'a>(s: &'a str) -> (Vec<&'a str>, &'a str) {
 /// Render `input` (e.g. "foo.md") into an HTML file in `output`
 /// (e.g. output = "bar" => "bar/foo.html").
 pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
-              external_html: &ExternalHtml, include_toc: bool,
-              render_type: RenderType) -> isize {
-    // Span used for markdown hoedown/pulldown differences.
-    let mut span = Span::empty();
-    span.filename = FileName::Real(input.to_owned());
-
+              external_html: &ExternalHtml, include_toc: bool, diag: &errors::Handler) -> isize {
     output.push(input.file_stem().unwrap());
     output.set_extension("html");
 
@@ -70,7 +61,7 @@ pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
         css.push_str(&s)
     }
 
-    let input_str = match load_string(input) {
+    let input_str = match load_string(input, diag) {
         Ok(s) => s,
         Err(LoadStringError::ReadFail) => return 1,
         Err(LoadStringError::BadUtf8) => return 2,
@@ -82,7 +73,7 @@ pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
 
     let mut out = match File::create(&output) {
         Err(e) => {
-            eprintln!("rustdoc: {}: {}", output.display(), e);
+            diag.struct_err(&format!("{}: {}", output.display(), e)).emit();
             return 4;
         }
         Ok(f) => f
@@ -90,42 +81,18 @@ pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
 
     let (metadata, text) = extract_leading_metadata(&input_str);
     if metadata.is_empty() {
-        eprintln!("rustdoc: invalid markdown file: no initial lines starting with `# ` or `%`");
+        diag.struct_err("invalid markdown file: no initial lines starting with `# ` or `%`").emit();
         return 5;
     }
     let title = metadata[0];
 
     reset_ids(false);
 
-    let (hoedown_output, pulldown_output) = if include_toc {
-        // Save the state of USED_ID_MAP so it only gets updated once even
-        // though we're rendering twice.
-        render_text(|ty| format!("{}", MarkdownWithToc(text, ty)))
+    let text = if include_toc {
+        format!("{}", MarkdownWithToc(text))
     } else {
-        // Save the state of USED_ID_MAP so it only gets updated once even
-        // though we're rendering twice.
-        render_text(|ty| format!("{}", Markdown(text, ty)))
+        format!("{}", Markdown(text, &[]))
     };
-
-    let mut differences = html_diff::get_differences(&pulldown_output, &hoedown_output);
-    differences.retain(|s| {
-        match *s {
-            html_diff::Difference::NodeText { ref elem_text,
-                                              ref opposite_elem_text,
-                                              .. }
-                if elem_text.split_whitespace().eq(opposite_elem_text.split_whitespace()) => {
-                    false
-            }
-            _ => true,
-        }
-    });
-
-    if !differences.is_empty() {
-        let mut intro_msg = false;
-        for diff in differences {
-            render_difference(&diff, &mut intro_msg, &span, text);
-        }
-    }
 
     let err = write!(
         &mut out,
@@ -158,13 +125,13 @@ pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
         css = css,
         in_header = external_html.in_header,
         before_content = external_html.before_content,
-        text = if render_type == RenderType::Pulldown { pulldown_output } else { hoedown_output },
+        text = text,
         after_content = external_html.after_content,
     );
 
     match err {
         Err(e) => {
-            eprintln!("rustdoc: cannot write to `{}`: {}", output.display(), e);
+            diag.struct_err(&format!("cannot write to `{}`: {}", output.display(), e)).emit();
             6
         }
         Ok(_) => 0,
@@ -174,8 +141,9 @@ pub fn render(input: &Path, mut output: PathBuf, matches: &getopts::Matches,
 /// Run any tests/code examples in the markdown file `input`.
 pub fn test(input: &str, cfgs: Vec<String>, libs: SearchPaths, externs: Externs,
             mut test_args: Vec<String>, maybe_sysroot: Option<PathBuf>,
-            render_type: RenderType, display_warnings: bool, linker: Option<PathBuf>) -> isize {
-    let input_str = match load_string(input) {
+            display_warnings: bool, linker: Option<PathBuf>, edition: Edition,
+            cg: CodegenOptions, diag: &errors::Handler) -> isize {
+    let input_str = match load_string(input, diag) {
         Ok(s) => s,
         Err(LoadStringError::ReadFail) => return 1,
         Err(LoadStringError::BadUtf8) => return 2,
@@ -183,16 +151,12 @@ pub fn test(input: &str, cfgs: Vec<String>, libs: SearchPaths, externs: Externs,
 
     let mut opts = TestOptions::default();
     opts.no_crate_inject = true;
-    let mut collector = Collector::new(input.to_owned(), cfgs, libs, externs,
+    opts.display_warnings = display_warnings;
+    let mut collector = Collector::new(input.to_owned(), cfgs, libs, cg, externs,
                                        true, opts, maybe_sysroot, None,
                                        Some(PathBuf::from(input)),
-                                       render_type, linker);
-    if render_type == RenderType::Pulldown {
-        old_find_testable_code(&input_str, &mut collector, DUMMY_SP);
-        find_testable_code(&input_str, &mut collector, DUMMY_SP);
-    } else {
-        old_find_testable_code(&input_str, &mut collector, DUMMY_SP);
-    }
+                                       linker, edition);
+    find_testable_code(&input_str, &mut collector, DUMMY_SP, None);
     test_args.insert(0, "rustdoctest".to_string());
     testing::test_main(&test_args, collector.tests,
                        testing::Options::new().display_output(display_warnings));

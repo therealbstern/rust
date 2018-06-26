@@ -10,11 +10,11 @@
 
 //! Code related to processing overloaded binary and unary operators.
 
-use super::FnCtxt;
+use super::{FnCtxt, Needs};
 use super::method::MethodCallee;
-use rustc::ty::{self, Ty, TypeFoldable, NoPreference, PreferMutLvalue, TypeVariants};
-use rustc::ty::TypeVariants::{TyStr, TyRef};
-use rustc::ty::adjustment::{Adjustment, Adjust, AutoBorrow};
+use rustc::ty::{self, Ty, TypeFoldable};
+use rustc::ty::TypeVariants::{TyRef, TyAdt, TyStr, TyUint, TyNever, TyTuple, TyChar, TyArray};
+use rustc::ty::adjustment::{Adjustment, Adjust, AllowTwoPhase, AutoBorrow, AutoBorrowMutability};
 use rustc::infer::type_variable::TypeVariableOrigin;
 use errors;
 use syntax_pos::Span;
@@ -40,10 +40,9 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             return_ty
         };
 
-        let tcx = self.tcx;
-        if !tcx.expr_is_lval(lhs_expr) {
+        if !self.is_place_expr(lhs_expr) {
             struct_span_err!(
-                tcx.sess, lhs_expr.span,
+                self.tcx.sess, lhs_expr.span,
                 E0067, "invalid left-hand side expression")
             .span_label(
                 lhs_expr.span,
@@ -166,18 +165,18 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                op,
                is_assign);
 
-        let lhs_pref = match is_assign {
-            IsAssign::Yes => PreferMutLvalue,
-            IsAssign::No => NoPreference
+        let lhs_needs = match is_assign {
+            IsAssign::Yes => Needs::MutPlace,
+            IsAssign::No => Needs::None
         };
         // Find a suitable supertype of the LHS expression's type, by coercing to
         // a type variable, to pass as the `Self` to the trait, avoiding invariant
         // trait matching creating lifetime constraints that are too strict.
         // E.g. adding `&'a T` and `&'b T`, given `&'x T: Add<&'x T>`, will result
         // in `&'a T <: &'x T` and `&'b T <: &'x T`, instead of `'a = 'b = 'x`.
-        let lhs_ty = self.check_expr_coercable_to_type_with_lvalue_pref(lhs_expr,
-            self.next_ty_var(TypeVariableOrigin::MiscVariable(lhs_expr.span)),
-            lhs_pref);
+        let lhs_ty = self.check_expr_with_needs(lhs_expr, lhs_needs);
+        let fresh_var = self.next_ty_var(TypeVariableOrigin::MiscVariable(lhs_expr.span));
+        let lhs_ty = self.demand_coerce(lhs_expr, lhs_ty, fresh_var,  AllowTwoPhase::No);
         let lhs_ty = self.resolve_type_vars_with_obligations(lhs_ty);
 
         // NB: As we have not yet type-checked the RHS, we don't have the
@@ -198,18 +197,34 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             Ok(method) => {
                 let by_ref_binop = !op.node.is_by_value();
                 if is_assign == IsAssign::Yes || by_ref_binop {
-                    if let ty::TyRef(region, mt) = method.sig.inputs()[0].sty {
+                    if let ty::TyRef(region, _, mutbl) = method.sig.inputs()[0].sty {
+                        let mutbl = match mutbl {
+                            hir::MutImmutable => AutoBorrowMutability::Immutable,
+                            hir::MutMutable => AutoBorrowMutability::Mutable {
+                                // Allow two-phase borrows for binops in initial deployment
+                                // since they desugar to methods
+                                allow_two_phase_borrow: AllowTwoPhase::Yes,
+                            }
+                        };
                         let autoref = Adjustment {
-                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mt.mutbl)),
+                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
                             target: method.sig.inputs()[0]
                         };
                         self.apply_adjustments(lhs_expr, vec![autoref]);
                     }
                 }
                 if by_ref_binop {
-                    if let ty::TyRef(region, mt) = method.sig.inputs()[1].sty {
+                    if let ty::TyRef(region, _, mutbl) = method.sig.inputs()[1].sty {
+                        let mutbl = match mutbl {
+                            hir::MutImmutable => AutoBorrowMutability::Immutable,
+                            hir::MutMutable => AutoBorrowMutability::Mutable {
+                                // Allow two-phase borrows for binops in initial deployment
+                                // since they desugar to methods
+                                allow_two_phase_borrow: AllowTwoPhase::Yes,
+                            }
+                        };
                         let autoref = Adjustment {
-                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mt.mutbl)),
+                            kind: Adjust::Borrow(AutoBorrow::Ref(region, mutbl)),
                             target: method.sig.inputs()[1]
                         };
                         // HACK(eddyb) Bypass checks due to reborrows being in
@@ -231,76 +246,151 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             Err(()) => {
                 // error types are considered "builtin"
                 if !lhs_ty.references_error() {
-                    if let IsAssign::Yes = is_assign {
-                        struct_span_err!(self.tcx.sess, expr.span, E0368,
-                                         "binary assignment operation `{}=` \
-                                          cannot be applied to type `{}`",
-                                         op.node.as_str(),
-                                         lhs_ty)
-                            .span_label(lhs_expr.span,
-                                        format!("cannot use `{}=` on type `{}`",
-                                        op.node.as_str(), lhs_ty))
-                            .emit();
-                    } else {
-                        let mut err = struct_span_err!(self.tcx.sess, expr.span, E0369,
-                            "binary operation `{}` cannot be applied to type `{}`",
-                            op.node.as_str(),
-                            lhs_ty);
-
-                        if let TypeVariants::TyRef(_, ref ty_mut) = lhs_ty.sty {
-                            if {
-                                !self.infcx.type_moves_by_default(self.param_env,
-                                                                  ty_mut.ty,
-                                                                  lhs_expr.span) &&
-                                    self.lookup_op_method(ty_mut.ty,
-                                                          &[rhs_ty],
-                                                          Op::Binary(op, is_assign))
-                                        .is_ok()
-                            } {
-                                err.note(
-                                    &format!(
-                                        "this is a reference to a type that `{}` can be applied \
-                                        to; you need to dereference this variable once for this \
-                                        operation to work",
-                                    op.node.as_str()));
+                    let codemap = self.tcx.sess.codemap();
+                    match is_assign {
+                        IsAssign::Yes => {
+                            let mut err = struct_span_err!(self.tcx.sess, expr.span, E0368,
+                                                "binary assignment operation `{}=` \
+                                                cannot be applied to type `{}`",
+                                                op.node.as_str(),
+                                                lhs_ty);
+                            err.span_label(lhs_expr.span,
+                                    format!("cannot use `{}=` on type `{}`",
+                                    op.node.as_str(), lhs_ty));
+                            let mut suggested_deref = false;
+                            if let TyRef(_, mut rty, _) = lhs_ty.sty {
+                                if {
+                                    !self.infcx.type_moves_by_default(self.param_env,
+                                                                        rty,
+                                                                        lhs_expr.span) &&
+                                        self.lookup_op_method(rty,
+                                                              &[rhs_ty],
+                                                              Op::Binary(op, is_assign))
+                                            .is_ok()
+                                } {
+                                    if let Ok(lstring) = codemap.span_to_snippet(lhs_expr.span) {
+                                        while let TyRef(_, rty_inner, _) = rty.sty {
+                                            rty = rty_inner;
+                                        }
+                                        let msg = &format!(
+                                                "`{}=` can be used on '{}', you can \
+                                                dereference `{2}`: `*{2}`",
+                                                op.node.as_str(),
+                                                rty,
+                                                lstring
+                                        );
+                                        err.help(msg);
+                                        suggested_deref = true;
+                                    }
+                                }
                             }
-                        }
-
-                        let missing_trait = match op.node {
-                            hir::BiAdd    => Some("std::ops::Add"),
-                            hir::BiSub    => Some("std::ops::Sub"),
-                            hir::BiMul    => Some("std::ops::Mul"),
-                            hir::BiDiv    => Some("std::ops::Div"),
-                            hir::BiRem    => Some("std::ops::Rem"),
-                            hir::BiBitAnd => Some("std::ops::BitAnd"),
-                            hir::BiBitOr  => Some("std::ops::BitOr"),
-                            hir::BiShl    => Some("std::ops::Shl"),
-                            hir::BiShr    => Some("std::ops::Shr"),
-                            hir::BiEq | hir::BiNe => Some("std::cmp::PartialEq"),
-                            hir::BiLt | hir::BiLe | hir::BiGt | hir::BiGe =>
-                                Some("std::cmp::PartialOrd"),
-                            _             => None
-                        };
-
-                        if let Some(missing_trait) = missing_trait {
-                            if missing_trait == "std::ops::Add" &&
-                                self.check_str_addition(expr, lhs_expr, lhs_ty,
-                                                        rhs_ty, &mut err) {
-                                // This has nothing here because it means we did string
-                                // concatenation (e.g. "Hello " + "World!"). This means
-                                // we don't want the note in the else clause to be emitted
-                            } else if let ty::TyParam(_) = lhs_ty.sty {
-                                // FIXME: point to span of param
-                                err.note(
-                                    &format!("`{}` might need a bound for `{}`",
-                                             lhs_ty, missing_trait));
-                            } else {
-                                err.note(
-                                    &format!("an implementation of `{}` might be missing for `{}`",
-                                             missing_trait, lhs_ty));
+                            let missing_trait = match op.node {
+                                hir::BiAdd    => Some("std::ops::AddAssign"),
+                                hir::BiSub    => Some("std::ops::SubAssign"),
+                                hir::BiMul    => Some("std::ops::MulAssign"),
+                                hir::BiDiv    => Some("std::ops::DivAssign"),
+                                hir::BiRem    => Some("std::ops::RemAssign"),
+                                hir::BiBitAnd => Some("std::ops::BitAndAssign"),
+                                hir::BiBitXor => Some("std::ops::BitXorAssign"),
+                                hir::BiBitOr  => Some("std::ops::BitOrAssign"),
+                                hir::BiShl    => Some("std::ops::ShlAssign"),
+                                hir::BiShr    => Some("std::ops::ShrAssign"),
+                                _             => None
+                            };
+                            if let Some(missing_trait) = missing_trait {
+                                if op.node == hir::BiAdd &&
+                                    self.check_str_addition(expr, lhs_expr, rhs_expr, lhs_ty,
+                                                            rhs_ty, &mut err) {
+                                    // This has nothing here because it means we did string
+                                    // concatenation (e.g. "Hello " + "World!"). This means
+                                    // we don't want the note in the else clause to be emitted
+                                } else if let ty::TyParam(_) = lhs_ty.sty {
+                                    // FIXME: point to span of param
+                                    err.note(&format!(
+                                        "`{}` might need a bound for `{}`",
+                                        lhs_ty, missing_trait
+                                    ));
+                                } else if !suggested_deref {
+                                    err.note(&format!(
+                                        "an implementation of `{}` might \
+                                         be missing for `{}`",
+                                        missing_trait, lhs_ty
+                                    ));
+                                }
                             }
+                            err.emit();
                         }
-                        err.emit();
+                        IsAssign::No => {
+                            let mut err = struct_span_err!(self.tcx.sess, expr.span, E0369,
+                                            "binary operation `{}` cannot be applied to type `{}`",
+                                            op.node.as_str(),
+                                            lhs_ty);
+                            let mut suggested_deref = false;
+                            if let TyRef(_, mut rty, _) = lhs_ty.sty {
+                                if {
+                                    !self.infcx.type_moves_by_default(self.param_env,
+                                                                        rty,
+                                                                        lhs_expr.span) &&
+                                        self.lookup_op_method(rty,
+                                                              &[rhs_ty],
+                                                              Op::Binary(op, is_assign))
+                                            .is_ok()
+                                } {
+                                    if let Ok(lstring) = codemap.span_to_snippet(lhs_expr.span) {
+                                        while let TyRef(_, rty_inner, _) = rty.sty {
+                                            rty = rty_inner;
+                                        }
+                                        let msg = &format!(
+                                                "`{}` can be used on '{}', you can \
+                                                dereference `{2}`: `*{2}`",
+                                                op.node.as_str(),
+                                                rty,
+                                                lstring
+                                        );
+                                        err.help(msg);
+                                        suggested_deref = true;
+                                    }
+                                }
+                            }
+                            let missing_trait = match op.node {
+                                hir::BiAdd    => Some("std::ops::Add"),
+                                hir::BiSub    => Some("std::ops::Sub"),
+                                hir::BiMul    => Some("std::ops::Mul"),
+                                hir::BiDiv    => Some("std::ops::Div"),
+                                hir::BiRem    => Some("std::ops::Rem"),
+                                hir::BiBitAnd => Some("std::ops::BitAnd"),
+                                hir::BiBitXor => Some("std::ops::BitXor"),
+                                hir::BiBitOr  => Some("std::ops::BitOr"),
+                                hir::BiShl    => Some("std::ops::Shl"),
+                                hir::BiShr    => Some("std::ops::Shr"),
+                                hir::BiEq | hir::BiNe => Some("std::cmp::PartialEq"),
+                                hir::BiLt | hir::BiLe | hir::BiGt | hir::BiGe =>
+                                    Some("std::cmp::PartialOrd"),
+                                _             => None
+                            };
+                            if let Some(missing_trait) = missing_trait {
+                                if op.node == hir::BiAdd &&
+                                    self.check_str_addition(expr, lhs_expr, rhs_expr, lhs_ty,
+                                                            rhs_ty, &mut err) {
+                                    // This has nothing here because it means we did string
+                                    // concatenation (e.g. "Hello " + "World!"). This means
+                                    // we don't want the note in the else clause to be emitted
+                                } else if let ty::TyParam(_) = lhs_ty.sty {
+                                    // FIXME: point to span of param
+                                    err.note(&format!(
+                                        "`{}` might need a bound for `{}`",
+                                        lhs_ty, missing_trait
+                                    ));
+                                } else if !suggested_deref {
+                                    err.note(&format!(
+                                        "an implementation of `{}` might \
+                                         be missing for `{}`",
+                                        missing_trait, lhs_ty
+                                    ));
+                                }
+                            }
+                            err.emit();
+                        }
                     }
                 }
                 self.tcx.types.err
@@ -313,37 +403,54 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
     fn check_str_addition(&self,
                           expr: &'gcx hir::Expr,
                           lhs_expr: &'gcx hir::Expr,
+                          rhs_expr: &'gcx hir::Expr,
                           lhs_ty: Ty<'tcx>,
                           rhs_ty: Ty<'tcx>,
                           err: &mut errors::DiagnosticBuilder) -> bool {
+        let codemap = self.tcx.sess.codemap();
+        let msg = "`to_owned()` can be used to create an owned `String` \
+                   from a string reference. String concatenation \
+                   appends the string on the right to the string \
+                   on the left and may require reallocation. This \
+                   requires ownership of the string on the left";
         // If this function returns true it means a note was printed, so we don't need
         // to print the normal "implementation of `std::ops::Add` might be missing" note
-        let mut is_string_addition = false;
-        if let TyRef(_, l_ty) = lhs_ty.sty {
-            if let TyRef(_, r_ty) = rhs_ty.sty {
-                if l_ty.ty.sty == TyStr && r_ty.ty.sty == TyStr {
-                    err.span_label(expr.span,
-                        "`+` can't be used to concatenate two `&str` strings");
-                    let codemap = self.tcx.sess.codemap();
-                    let suggestion =
-                        match codemap.span_to_snippet(lhs_expr.span) {
-                            Ok(lstring) => format!("{}.to_owned()", lstring),
-                            _ => format!("<expression>")
-                        };
-                    err.span_suggestion(lhs_expr.span,
-                        &format!("`to_owned()` can be used to create an owned `String` \
-                                  from a string reference. String concatenation \
-                                  appends the string on the right to the string \
-                                  on the left and may require reallocation. This \
-                                  requires ownership of the string on the left"), suggestion);
-                    is_string_addition = true;
-                }
-
+        match (&lhs_ty.sty, &rhs_ty.sty) {
+            (&TyRef(_, l_ty, _), &TyRef(_, r_ty, _))
+            if l_ty.sty == TyStr && r_ty.sty == TyStr => {
+                err.span_label(expr.span,
+                    "`+` can't be used to concatenate two `&str` strings");
+                match codemap.span_to_snippet(lhs_expr.span) {
+                    Ok(lstring) => err.span_suggestion(lhs_expr.span,
+                                                       msg,
+                                                       format!("{}.to_owned()", lstring)),
+                    _ => err.help(msg),
+                };
+                true
             }
-
+            (&TyRef(_, l_ty, _), &TyAdt(..))
+            if l_ty.sty == TyStr && &format!("{:?}", rhs_ty) == "std::string::String" => {
+                err.span_label(expr.span,
+                    "`+` can't be used to concatenate a `&str` with a `String`");
+                match codemap.span_to_snippet(lhs_expr.span) {
+                    Ok(lstring) => err.span_suggestion(lhs_expr.span,
+                                                       msg,
+                                                       format!("{}.to_owned()", lstring)),
+                    _ => err.help(msg),
+                };
+                match codemap.span_to_snippet(rhs_expr.span) {
+                    Ok(rstring) => {
+                        err.span_suggestion(rhs_expr.span,
+                                            "you also need to borrow the `String` on the right to \
+                                             get a `&str`",
+                                            format!("&{}", rstring));
+                    }
+                    _ => {}
+                };
+                true
+            }
+            _ => false,
         }
-
-        is_string_addition
     }
 
     pub fn check_user_unop(&self,
@@ -361,9 +468,29 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
             Err(()) => {
                 let actual = self.resolve_type_vars_if_possible(&operand_ty);
                 if !actual.references_error() {
-                    struct_span_err!(self.tcx.sess, ex.span, E0600,
+                    let mut err = struct_span_err!(self.tcx.sess, ex.span, E0600,
                                      "cannot apply unary operator `{}` to type `{}`",
-                                     op.as_str(), actual).emit();
+                                     op.as_str(), actual);
+                    err.span_label(ex.span, format!("cannot apply unary \
+                                                    operator `{}`", op.as_str()));
+                    match actual.sty {
+                        TyUint(_) if op == hir::UnNeg => {
+                            err.note(&format!("unsigned values cannot be negated"));
+                        },
+                        TyStr | TyNever | TyChar | TyTuple(_) | TyArray(_,_) => {},
+                        TyRef(_, ref lty, _) if lty.sty == TyStr => {},
+                        _ => {
+                            let missing_trait = match op {
+                                hir::UnNeg => "std::ops::Neg",
+                                hir::UnNot => "std::ops::Not",
+                                hir::UnDeref => "std::ops::UnDerf"
+                            };
+                            err.note(&format!("an implementation of `{}` might \
+                                                be missing for `{}`",
+                                             missing_trait, operand_ty));
+                        }
+                    }
+                    err.emit();
                 }
                 self.tcx.types.err
             }
@@ -412,10 +539,10 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
                 hir::BiBitOr => ("bitor", lang.bitor_trait()),
                 hir::BiShl => ("shl", lang.shl_trait()),
                 hir::BiShr => ("shr", lang.shr_trait()),
-                hir::BiLt => ("lt", lang.ord_trait()),
-                hir::BiLe => ("le", lang.ord_trait()),
-                hir::BiGe => ("ge", lang.ord_trait()),
-                hir::BiGt => ("gt", lang.ord_trait()),
+                hir::BiLt => ("lt", lang.partial_ord_trait()),
+                hir::BiLe => ("le", lang.partial_ord_trait()),
+                hir::BiGe => ("ge", lang.partial_ord_trait()),
+                hir::BiGt => ("gt", lang.partial_ord_trait()),
                 hir::BiEq => ("eq", lang.eq_trait()),
                 hir::BiNe => ("ne", lang.eq_trait()),
                 hir::BiAnd | hir::BiOr => {
@@ -444,7 +571,7 @@ impl<'a, 'gcx, 'tcx> FnCtxt<'a, 'gcx, 'tcx> {
         match method {
             Some(ok) => {
                 let method = self.register_infer_ok_obligations(ok);
-                self.select_obligations_where_possible();
+                self.select_obligations_where_possible(false);
 
                 Ok(method)
             }
@@ -538,7 +665,7 @@ enum Op {
 ///    `PartialEq` is not applicable.
 ///
 /// Reason #2 is the killer. I tried for a while to always use
-/// overloaded logic and just check the types in constants/trans after
+/// overloaded logic and just check the types in constants/codegen after
 /// the fact, and it worked fine, except for SIMD types. -nmatsakis
 fn is_builtin_binop(lhs: Ty, rhs: Ty, op: hir::BinOp) -> bool {
     match BinOpCategory::from(op) {

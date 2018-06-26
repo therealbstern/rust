@@ -41,20 +41,20 @@ pub trait FileExt {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use std::os::unix::prelude::FileExt;
+    /// ```no_run
+    /// use std::io;
     /// use std::fs::File;
+    /// use std::os::unix::prelude::FileExt;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let mut buf = [0u8; 8];
-    /// let file = File::open("foo.txt")?;
+    /// fn main() -> io::Result<()> {
+    ///     let mut buf = [0u8; 8];
+    ///     let file = File::open("foo.txt")?;
     ///
-    /// // We now read 8 bytes from the offset 10.
-    /// let num_bytes_read = file.read_at(&mut buf, 10)?;
-    /// println!("read {} bytes: {:?}", num_bytes_read, buf);
-    /// # Ok(())
-    /// # }
+    ///     // We now read 8 bytes from the offset 10.
+    ///     let num_bytes_read = file.read_at(&mut buf, 10)?;
+    ///     println!("read {} bytes: {:?}", num_bytes_read, buf);
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "file_offset", since = "1.15.0")]
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
@@ -78,18 +78,18 @@ pub trait FileExt {
     ///
     /// # Examples
     ///
-    /// ```
-    /// use std::os::unix::prelude::FileExt;
+    /// ```no_run
     /// use std::fs::File;
+    /// use std::io;
+    /// use std::os::unix::prelude::FileExt;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let file = File::open("foo.txt")?;
+    /// fn main() -> io::Result<()> {
+    ///     let file = File::open("foo.txt")?;
     ///
-    /// // We now write at the offset 10.
-    /// file.write_at(b"sushi", 10)?;
-    /// # Ok(())
-    /// # }
+    ///     // We now write at the offset 10.
+    ///     file.write_at(b"sushi", 10)?;
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "file_offset", since = "1.15.0")]
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize>;
@@ -105,7 +105,9 @@ impl FileExt for fs::File {
     }
 }
 
-/// Unix-specific extensions to `Permissions`
+/// Unix-specific extensions to [`fs::Permissions`].
+///
+/// [`fs::Permissions`]: ../../../../std/fs/struct.Permissions.html
 #[stable(feature = "fs_ext", since = "1.1.0")]
 pub trait PermissionsExt {
     /// Returns the underlying raw `st_mode` bits that contain the standard
@@ -117,13 +119,13 @@ pub trait PermissionsExt {
     /// use std::fs::File;
     /// use std::os::unix::fs::PermissionsExt;
     ///
-    /// # fn run() -> std::io::Result<()> {
-    /// let f = File::create("foo.txt")?;
-    /// let metadata = f.metadata()?;
-    /// let permissions = metadata.permissions();
+    /// fn main() -> std::io::Result<()> {
+    ///     let f = File::create("foo.txt")?;
+    ///     let metadata = f.metadata()?;
+    ///     let permissions = metadata.permissions();
     ///
-    /// println!("permissions: {}", permissions.mode());
-    /// # Ok(()) }
+    ///     println!("permissions: {}", permissions.mode());
+    ///     Ok(()) }
     /// ```
     #[stable(feature = "fs_ext", since = "1.1.0")]
     fn mode(&self) -> u32;
@@ -136,14 +138,14 @@ pub trait PermissionsExt {
     /// use std::fs::File;
     /// use std::os::unix::fs::PermissionsExt;
     ///
-    /// # fn run() -> std::io::Result<()> {
-    /// let f = File::create("foo.txt")?;
-    /// let metadata = f.metadata()?;
-    /// let mut permissions = metadata.permissions();
+    /// fn main() -> std::io::Result<()> {
+    ///     let f = File::create("foo.txt")?;
+    ///     let metadata = f.metadata()?;
+    ///     let mut permissions = metadata.permissions();
     ///
-    /// permissions.set_mode(0o644); // Read/write for owner and read for others.
-    /// assert_eq!(permissions.mode(), 0o644);
-    /// # Ok(()) }
+    ///     permissions.set_mode(0o644); // Read/write for owner and read for others.
+    ///     assert_eq!(permissions.mode(), 0o644);
+    ///     Ok(()) }
     /// ```
     #[stable(feature = "fs_ext", since = "1.1.0")]
     fn set_mode(&mut self, mode: u32);
@@ -180,7 +182,9 @@ impl PermissionsExt for Permissions {
     }
 }
 
-/// Unix-specific extensions to `OpenOptions`
+/// Unix-specific extensions to [`fs::OpenOptions`].
+///
+/// [`fs::OpenOptions`]: ../../../../std/fs/struct.OpenOptions.html
 #[stable(feature = "fs_ext", since = "1.1.0")]
 pub trait OpenOptionsExt {
     /// Sets the mode bits that a new file will be created with.
@@ -246,13 +250,9 @@ impl OpenOptionsExt for OpenOptions {
     }
 }
 
-// Hm, why are there casts here to the returned type, shouldn't the types always
-// be the same? Right you are! Turns out, however, on android at least the types
-// in the raw `stat` structure are not the same as the types being returned. Who
-// knew!
-//
-// As a result to make sure this compiles for all platforms we do the manual
-// casts and rely on manual lowering to `stat` if the raw type is desired.
+/// Unix-specific extensions to [`fs::Metadata`].
+///
+/// [`fs::Metadata`]: ../../../../std/fs/struct.Metadata.html
 #[stable(feature = "metadata_ext", since = "1.1.0")]
 pub trait MetadataExt {
     /// Returns the ID of the device containing the file.
@@ -260,15 +260,15 @@ pub trait MetadataExt {
     /// # Examples
     ///
     /// ```no_run
+    /// use std::io;
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let dev_id = meta.dev();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let dev_id = meta.dev();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn dev(&self) -> u64;
@@ -279,13 +279,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let inode = meta.ino();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let inode = meta.ino();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn ino(&self) -> u64;
@@ -296,17 +296,17 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let mode = meta.mode();
-    /// let user_has_write_access      = mode & 0o200;
-    /// let user_has_read_write_access = mode & 0o600;
-    /// let group_has_read_access      = mode & 0o040;
-    /// let others_have_exec_access    = mode & 0o001;
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let mode = meta.mode();
+    ///     let user_has_write_access      = mode & 0o200;
+    ///     let user_has_read_write_access = mode & 0o600;
+    ///     let group_has_read_access      = mode & 0o040;
+    ///     let others_have_exec_access    = mode & 0o001;
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn mode(&self) -> u32;
@@ -317,13 +317,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    ///  use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let nb_hard_links = meta.nlink();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let nb_hard_links = meta.nlink();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn nlink(&self) -> u64;
@@ -334,13 +334,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let user_id = meta.uid();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let user_id = meta.uid();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn uid(&self) -> u32;
@@ -351,13 +351,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let group_id = meta.gid();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let group_id = meta.gid();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn gid(&self) -> u32;
@@ -368,13 +368,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let device_id = meta.rdev();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let device_id = meta.rdev();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn rdev(&self) -> u64;
@@ -385,13 +385,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let file_size = meta.size();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let file_size = meta.size();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn size(&self) -> u64;
@@ -402,13 +402,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let last_access_time = meta.atime();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let last_access_time = meta.atime();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn atime(&self) -> i64;
@@ -419,13 +419,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let nano_last_access_time = meta.atime_nsec();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let nano_last_access_time = meta.atime_nsec();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn atime_nsec(&self) -> i64;
@@ -436,13 +436,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let last_modification_time = meta.mtime();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let last_modification_time = meta.mtime();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn mtime(&self) -> i64;
@@ -453,13 +453,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let nano_last_modification_time = meta.mtime_nsec();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let nano_last_modification_time = meta.mtime_nsec();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn mtime_nsec(&self) -> i64;
@@ -470,13 +470,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let last_status_change_time = meta.ctime();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let last_status_change_time = meta.ctime();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn ctime(&self) -> i64;
@@ -487,13 +487,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let nano_last_status_change_time = meta.ctime_nsec();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let nano_last_status_change_time = meta.ctime_nsec();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn ctime_nsec(&self) -> i64;
@@ -504,13 +504,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let blocksize = meta.blksize();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let blocksize = meta.blksize();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn blksize(&self) -> u64;
@@ -523,13 +523,13 @@ pub trait MetadataExt {
     /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::MetadataExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("some_file")?;
-    /// let blocks = meta.blocks();
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("some_file")?;
+    ///     let blocks = meta.blocks();
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "metadata_ext", since = "1.1.0")]
     fn blocks(&self) -> u64;
@@ -555,24 +555,29 @@ impl MetadataExt for fs::Metadata {
     fn blocks(&self) -> u64 { self.st_blocks() }
 }
 
-/// Add support for special unix types (block/char device, fifo and socket).
+/// Unix-specific extensions for [`FileType`].
+///
+/// Adds support for special Unix file types such as block/character devices,
+/// pipes, and sockets.
+///
+/// [`FileType`]: ../../../../std/fs/struct.FileType.html
 #[stable(feature = "file_type_ext", since = "1.5.0")]
 pub trait FileTypeExt {
     /// Returns whether this file type is a block device.
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::FileTypeExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("block_device_file")?;
-    /// let file_type = meta.file_type();
-    /// assert!(file_type.is_block_device());
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("block_device_file")?;
+    ///     let file_type = meta.file_type();
+    ///     assert!(file_type.is_block_device());
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "file_type_ext", since = "1.5.0")]
     fn is_block_device(&self) -> bool;
@@ -580,17 +585,17 @@ pub trait FileTypeExt {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::FileTypeExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("char_device_file")?;
-    /// let file_type = meta.file_type();
-    /// assert!(file_type.is_char_device());
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("char_device_file")?;
+    ///     let file_type = meta.file_type();
+    ///     assert!(file_type.is_char_device());
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "file_type_ext", since = "1.5.0")]
     fn is_char_device(&self) -> bool;
@@ -598,17 +603,17 @@ pub trait FileTypeExt {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::FileTypeExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("fifo_file")?;
-    /// let file_type = meta.file_type();
-    /// assert!(file_type.is_fifo());
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("fifo_file")?;
+    ///     let file_type = meta.file_type();
+    ///     assert!(file_type.is_fifo());
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "file_type_ext", since = "1.5.0")]
     fn is_fifo(&self) -> bool;
@@ -616,17 +621,17 @@ pub trait FileTypeExt {
     ///
     /// # Examples
     ///
-    /// ```
+    /// ```no_run
     /// use std::fs;
     /// use std::os::unix::fs::FileTypeExt;
+    /// use std::io;
     ///
-    /// # use std::io;
-    /// # fn f() -> io::Result<()> {
-    /// let meta = fs::metadata("unix.socket")?;
-    /// let file_type = meta.file_type();
-    /// assert!(file_type.is_socket());
-    /// # Ok(())
-    /// # }
+    /// fn main() -> io::Result<()> {
+    ///     let meta = fs::metadata("unix.socket")?;
+    ///     let file_type = meta.file_type();
+    ///     assert!(file_type.is_socket());
+    ///     Ok(())
+    /// }
     /// ```
     #[stable(feature = "file_type_ext", since = "1.5.0")]
     fn is_socket(&self) -> bool;
@@ -687,13 +692,13 @@ impl DirEntryExt for fs::DirEntry {
 ///
 /// # Examples
 ///
-/// ```
+/// ```no_run
 /// use std::os::unix::fs;
 ///
-/// # fn foo() -> std::io::Result<()> {
-/// fs::symlink("a.txt", "b.txt")?;
-/// # Ok(())
-/// # }
+/// fn main() -> std::io::Result<()> {
+///     fs::symlink("a.txt", "b.txt")?;
+///     Ok(())
+/// }
 /// ```
 #[stable(feature = "symlink", since = "1.1.0")]
 pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> io::Result<()>
@@ -701,10 +706,10 @@ pub fn symlink<P: AsRef<Path>, Q: AsRef<Path>>(src: P, dst: Q) -> io::Result<()>
     sys::fs::symlink(src.as_ref(), dst.as_ref())
 }
 
-#[stable(feature = "dir_builder", since = "1.6.0")]
-/// An extension trait for [`fs::DirBuilder`] for unix-specific options.
+/// Unix-specific extensions to [`fs::DirBuilder`].
 ///
 /// [`fs::DirBuilder`]: ../../../../std/fs/struct.DirBuilder.html
+#[stable(feature = "dir_builder", since = "1.6.0")]
 pub trait DirBuilderExt {
     /// Sets the mode to create new directories with. This option defaults to
     /// 0o777.
