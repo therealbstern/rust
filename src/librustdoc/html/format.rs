@@ -1,13 +1,3 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! HTML formatting module
 //!
 //! This module contains a large number of `fmt::Display` implementations for
@@ -16,7 +6,6 @@
 //! them in the future to instead emit any format desired.
 
 use std::fmt;
-use std::iter::repeat;
 
 use rustc::hir::def_id::DefId;
 use rustc_target::spec::abi::Abi;
@@ -207,7 +196,7 @@ impl<'a> fmt::Display for WhereClause<'a> {
                             clause.push_str(" + ");
                         }
 
-                        clause.push_str(&format!("{}", lifetime));
+                        clause.push_str(&lifetime.to_string());
                     }
                 }
                 &clean::WherePredicate::EqPredicate { ref lhs, ref rhs } => {
@@ -235,10 +224,9 @@ impl<'a> fmt::Display for WhereClause<'a> {
 
         if !f.alternate() {
             clause.push_str("</span>");
-            let padding = repeat("&nbsp;").take(indent + 4).collect::<String>();
+            let padding = "&nbsp;".repeat(indent + 4);
             clause = clause.replace("<br>", &format!("<br>{}", padding));
-            clause.insert_str(0, &repeat("&nbsp;").take(indent.saturating_sub(1))
-                                                  .collect::<String>());
+            clause.insert_str(0, &"&nbsp;".repeat(indent.saturating_sub(1)));
             if !end_newline {
                 clause.insert_str(0, "<br>");
             }
@@ -409,13 +397,13 @@ pub fn href(did: DefId) -> Option<(String, ItemType, Vec<String>)> {
     let loc = CURRENT_LOCATION_KEY.with(|l| l.borrow().clone());
     let (fqp, shortty, mut url) = match cache.paths.get(&did) {
         Some(&(ref fqp, shortty)) => {
-            (fqp, shortty, repeat("../").take(loc.len()).collect())
+            (fqp, shortty, "../".repeat(loc.len()))
         }
         None => {
             let &(ref fqp, shortty) = cache.external_paths.get(&did)?;
             (fqp, shortty, match cache.extern_locations[&did.krate] {
                 (.., render::Remote(ref s)) => s.to_string(),
-                (.., render::Local) => repeat("../").take(loc.len()).collect(),
+                (.., render::Local) => "../".repeat(loc.len()),
                 (.., render::Unknown) => return None,
             })
         }
@@ -460,10 +448,10 @@ fn resolved_path(w: &mut fmt::Formatter, did: DefId, path: &clean::Path,
                             fqp[..fqp.len() - 1].join("::"),
                             HRef::new(did, fqp.last().unwrap()))
                 }
-                None => format!("{}", HRef::new(did, &last.name)),
+                None => HRef::new(did, &last.name).to_string(),
             }
         } else {
-            format!("{}", HRef::new(did, &last.name))
+            HRef::new(did, &last.name).to_string()
         };
         write!(w, "{}{}", path, last.args)?;
     }
@@ -481,7 +469,7 @@ fn primitive_link(f: &mut fmt::Formatter,
                 let len = CURRENT_LOCATION_KEY.with(|s| s.borrow().len());
                 let len = if len == 0 {0} else {len - 1};
                 write!(f, "<a class=\"primitive\" href=\"{}primitive.{}.html\">",
-                       repeat("../").take(len).collect::<String>(),
+                       "../".repeat(len),
                        prim.to_url_str())?;
                 needs_termination = true;
             }
@@ -492,7 +480,7 @@ fn primitive_link(f: &mut fmt::Formatter,
                     }
                     (ref cname, _, render::Local) => {
                         let len = CURRENT_LOCATION_KEY.with(|s| s.borrow().len());
-                        Some((cname, repeat("../").take(len).collect::<String>()))
+                        Some((cname, "../".repeat(len)))
                     }
                     (.., render::Unknown) => None,
                 };
@@ -555,6 +543,9 @@ fn fmt_type(t: &clean::Type, f: &mut fmt::Formatter, use_absolute: bool) -> fmt:
             f.write_str(name)
         }
         clean::ResolvedPath{ did, ref typarams, ref path, is_generic } => {
+            if typarams.is_some() {
+                f.write_str("dyn ")?;
+            }
             // Paths like T::Output and Self::Output should be rendered with all segments
             resolved_path(f, did, path, is_generic, use_absolute)?;
             tybounds(f, typarams)
@@ -622,7 +613,7 @@ fn fmt_type(t: &clean::Type, f: &mut fmt::Formatter, use_absolute: bool) -> fmt:
         clean::BorrowedRef{ lifetime: ref l, mutability, type_: ref ty} => {
             let lt = match *l {
                 Some(ref l) => format!("{} ", *l),
-                _ => "".to_string(),
+                _ => String::new(),
             };
             let m = MutableSpace(mutability);
             let amp = if f.alternate() {
@@ -769,7 +760,11 @@ fn fmt_impl(i: &clean::Impl,
         write!(f, " for ")?;
     }
 
-    fmt_type(&i.for_, f, use_absolute)?;
+    if let Some(ref ty) = i.blanket_impl {
+        fmt_type(ty, f, use_absolute)?;
+    } else {
+        fmt_type(&i.for_, f, use_absolute)?;
+    }
 
     fmt::Display::fmt(&WhereClause { gens: &i.generics, indent: 0, end_newline: true }, f)?;
     Ok(())
@@ -881,7 +876,7 @@ impl<'a> fmt::Display for Method<'a> {
                 if f.alternate() {
                     args.push_str(&format!("{:#}", input.type_));
                 } else {
-                    args.push_str(&format!("{}", input.type_));
+                    args.push_str(&input.type_.to_string());
                 }
                 args_plain.push_str(&format!("{:#}", input.type_));
             }
@@ -900,18 +895,18 @@ impl<'a> fmt::Display for Method<'a> {
         let arrow = if f.alternate() {
             format!("{:#}", decl.output)
         } else {
-            format!("{}", decl.output)
+            decl.output.to_string()
         };
 
-        let pad = repeat(" ").take(name_len).collect::<String>();
+        let pad = " ".repeat(name_len);
         let plain = format!("{pad}({args}){arrow}",
                         pad = pad,
                         args = args_plain,
                         arrow = arrow_plain);
 
         let output = if plain.len() > 80 {
-            let full_pad = format!("<br>{}", repeat("&nbsp;").take(indent + 4).collect::<String>());
-            let close_pad = format!("<br>{}", repeat("&nbsp;").take(indent).collect::<String>());
+            let full_pad = format!("<br>{}", "&nbsp;".repeat(indent + 4));
+            let close_pad = format!("<br>{}", "&nbsp;".repeat(indent));
             format!("({args}{close}){arrow}",
                     args = args.replace("<br>", &full_pad),
                     close = close_pad,

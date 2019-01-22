@@ -1,13 +1,3 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Some lints that are built in to the compiler.
 //!
 //! These are the built-in lints that are emitted direct in the main
@@ -18,7 +8,7 @@ use errors::{Applicability, DiagnosticBuilder};
 use lint::{LintPass, LateLintPass, LintArray};
 use session::Session;
 use syntax::ast;
-use syntax::codemap::Span;
+use syntax::source_map::Span;
 
 declare_lint! {
     pub EXCEEDING_BITSHIFTS,
@@ -77,7 +67,8 @@ declare_lint! {
 declare_lint! {
     pub UNREACHABLE_CODE,
     Warn,
-    "detects unreachable code paths"
+    "detects unreachable code paths",
+    report_in_external_macro: true
 }
 
 declare_lint! {
@@ -101,7 +92,7 @@ declare_lint! {
 declare_lint! {
     pub UNUSED_FEATURES,
     Warn,
-    "unused or unknown features found in crate-level #[feature] directives"
+    "unused features found in crate-level #[feature] directives"
 }
 
 declare_lint! {
@@ -173,7 +164,7 @@ declare_lint! {
 declare_lint! {
     pub LEGACY_DIRECTORY_OWNERSHIP,
     Deny,
-    "non-inline, non-`#[path]` modules (e.g. `mod foo;`) were erroneously allowed in some files \
+    "non-inline, non-`#[path]` modules (e.g., `mod foo;`) were erroneously allowed in some files \
      not named `mod.rs`"
 }
 
@@ -208,15 +199,16 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub BAD_REPR,
-    Warn,
-    "detects incorrect use of `repr` attribute"
+    pub ORDER_DEPENDENT_TRAIT_OBJECTS,
+    Deny,
+    "trait-object types were treated as different depending on marker-trait order"
 }
 
 declare_lint! {
     pub DEPRECATED,
     Warn,
-    "detects use of deprecated items"
+    "detects use of deprecated items",
+    report_in_external_macro: true
 }
 
 declare_lint! {
@@ -229,6 +221,12 @@ declare_lint! {
     pub UNUSED_MUT,
     Warn,
     "detect mut variables which don't need to be mutable"
+}
+
+declare_lint! {
+    pub UNCONDITIONAL_RECURSION,
+    Warn,
+    "functions that cannot return without calling themselves"
 }
 
 declare_lint! {
@@ -252,7 +250,7 @@ declare_lint! {
 declare_lint! {
     pub ELIDED_LIFETIMES_IN_PATHS,
     Allow,
-    "hidden lifetime parameters are deprecated, try `Foo<'_>`"
+    "hidden lifetime parameters in types are deprecated"
 }
 
 declare_lint! {
@@ -281,15 +279,15 @@ declare_lint! {
 }
 
 declare_lint! {
-    pub UNUSED_LABELS,
-    Allow,
-    "detects labels that are never used"
+    pub IRREFUTABLE_LET_PATTERNS,
+    Warn,
+    "detects irrefutable patterns in if-let and while-let statements"
 }
 
 declare_lint! {
-    pub DUPLICATE_ASSOCIATED_TYPE_BINDINGS,
-    Warn,
-    "warns about duplicate associated type bindings in generics"
+    pub UNUSED_LABELS,
+    Allow,
+    "detects labels that are never used"
 }
 
 declare_lint! {
@@ -301,7 +299,19 @@ declare_lint! {
 declare_lint! {
     pub INTRA_DOC_LINK_RESOLUTION_FAILURE,
     Warn,
-    "warn about documentation intra links resolution failure"
+    "failures in resolving intra-doc link targets"
+}
+
+declare_lint! {
+    pub MISSING_DOC_CODE_EXAMPLES,
+    Allow,
+    "detects publicly-exported items without code samples in their documentation"
+}
+
+declare_lint! {
+    pub PRIVATE_DOC_TESTS,
+    Allow,
+    "detects code samples in docs of private items not documented by rustdoc"
 }
 
 declare_lint! {
@@ -310,8 +320,62 @@ declare_lint! {
     "checks the object safety of where clauses"
 }
 
+declare_lint! {
+    pub PROC_MACRO_DERIVE_RESOLUTION_FALLBACK,
+    Warn,
+    "detects proc macro derives using inaccessible names from parent modules"
+}
+
+declare_lint! {
+    pub MACRO_USE_EXTERN_CRATE,
+    Allow,
+    "the `#[macro_use]` attribute is now deprecated in favor of using macros \
+     via the module system"
+}
+
+declare_lint! {
+    pub MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
+    Deny,
+    "macro-expanded `macro_export` macros from the current crate \
+     cannot be referred to by absolute paths"
+}
+
+declare_lint! {
+    pub EXPLICIT_OUTLIVES_REQUIREMENTS,
+    Allow,
+    "outlives requirements can be inferred"
+}
+
+/// Some lints that are buffered from `libsyntax`. See `syntax::early_buffered_lints`.
+pub mod parser {
+    declare_lint! {
+        pub QUESTION_MARK_MACRO_SEP,
+        Allow,
+        "detects the use of `?` as a macro separator"
+    }
+
+    declare_lint! {
+        pub ILL_FORMED_ATTRIBUTE_INPUT,
+        Warn,
+        "ill-formed attribute inputs that were previously accepted and used in practice"
+    }
+}
+
+declare_lint! {
+    pub DEPRECATED_IN_FUTURE,
+    Allow,
+    "detects use of items that will be deprecated in a future version",
+    report_in_external_macro: true
+}
+
+declare_lint! {
+    pub AMBIGUOUS_ASSOCIATED_ITEMS,
+    Warn,
+    "ambiguous associated items"
+}
+
 /// Does nothing as a lint pass, but registers some `Lint`s
-/// which are used by other parts of the compiler.
+/// that are used by other parts of the compiler.
 #[derive(Copy, Clone)]
 pub struct HardwiredLints;
 
@@ -350,9 +414,11 @@ impl LintPass for HardwiredLints {
             PARENTHESIZED_PARAMS_IN_TYPES_AND_MODULES,
             LATE_BOUND_LIFETIME_ARGUMENTS,
             INCOHERENT_FUNDAMENTAL_IMPLS,
+            ORDER_DEPENDENT_TRAIT_OBJECTS,
             DEPRECATED,
             UNUSED_UNSAFE,
             UNUSED_MUT,
+            UNCONDITIONAL_RECURSION,
             SINGLE_USE_LIFETIMES,
             UNUSED_LIFETIMES,
             UNUSED_LABELS,
@@ -361,10 +427,19 @@ impl LintPass for HardwiredLints {
             BARE_TRAIT_OBJECTS,
             ABSOLUTE_PATHS_NOT_STARTING_WITH_CRATE,
             UNSTABLE_NAME_COLLISIONS,
-            DUPLICATE_ASSOCIATED_TYPE_BINDINGS,
+            IRREFUTABLE_LET_PATTERNS,
             DUPLICATE_MACRO_EXPORTS,
             INTRA_DOC_LINK_RESOLUTION_FAILURE,
+            MISSING_DOC_CODE_EXAMPLES,
+            PRIVATE_DOC_TESTS,
             WHERE_CLAUSES_OBJECT_SAFETY,
+            PROC_MACRO_DERIVE_RESOLUTION_FALLBACK,
+            MACRO_USE_EXTERN_CRATE,
+            MACRO_EXPANDED_MACRO_EXPORTS_ACCESSED_BY_ABSOLUTE_PATHS,
+            parser::QUESTION_MARK_MACRO_SEP,
+            parser::ILL_FORMED_ATTRIBUTE_INPUT,
+            DEPRECATED_IN_FUTURE,
+            AMBIGUOUS_ASSOCIATED_ITEMS,
         )
     }
 }
@@ -377,27 +452,31 @@ pub enum BuiltinLintDiagnostics {
     BareTraitObject(Span, /* is_global */ bool),
     AbsPathWithModule(Span),
     DuplicatedMacroExports(ast::Ident, Span, Span),
+    ProcMacroDeriveResolutionFallback(Span),
+    MacroExpandedMacroExportsAccessedByAbsolutePaths(Span),
+    ElidedLifetimesInPaths(usize, Span, bool, Span, String),
+    UnknownCrateTypes(Span, String, String),
 }
 
 impl BuiltinLintDiagnostics {
-    pub fn run(self, sess: &Session, db: &mut DiagnosticBuilder) {
+    pub fn run(self, sess: &Session, db: &mut DiagnosticBuilder<'_>) {
         match self {
             BuiltinLintDiagnostics::Normal => (),
             BuiltinLintDiagnostics::BareTraitObject(span, is_global) => {
-                let (sugg, app) = match sess.codemap().span_to_snippet(span) {
+                let (sugg, app) = match sess.source_map().span_to_snippet(span) {
                     Ok(ref s) if is_global => (format!("dyn ({})", s),
                                                Applicability::MachineApplicable),
                     Ok(s) => (format!("dyn {}", s), Applicability::MachineApplicable),
-                    Err(_) => (format!("dyn <type>"), Applicability::HasPlaceholders)
+                    Err(_) => ("dyn <type>".to_string(), Applicability::HasPlaceholders)
                 };
                 db.span_suggestion_with_applicability(span, "use `dyn`", sugg, app);
             }
             BuiltinLintDiagnostics::AbsPathWithModule(span) => {
-                let (sugg, app) = match sess.codemap().span_to_snippet(span) {
+                let (sugg, app) = match sess.source_map().span_to_snippet(span) {
                     Ok(ref s) => {
                         // FIXME(Manishearth) ideally the emitting code
                         // can tell us whether or not this is global
-                        let opt_colon = if s.trim_left().starts_with("::") {
+                        let opt_colon = if s.trim_start().starts_with("::") {
                             ""
                         } else {
                             "::"
@@ -405,13 +484,63 @@ impl BuiltinLintDiagnostics {
 
                         (format!("crate{}{}", opt_colon, s), Applicability::MachineApplicable)
                     }
-                    Err(_) => (format!("crate::<path>"), Applicability::HasPlaceholders)
+                    Err(_) => ("crate::<path>".to_string(), Applicability::HasPlaceholders)
                 };
                 db.span_suggestion_with_applicability(span, "use `crate`", sugg, app);
             }
             BuiltinLintDiagnostics::DuplicatedMacroExports(ident, earlier_span, later_span) => {
                 db.span_label(later_span, format!("`{}` already exported", ident));
                 db.span_note(earlier_span, "previous macro export is now shadowed");
+            }
+            BuiltinLintDiagnostics::ProcMacroDeriveResolutionFallback(span) => {
+                db.span_label(span, "names from parent modules are not \
+                                     accessible without an explicit import");
+            }
+            BuiltinLintDiagnostics::MacroExpandedMacroExportsAccessedByAbsolutePaths(span_def) => {
+                db.span_note(span_def, "the macro is defined here");
+            }
+            BuiltinLintDiagnostics::ElidedLifetimesInPaths(
+                n, path_span, incl_angl_brckt, insertion_span, anon_lts
+            ) => {
+                let (replace_span, suggestion) = if incl_angl_brckt {
+                    (insertion_span, anon_lts)
+                } else {
+                    // When possible, prefer a suggestion that replaces the whole
+                    // `Path<T>` expression with `Path<'_, T>`, rather than inserting `'_, `
+                    // at a point (which makes for an ugly/confusing label)
+                    if let Ok(snippet) = sess.source_map().span_to_snippet(path_span) {
+                        // But our spans can get out of whack due to macros; if the place we think
+                        // we want to insert `'_` isn't even within the path expression's span, we
+                        // should bail out of making any suggestion rather than panicking on a
+                        // subtract-with-overflow or string-slice-out-out-bounds (!)
+                        // FIXME: can we do better?
+                        if insertion_span.lo().0 < path_span.lo().0 {
+                            return;
+                        }
+                        let insertion_index = (insertion_span.lo().0 - path_span.lo().0) as usize;
+                        if insertion_index > snippet.len() {
+                            return;
+                        }
+                        let (before, after) = snippet.split_at(insertion_index);
+                        (path_span, format!("{}{}{}", before, anon_lts, after))
+                    } else {
+                        (insertion_span, anon_lts)
+                    }
+                };
+                db.span_suggestion_with_applicability(
+                    replace_span,
+                    &format!("indicate the anonymous lifetime{}", if n >= 2 { "s" } else { "" }),
+                    suggestion,
+                    Applicability::MachineApplicable
+                );
+            }
+            BuiltinLintDiagnostics::UnknownCrateTypes(span, note, sugg) => {
+                db.span_suggestion_with_applicability(
+                    span,
+                    &note,
+                    sugg,
+                    Applicability::MaybeIncorrect
+                );
             }
         }
     }

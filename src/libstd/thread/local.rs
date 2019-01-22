@@ -1,19 +1,10 @@
-// Copyright 2014-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Thread local storage
 
 #![unstable(feature = "thread_local_internals", issue = "0")]
 
 use cell::UnsafeCell;
 use fmt;
+use hint;
 use mem;
 
 /// A thread local storage key which owns its contents.
@@ -78,9 +69,6 @@ use mem;
 ///    destroyed, but not all platforms have this guard. Those platforms that do
 ///    not guard typically have a synthetic limit after which point no more
 ///    destructors are run.
-/// 3. On macOS, initializing TLS during destruction of other TLS slots can
-///    sometimes cancel *all* destructors for the current thread, whether or not
-///    the slots have already had their destructors run or not.
 ///
 /// [`with`]: ../../std/thread/struct.LocalKey.html#method.with
 /// [`thread_local!`]: ../../std/macro.thread_local.html
@@ -145,13 +133,13 @@ macro_rules! thread_local {
 
     // process multiple declarations
     ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr; $($rest:tt)*) => (
-        __thread_local_inner!($(#[$attr])* $vis $name, $t, $init);
-        thread_local!($($rest)*);
+        $crate::__thread_local_inner!($(#[$attr])* $vis $name, $t, $init);
+        $crate::thread_local!($($rest)*);
     );
 
     // handle a single declaration
     ($(#[$attr:meta])* $vis:vis static $name:ident: $t:ty = $init:expr) => (
-        __thread_local_inner!($(#[$attr])* $vis $name, $t, $init);
+        $crate::__thread_local_inner!($(#[$attr])* $vis $name, $t, $init);
     );
 }
 
@@ -172,16 +160,22 @@ macro_rules! __thread_local_inner {
                 &'static $crate::cell::UnsafeCell<
                     $crate::option::Option<$t>>>
             {
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
                 static __KEY: $crate::thread::__StaticLocalKeyInner<$t> =
                     $crate::thread::__StaticLocalKeyInner::new();
 
                 #[thread_local]
-                #[cfg(all(target_thread_local, not(target_arch = "wasm32")))]
+                #[cfg(all(
+                    target_thread_local,
+                    not(all(target_arch = "wasm32", not(target_feature = "atomics"))),
+                ))]
                 static __KEY: $crate::thread::__FastLocalKeyInner<$t> =
                     $crate::thread::__FastLocalKeyInner::new();
 
-                #[cfg(all(not(target_thread_local), not(target_arch = "wasm32")))]
+                #[cfg(all(
+                    not(target_thread_local),
+                    not(all(target_arch = "wasm32", not(target_feature = "atomics"))),
+                ))]
                 static __KEY: $crate::thread::__OsLocalKeyInner<$t> =
                     $crate::thread::__OsLocalKeyInner::new();
 
@@ -195,7 +189,7 @@ macro_rules! __thread_local_inner {
     };
     ($(#[$attr:meta])* $vis:vis $name:ident, $t:ty, $init:expr) => {
         $(#[$attr])* $vis const $name: $crate::thread::LocalKey<$t> =
-            __thread_local_inner!(@key $(#[$attr])* $vis $name, $t, $init);
+            $crate::__thread_local_inner!(@key $(#[$attr])* $vis $name, $t, $init);
     }
 }
 
@@ -262,21 +256,29 @@ impl<T: 'static> LocalKey<T> {
         //      ptr::write(ptr, Some(value))
         //
         // Due to this pattern it's possible for the destructor of the value in
-        // `ptr` (e.g. if this is being recursively initialized) to re-access
+        // `ptr` (e.g., if this is being recursively initialized) to re-access
         // TLS, in which case there will be a `&` and `&mut` pointer to the same
         // value (an aliasing violation). To avoid setting the "I'm running a
         // destructor" flag we just use `mem::replace` which should sequence the
         // operations a little differently and make this safe to call.
         mem::replace(&mut *ptr, Some(value));
 
-        (*ptr).as_ref().unwrap()
+        // After storing `Some` we want to get a reference to the contents of
+        // what we just stored. While we could use `unwrap` here and it should
+        // always work it empirically doesn't seem to always get optimized away,
+        // which means that using something like `try_with` can pull in
+        // panicking code and cause a large size bloat.
+        match *ptr {
+            Some(ref x) => x,
+            None => hint::unreachable_unchecked(),
+        }
     }
 
     /// Acquires a reference to the value in this TLS key.
     ///
     /// This will lazily initialize the value if this thread has not referenced
     /// this key yet. If the key has been destroyed (which may happen if this is called
-    /// in a destructor), this function will return a `ThreadLocalError`.
+    /// in a destructor), this function will return an [`AccessError`](struct.AccessError.html).
     ///
     /// # Panics
     ///
@@ -302,7 +304,7 @@ impl<T: 'static> LocalKey<T> {
 /// On some platforms like wasm32 there's no threads, so no need to generate
 /// thread locals and we can instead just use plain statics!
 #[doc(hidden)]
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", not(target_feature = "atomics")))]
 pub mod statik {
     use cell::UnsafeCell;
     use fmt;
@@ -599,11 +601,8 @@ mod tests {
     }
 
     // Note that this test will deadlock if TLS destructors aren't run (this
-    // requires the destructor to be run to pass the test). macOS has a known bug
-    // where dtors-in-dtors may cancel other destructors, so we just ignore this
-    // test on macOS.
+    // requires the destructor to be run to pass the test).
     #[test]
-    #[cfg_attr(target_os = "macos", ignore)]
     fn dtors_in_dtors_in_dtors() {
         struct S1(Sender<()>);
         thread_local!(static K1: UnsafeCell<Option<S1>> = UnsafeCell::new(None));

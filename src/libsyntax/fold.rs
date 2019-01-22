@@ -1,13 +1,3 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! A Folder represents an AST->AST fold; it accepts an AST piece,
 //! and returns a piece of the same type. So, for instance, macro
 //! expansion is a Folder that walks over an AST and produces another
@@ -21,15 +11,27 @@
 use ast::*;
 use ast;
 use syntax_pos::Span;
-use codemap::{Spanned, respan};
+use source_map::{Spanned, respan};
 use parse::token::{self, Token};
 use ptr::P;
+use smallvec::{Array, SmallVec};
 use symbol::keywords;
+use ThinVec;
 use tokenstream::*;
-use util::small_vector::SmallVector;
 use util::move_map::MoveMap;
 
 use rustc_data_structures::sync::Lrc;
+
+pub trait ExpectOne<A: Array> {
+    fn expect_one(self, err: &'static str) -> A::Item;
+}
+
+impl<A: Array> ExpectOne<A> for SmallVec<A> {
+    fn expect_one(self, err: &'static str) -> A::Item {
+        assert!(self.len() == 1, err);
+        self.into_iter().next().unwrap()
+    }
+}
 
 pub trait Folder : Sized {
     // Any additions to this trait should happen in form
@@ -60,7 +62,7 @@ pub trait Folder : Sized {
         noop_fold_use_tree(use_tree, self)
     }
 
-    fn fold_foreign_item(&mut self, ni: ForeignItem) -> SmallVector<ForeignItem> {
+    fn fold_foreign_item(&mut self, ni: ForeignItem) -> SmallVec<[ForeignItem; 1]> {
         noop_fold_foreign_item(ni, self)
     }
 
@@ -68,7 +70,7 @@ pub trait Folder : Sized {
         noop_fold_foreign_item_simple(ni, self)
     }
 
-    fn fold_item(&mut self, i: P<Item>) -> SmallVector<P<Item>> {
+    fn fold_item(&mut self, i: P<Item>) -> SmallVec<[P<Item>; 1]> {
         noop_fold_item(i, self)
     }
 
@@ -88,11 +90,11 @@ pub trait Folder : Sized {
         noop_fold_item_kind(i, self)
     }
 
-    fn fold_trait_item(&mut self, i: TraitItem) -> SmallVector<TraitItem> {
+    fn fold_trait_item(&mut self, i: TraitItem) -> SmallVec<[TraitItem; 1]> {
         noop_fold_trait_item(i, self)
     }
 
-    fn fold_impl_item(&mut self, i: ImplItem) -> SmallVector<ImplItem> {
+    fn fold_impl_item(&mut self, i: ImplItem) -> SmallVec<[ImplItem; 1]> {
         noop_fold_impl_item(i, self)
     }
 
@@ -100,16 +102,24 @@ pub trait Folder : Sized {
         noop_fold_fn_decl(d, self)
     }
 
+    fn fold_asyncness(&mut self, a: IsAsync) -> IsAsync {
+        noop_fold_asyncness(a, self)
+    }
+
     fn fold_block(&mut self, b: P<Block>) -> P<Block> {
         noop_fold_block(b, self)
     }
 
-    fn fold_stmt(&mut self, s: Stmt) -> SmallVector<Stmt> {
+    fn fold_stmt(&mut self, s: Stmt) -> SmallVec<[Stmt; 1]> {
         noop_fold_stmt(s, self)
     }
 
     fn fold_arm(&mut self, a: Arm) -> Arm {
         noop_fold_arm(a, self)
+    }
+
+    fn fold_guard(&mut self, g: Guard) -> Guard {
+        noop_fold_guard(g, self)
     }
 
     fn fold_pat(&mut self, p: P<Pat>) -> P<Pat> {
@@ -209,7 +219,7 @@ pub trait Folder : Sized {
 
     fn fold_mac(&mut self, _mac: Mac) -> Mac {
         panic!("fold_mac disabled by default");
-        // NB: see note about macros above.
+        // N.B., see note about macros above.
         // if you really want a folder that
         // works on macros, use this
         // definition in your trait impl:
@@ -348,8 +358,14 @@ pub fn noop_fold_arm<T: Folder>(Arm {attrs, pats, guard, body}: Arm,
     Arm {
         attrs: fold_attrs(attrs, fld),
         pats: pats.move_map(|x| fld.fold_pat(x)),
-        guard: guard.map(|x| fld.fold_expr(x)),
+        guard: guard.map(|x| fld.fold_guard(x)),
         body: fld.fold_expr(body),
+    }
+}
+
+pub fn noop_fold_guard<T: Folder>(g: Guard, fld: &mut T) -> Guard {
+    match g {
+        Guard::If(e) => Guard::If(fld.fold_expr(e)),
     }
 }
 
@@ -396,8 +412,8 @@ pub fn noop_fold_ty<T: Folder>(t: P<Ty>, fld: &mut T) -> P<Ty> {
             TyKind::TraitObject(bounds, syntax) => {
                 TyKind::TraitObject(bounds.move_map(|b| fld.fold_param_bound(b)), syntax)
             }
-            TyKind::ImplTrait(bounds) => {
-                TyKind::ImplTrait(bounds.move_map(|b| fld.fold_param_bound(b)))
+            TyKind::ImplTrait(id, bounds) => {
+                TyKind::ImplTrait(fld.new_id(id), bounds.move_map(|b| fld.fold_param_bound(b)))
             }
             TyKind::Mac(mac) => {
                 TyKind::Mac(fld.fold_mac(mac))
@@ -442,8 +458,9 @@ pub fn noop_fold_usize<T: Folder>(i: usize, _: &mut T) -> usize {
 
 pub fn noop_fold_path<T: Folder>(Path { segments, span }: Path, fld: &mut T) -> Path {
     Path {
-        segments: segments.move_map(|PathSegment { ident, args }| PathSegment {
+        segments: segments.move_map(|PathSegment { ident, id, args }| PathSegment {
             ident: fld.fold_ident(ident),
+            id: fld.new_id(id),
             args: args.map(|args| args.map(|args| fld.fold_generic_args(args))),
         }),
         span: fld.new_span(span)
@@ -578,10 +595,11 @@ pub fn noop_fold_tt<T: Folder>(tt: TokenTree, fld: &mut T) -> TokenTree {
     match tt {
         TokenTree::Token(span, tok) =>
             TokenTree::Token(fld.new_span(span), fld.fold_token(tok)),
-        TokenTree::Delimited(span, delimed) => TokenTree::Delimited(fld.new_span(span), Delimited {
-            tts: fld.fold_tts(delimed.stream()).into(),
-            delim: delimed.delim,
-        }),
+        TokenTree::Delimited(span, delim, tts) => TokenTree::Delimited(
+            DelimSpan::from_pair(fld.new_span(span.open), fld.new_span(span.close)),
+            delim,
+            fld.fold_tts(tts).into(),
+        ),
     }
 }
 
@@ -607,7 +625,7 @@ pub fn noop_fold_token<T: Folder>(t: token::Token, fld: &mut T) -> token::Token 
 
 /// apply folder to elements of interpolated nodes
 //
-// NB: this can occur only when applying a fold to partially expanded code, where
+// N.B., this can occur only when applying a fold to partially expanded code, where
 // parsed pieces have gotten implanted ito *other* macro invocations. This is relevant
 // for macro hygiene, but possibly not elsewhere.
 //
@@ -666,6 +684,16 @@ pub fn noop_fold_interpolated<T: Folder>(nt: token::Nonterminal, fld: &mut T)
             token::NtForeignItem(fld.fold_foreign_item(ni)
                                  // see reasoning above
                                  .expect_one("expected fold to produce exactly one item")),
+    }
+}
+
+pub fn noop_fold_asyncness<T: Folder>(asyncness: IsAsync, fld: &mut T) -> IsAsync {
+    match asyncness {
+        IsAsync::Async { closure_id, return_impl_trait_id } => IsAsync::Async {
+            closure_id: fld.new_id(closure_id),
+            return_impl_trait_id: fld.new_id(return_impl_trait_id),
+        },
+        IsAsync::NotAsync => IsAsync::NotAsync,
     }
 }
 
@@ -864,12 +892,11 @@ fn noop_fold_bounds<T: Folder>(bounds: GenericBounds, folder: &mut T)
 }
 
 pub fn noop_fold_block<T: Folder>(b: P<Block>, folder: &mut T) -> P<Block> {
-    b.map(|Block {id, stmts, rules, span, recovered}| Block {
+    b.map(|Block {id, stmts, rules, span}| Block {
         id: folder.new_id(id),
         stmts: stmts.move_flat_map(|s| folder.fold_stmt(s).into_iter()),
         rules,
         span: folder.new_span(span),
-        recovered,
     })
 }
 
@@ -898,10 +925,14 @@ pub fn noop_fold_item_kind<T: Folder>(i: ItemKind, folder: &mut T) -> ItemKind {
         ItemKind::Ty(t, generics) => {
             ItemKind::Ty(folder.fold_ty(t), folder.fold_generics(generics))
         }
+        ItemKind::Existential(bounds, generics) => ItemKind::Existential(
+            folder.fold_bounds(bounds),
+            folder.fold_generics(generics),
+        ),
         ItemKind::Enum(enum_definition, generics) => {
             let generics = folder.fold_generics(generics);
             let variants = enum_definition.variants.move_map(|x| folder.fold_variant(x));
-            ItemKind::Enum(ast::EnumDef { variants: variants }, generics)
+            ItemKind::Enum(ast::EnumDef { variants }, generics)
         }
         ItemKind::Struct(struct_def, generics) => {
             let generics = folder.fold_generics(generics);
@@ -922,7 +953,7 @@ pub fn noop_fold_item_kind<T: Folder>(i: ItemKind, folder: &mut T) -> ItemKind {
             polarity,
             defaultness,
             folder.fold_generics(generics),
-            ifce.map(|trait_ref| folder.fold_trait_ref(trait_ref.clone())),
+            ifce.map(|trait_ref| folder.fold_trait_ref(trait_ref)),
             folder.fold_ty(ty),
             impl_items.move_flat_map(|item| folder.fold_impl_item(item)),
         ),
@@ -941,9 +972,8 @@ pub fn noop_fold_item_kind<T: Folder>(i: ItemKind, folder: &mut T) -> ItemKind {
     }
 }
 
-pub fn noop_fold_trait_item<T: Folder>(i: TraitItem, folder: &mut T)
-                                       -> SmallVector<TraitItem> {
-    SmallVector::one(TraitItem {
+pub fn noop_fold_trait_item<T: Folder>(i: TraitItem, folder: &mut T) -> SmallVec<[TraitItem; 1]> {
+    smallvec![TraitItem {
         id: folder.new_id(i.id),
         ident: folder.fold_ident(i.ident),
         attrs: fold_attrs(i.attrs, folder),
@@ -967,12 +997,11 @@ pub fn noop_fold_trait_item<T: Folder>(i: TraitItem, folder: &mut T)
         },
         span: folder.new_span(i.span),
         tokens: i.tokens,
-    })
+    }]
 }
 
-pub fn noop_fold_impl_item<T: Folder>(i: ImplItem, folder: &mut T)
-                                      -> SmallVector<ImplItem> {
-    SmallVector::one(ImplItem {
+pub fn noop_fold_impl_item<T: Folder>(i: ImplItem, folder: &mut T)-> SmallVec<[ImplItem; 1]> {
+    smallvec![ImplItem {
         id: folder.new_id(i.id),
         vis: folder.fold_vis(i.vis),
         ident: folder.fold_ident(i.ident),
@@ -988,25 +1017,26 @@ pub fn noop_fold_impl_item<T: Folder>(i: ImplItem, folder: &mut T)
                                folder.fold_block(body))
             }
             ast::ImplItemKind::Type(ty) => ast::ImplItemKind::Type(folder.fold_ty(ty)),
+            ast::ImplItemKind::Existential(bounds) => {
+                ast::ImplItemKind::Existential(folder.fold_bounds(bounds))
+            },
             ast::ImplItemKind::Macro(mac) => ast::ImplItemKind::Macro(folder.fold_mac(mac))
         },
         span: folder.new_span(i.span),
         tokens: i.tokens,
-    })
+    }]
 }
 
 pub fn noop_fold_fn_header<T: Folder>(mut header: FnHeader, folder: &mut T) -> FnHeader {
-    header.asyncness = match header.asyncness {
-        IsAsync::Async(node_id) => IsAsync::Async(folder.new_id(node_id)),
-        IsAsync::NotAsync => IsAsync::NotAsync,
-    };
+    header.asyncness = folder.fold_asyncness(header.asyncness);
     header
 }
 
-pub fn noop_fold_mod<T: Folder>(Mod {inner, items}: Mod, folder: &mut T) -> Mod {
+pub fn noop_fold_mod<T: Folder>(Mod {inner, items, inline}: Mod, folder: &mut T) -> Mod {
     Mod {
         inner: folder.new_span(inner),
         items: items.move_flat_map(|x| folder.fold_item(x)),
+        inline: inline,
     }
 }
 
@@ -1036,6 +1066,7 @@ pub fn noop_fold_crate<T: Folder>(Crate {module, attrs, span}: Crate,
         None => (ast::Mod {
             inner: span,
             items: vec![],
+            inline: true,
         }, vec![], span)
     };
 
@@ -1047,8 +1078,8 @@ pub fn noop_fold_crate<T: Folder>(Crate {module, attrs, span}: Crate,
 }
 
 // fold one item into possibly many items
-pub fn noop_fold_item<T: Folder>(i: P<Item>, folder: &mut T) -> SmallVector<P<Item>> {
-    SmallVector::one(i.map(|i| folder.fold_item_simple(i)))
+pub fn noop_fold_item<T: Folder>(i: P<Item>, folder: &mut T) -> SmallVec<[P<Item>; 1]> {
+    smallvec![i.map(|i| folder.fold_item_simple(i))]
 }
 
 // fold one item into exactly one item
@@ -1069,8 +1100,9 @@ pub fn noop_fold_item_simple<T: Folder>(Item {id, ident, attrs, node, vis, span,
 }
 
 pub fn noop_fold_foreign_item<T: Folder>(ni: ForeignItem, folder: &mut T)
--> SmallVector<ForeignItem> {
-    SmallVector::one(folder.fold_foreign_item_simple(ni))
+    -> SmallVec<[ForeignItem; 1]>
+{
+    smallvec![folder.fold_foreign_item_simple(ni)]
 }
 
 pub fn noop_fold_foreign_item_simple<T: Folder>(ni: ForeignItem, folder: &mut T) -> ForeignItem {
@@ -1137,10 +1169,10 @@ pub fn noop_fold_pat<T: Folder>(p: P<Pat>, folder: &mut T) -> P<Pat> {
             }
             PatKind::Box(inner) => PatKind::Box(folder.fold_pat(inner)),
             PatKind::Ref(inner, mutbl) => PatKind::Ref(folder.fold_pat(inner), mutbl),
-            PatKind::Range(e1, e2, end) => {
+            PatKind::Range(e1, e2, Spanned { span, node: end }) => {
                 PatKind::Range(folder.fold_expr(e1),
                                folder.fold_expr(e2),
-                               folder.fold_range_end(end))
+                               Spanned { span, node: folder.fold_range_end(end) })
             },
             PatKind::Slice(before, slice, after) => {
                 PatKind::Slice(before.move_map(|x| folder.fold_pat(x)),
@@ -1190,6 +1222,7 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                 ExprKind::MethodCall(
                     PathSegment {
                         ident: folder.fold_ident(seg.ident),
+                        id: folder.new_id(seg.id),
                         args: seg.args.map(|args| {
                             args.map(|args| folder.fold_generic_args(args))
                         }),
@@ -1249,12 +1282,8 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                           arms.move_map(|x| folder.fold_arm(x)))
             }
             ExprKind::Closure(capture_clause, asyncness, movability, decl, body, span) => {
-                let asyncness = match asyncness {
-                    IsAsync::Async(node_id) => IsAsync::Async(folder.new_id(node_id)),
-                    IsAsync::NotAsync => IsAsync::NotAsync,
-                };
                 ExprKind::Closure(capture_clause,
-                                  asyncness,
+                                  folder.fold_asyncness(asyncness),
                                   movability,
                                   folder.fold_fn_decl(decl),
                                   folder.fold_expr(body),
@@ -1265,7 +1294,11 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
                                 opt_label.map(|label| folder.fold_label(label)))
             }
             ExprKind::Async(capture_clause, node_id, body) => {
-                ExprKind::Async(capture_clause, folder.new_id(node_id), folder.fold_block(body))
+                ExprKind::Async(
+                    capture_clause,
+                    folder.new_id(node_id),
+                    folder.fold_block(body),
+                )
             }
             ExprKind::Assign(el, er) => {
                 ExprKind::Assign(folder.fold_expr(el), folder.fold_expr(er))
@@ -1332,7 +1365,8 @@ pub fn noop_fold_expr<T: Folder>(Expr {id, node, span, attrs}: Expr, folder: &mu
             }
             ExprKind::Yield(ex) => ExprKind::Yield(ex.map(|x| folder.fold_expr(x))),
             ExprKind::Try(ex) => ExprKind::Try(folder.fold_expr(ex)),
-            ExprKind::Catch(body) => ExprKind::Catch(folder.fold_block(body)),
+            ExprKind::TryBlock(body) => ExprKind::TryBlock(folder.fold_block(body)),
+            ExprKind::Err => ExprKind::Err,
         },
         id: folder.new_id(id),
         span: folder.new_span(span),
@@ -1348,7 +1382,8 @@ pub fn noop_fold_exprs<T: Folder>(es: Vec<P<Expr>>, folder: &mut T) -> Vec<P<Exp
     es.move_flat_map(|e| folder.fold_opt_expr(e))
 }
 
-pub fn noop_fold_stmt<T: Folder>(Stmt {node, span, id}: Stmt, folder: &mut T) -> SmallVector<Stmt> {
+pub fn noop_fold_stmt<T: Folder>(Stmt {node, span, id}: Stmt, folder: &mut T) -> SmallVec<[Stmt; 1]>
+{
     let id = folder.new_id(id);
     let span = folder.new_span(span);
     noop_fold_stmt_kind(node, folder).into_iter().map(|node| {
@@ -1356,9 +1391,9 @@ pub fn noop_fold_stmt<T: Folder>(Stmt {node, span, id}: Stmt, folder: &mut T) ->
     }).collect()
 }
 
-pub fn noop_fold_stmt_kind<T: Folder>(node: StmtKind, folder: &mut T) -> SmallVector<StmtKind> {
+pub fn noop_fold_stmt_kind<T: Folder>(node: StmtKind, folder: &mut T) -> SmallVec<[StmtKind; 1]> {
     match node {
-        StmtKind::Local(local) => SmallVector::one(StmtKind::Local(folder.fold_local(local))),
+        StmtKind::Local(local) => smallvec![StmtKind::Local(folder.fold_local(local))],
         StmtKind::Item(item) => folder.fold_item(item).into_iter().map(StmtKind::Item).collect(),
         StmtKind::Expr(expr) => {
             folder.fold_opt_expr(expr).into_iter().map(StmtKind::Expr).collect()
@@ -1366,9 +1401,9 @@ pub fn noop_fold_stmt_kind<T: Folder>(node: StmtKind, folder: &mut T) -> SmallVe
         StmtKind::Semi(expr) => {
             folder.fold_opt_expr(expr).into_iter().map(StmtKind::Semi).collect()
         }
-        StmtKind::Mac(mac) => SmallVector::one(StmtKind::Mac(mac.map(|(mac, semi, attrs)| {
+        StmtKind::Mac(mac) => smallvec![StmtKind::Mac(mac.map(|(mac, semi, attrs)| {
             (folder.fold_mac(mac), semi, fold_attrs(attrs.into(), folder).into())
-        }))),
+        }))],
     }
 }
 

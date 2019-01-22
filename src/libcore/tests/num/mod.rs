@@ -1,13 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use core::convert::{TryFrom, TryInto};
 use core::cmp::PartialEq;
 use core::fmt::Debug;
@@ -36,6 +26,15 @@ mod u64;
 mod flt2dec;
 mod dec2flt;
 mod bignum;
+
+
+/// Adds the attribute to all items in the block.
+macro_rules! cfg_block {
+    ($(#[$attr:meta]{$($it:item)*})*) => {$($(
+        #[$attr]
+        $it
+    )*)*}
+}
 
 /// Groups items that assume the pointer width is either 16/32/64, and has to be altered if
 /// support for larger/smaller pointer widths are added in the future.
@@ -73,36 +72,28 @@ fn from_str_issue7588() {
 
 #[test]
 fn test_int_from_str_overflow() {
-    let mut i8_val: i8 = 127;
-    assert_eq!("127".parse::<i8>().ok(), Some(i8_val));
+    assert_eq!("127".parse::<i8>().ok(), Some(127i8));
     assert_eq!("128".parse::<i8>().ok(), None);
 
-    i8_val = i8_val.wrapping_add(1);
-    assert_eq!("-128".parse::<i8>().ok(), Some(i8_val));
+    assert_eq!("-128".parse::<i8>().ok(), Some(-128i8));
     assert_eq!("-129".parse::<i8>().ok(), None);
 
-    let mut i16_val: i16 = 32_767;
-    assert_eq!("32767".parse::<i16>().ok(), Some(i16_val));
+    assert_eq!("32767".parse::<i16>().ok(), Some(32_767i16));
     assert_eq!("32768".parse::<i16>().ok(), None);
 
-    i16_val = i16_val.wrapping_add(1);
-    assert_eq!("-32768".parse::<i16>().ok(), Some(i16_val));
+    assert_eq!("-32768".parse::<i16>().ok(), Some(-32_768i16));
     assert_eq!("-32769".parse::<i16>().ok(), None);
 
-    let mut i32_val: i32 = 2_147_483_647;
-    assert_eq!("2147483647".parse::<i32>().ok(), Some(i32_val));
+    assert_eq!("2147483647".parse::<i32>().ok(), Some(2_147_483_647i32));
     assert_eq!("2147483648".parse::<i32>().ok(), None);
 
-    i32_val = i32_val.wrapping_add(1);
-    assert_eq!("-2147483648".parse::<i32>().ok(), Some(i32_val));
+    assert_eq!("-2147483648".parse::<i32>().ok(), Some(-2_147_483_648i32));
     assert_eq!("-2147483649".parse::<i32>().ok(), None);
 
-    let mut i64_val: i64 = 9_223_372_036_854_775_807;
-    assert_eq!("9223372036854775807".parse::<i64>().ok(), Some(i64_val));
+    assert_eq!("9223372036854775807".parse::<i64>().ok(), Some(9_223_372_036_854_775_807i64));
     assert_eq!("9223372036854775808".parse::<i64>().ok(), None);
 
-    i64_val = i64_val.wrapping_add(1);
-    assert_eq!("-9223372036854775808".parse::<i64>().ok(), Some(i64_val));
+    assert_eq!("-9223372036854775808".parse::<i64>().ok(), Some(-9_223_372_036_854_775_808i64));
     assert_eq!("-9223372036854775809".parse::<i64>().ok(), None);
 }
 
@@ -330,6 +321,42 @@ assume_usize_width! {
 
     test_impl_try_from_always_ok! { test_try_u16usize, u16, usize }
     test_impl_try_from_always_ok! { test_try_i16isize, i16, isize }
+
+    test_impl_try_from_always_ok! { test_try_usizeu64, usize, u64 }
+    test_impl_try_from_always_ok! { test_try_usizeu128, usize, u128 }
+    test_impl_try_from_always_ok! { test_try_usizei128, usize, i128 }
+
+    test_impl_try_from_always_ok! { test_try_isizei64, isize, i64 }
+    test_impl_try_from_always_ok! { test_try_isizei128, isize, i128 }
+
+    cfg_block!(
+        #[cfg(target_pointer_width = "16")] {
+            test_impl_try_from_always_ok! { test_try_usizeu16, usize, u16 }
+            test_impl_try_from_always_ok! { test_try_isizei16, isize, i16 }
+            test_impl_try_from_always_ok! { test_try_usizeu32, usize, u32 }
+            test_impl_try_from_always_ok! { test_try_usizei32, usize, i32 }
+            test_impl_try_from_always_ok! { test_try_isizei32, isize, i32 }
+            test_impl_try_from_always_ok! { test_try_usizei64, usize, i64 }
+        }
+
+        #[cfg(target_pointer_width = "32")] {
+            test_impl_try_from_always_ok! { test_try_u16isize, u16, isize }
+            test_impl_try_from_always_ok! { test_try_usizeu32, usize, u32 }
+            test_impl_try_from_always_ok! { test_try_isizei32, isize, i32 }
+            test_impl_try_from_always_ok! { test_try_u32usize, u32, usize }
+            test_impl_try_from_always_ok! { test_try_i32isize, i32, isize }
+            test_impl_try_from_always_ok! { test_try_usizei64, usize, i64 }
+        }
+
+        #[cfg(target_pointer_width = "64")] {
+            test_impl_try_from_always_ok! { test_try_u16isize, u16, isize }
+            test_impl_try_from_always_ok! { test_try_u32usize, u32, usize }
+            test_impl_try_from_always_ok! { test_try_u32isize, u32, isize }
+            test_impl_try_from_always_ok! { test_try_i32isize, i32, isize }
+            test_impl_try_from_always_ok! { test_try_u64usize, u64, usize }
+            test_impl_try_from_always_ok! { test_try_i64isize, i64, isize }
+        }
+    );
 }
 
 /// Conversions where max of $source can be represented as $target,
@@ -378,6 +405,24 @@ assume_usize_width! {
     test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_isizeu64, isize, u64 }
     test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_isizeu128, isize, u128 }
     test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_isizeusize, isize, usize }
+
+    cfg_block!(
+        #[cfg(target_pointer_width = "16")] {
+            test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_isizeu16, isize, u16 }
+            test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_isizeu32, isize, u32 }
+        }
+
+        #[cfg(target_pointer_width = "32")] {
+            test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_isizeu32, isize, u32 }
+
+            test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_i32usize, i32, usize }
+        }
+
+        #[cfg(target_pointer_width = "64")] {
+            test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_i32usize, i32, usize }
+            test_impl_try_from_signed_to_unsigned_upper_ok! { test_try_i64usize, i64, usize }
+        }
+    );
 }
 
 /// Conversions where max of $source can not be represented as $target,
@@ -419,9 +464,29 @@ test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u128i64, u128, i64 }
 test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u128i128, u128, i128 }
 
 assume_usize_width! {
+    test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u64isize, u64, isize }
+    test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u128isize, u128, isize }
+
     test_impl_try_from_unsigned_to_signed_upper_err! { test_try_usizei8, usize, i8 }
     test_impl_try_from_unsigned_to_signed_upper_err! { test_try_usizei16, usize, i16 }
     test_impl_try_from_unsigned_to_signed_upper_err! { test_try_usizeisize, usize, isize }
+
+    cfg_block!(
+        #[cfg(target_pointer_width = "16")] {
+            test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u16isize, u16, isize }
+            test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u32isize, u32, isize }
+        }
+
+        #[cfg(target_pointer_width = "32")] {
+            test_impl_try_from_unsigned_to_signed_upper_err! { test_try_u32isize, u32, isize }
+            test_impl_try_from_unsigned_to_signed_upper_err! { test_try_usizei32, usize, i32 }
+        }
+
+        #[cfg(target_pointer_width = "64")] {
+            test_impl_try_from_unsigned_to_signed_upper_err! { test_try_usizei32, usize, i32 }
+            test_impl_try_from_unsigned_to_signed_upper_err! { test_try_usizei64, usize, i64 }
+        }
+    );
 }
 
 /// Conversions where min/max of $source can not be represented as $target.
@@ -481,6 +546,34 @@ test_impl_try_from_same_sign_err! { test_try_i128i64, i128, i64 }
 
 assume_usize_width! {
     test_impl_try_from_same_sign_err! { test_try_usizeu8, usize, u8 }
+    test_impl_try_from_same_sign_err! { test_try_u128usize, u128, usize }
+    test_impl_try_from_same_sign_err! { test_try_i128isize, i128, isize }
+
+    cfg_block!(
+        #[cfg(target_pointer_width = "16")] {
+            test_impl_try_from_same_sign_err! { test_try_u32usize, u32, usize }
+            test_impl_try_from_same_sign_err! { test_try_u64usize, u64, usize }
+
+            test_impl_try_from_same_sign_err! { test_try_i32isize, i32, isize }
+            test_impl_try_from_same_sign_err! { test_try_i64isize, i64, isize }
+        }
+
+        #[cfg(target_pointer_width = "32")] {
+            test_impl_try_from_same_sign_err! { test_try_u64usize, u64, usize }
+            test_impl_try_from_same_sign_err! { test_try_usizeu16, usize, u16 }
+
+            test_impl_try_from_same_sign_err! { test_try_i64isize, i64, isize }
+            test_impl_try_from_same_sign_err! { test_try_isizei16, isize, i16 }
+        }
+
+        #[cfg(target_pointer_width = "64")] {
+            test_impl_try_from_same_sign_err! { test_try_usizeu16, usize, u16 }
+            test_impl_try_from_same_sign_err! { test_try_usizeu32, usize, u32 }
+
+            test_impl_try_from_same_sign_err! { test_try_isizei16, isize, i16 }
+            test_impl_try_from_same_sign_err! { test_try_isizei32, isize, i32 }
+        }
+    );
 }
 
 /// Conversions where neither the min nor the max of $source can be represented by
@@ -525,6 +618,22 @@ test_impl_try_from_signed_to_unsigned_err! { test_try_i128u64, i128, u64 }
 assume_usize_width! {
     test_impl_try_from_signed_to_unsigned_err! { test_try_isizeu8, isize, u8 }
     test_impl_try_from_signed_to_unsigned_err! { test_try_i128usize, i128, usize }
+
+    cfg_block! {
+        #[cfg(target_pointer_width = "16")] {
+            test_impl_try_from_signed_to_unsigned_err! { test_try_i32usize, i32, usize }
+            test_impl_try_from_signed_to_unsigned_err! { test_try_i64usize, i64, usize }
+        }
+        #[cfg(target_pointer_width = "32")] {
+            test_impl_try_from_signed_to_unsigned_err! { test_try_i64usize, i64, usize }
+
+            test_impl_try_from_signed_to_unsigned_err! { test_try_isizeu16, isize, u16 }
+        }
+        #[cfg(target_pointer_width = "64")] {
+            test_impl_try_from_signed_to_unsigned_err! { test_try_isizeu16, isize, u16 }
+            test_impl_try_from_signed_to_unsigned_err! { test_try_isizeu32, isize, u32 }
+        }
+    }
 }
 
 macro_rules! test_float {
@@ -573,6 +682,25 @@ macro_rules! test_float {
             assert_eq!((9.0 as $fty).max($nan), 9.0);
             assert_eq!((-9.0 as $fty).max($nan), -9.0);
             assert!(($nan as $fty).max($nan).is_nan());
+        }
+        #[test]
+        fn rem_euclid() {
+            let a: $fty = 42.0;
+            assert!($inf.rem_euclid(a).is_nan());
+            assert_eq!(a.rem_euclid($inf), a);
+            assert!(a.rem_euclid($nan).is_nan());
+            assert!($inf.rem_euclid($inf).is_nan());
+            assert!($inf.rem_euclid($nan).is_nan());
+            assert!($nan.rem_euclid($inf).is_nan());
+        }
+        #[test]
+        fn div_euclid() {
+            let a: $fty = 42.0;
+            assert_eq!(a.div_euclid($inf), 0.0);
+            assert!(a.div_euclid($nan).is_nan());
+            assert!($inf.div_euclid($inf).is_nan());
+            assert!($inf.div_euclid($nan).is_nan());
+            assert!($nan.div_euclid($inf).is_nan());
         }
     } }
 }

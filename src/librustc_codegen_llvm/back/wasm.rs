@@ -1,14 +1,3 @@
-// Copyright 2018 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::str;
@@ -18,50 +7,12 @@ use serialize::leb128;
 
 // https://webassembly.github.io/spec/core/binary/modules.html#binary-importsec
 const WASM_IMPORT_SECTION_ID: u8 = 2;
+const WASM_CUSTOM_SECTION_ID: u8 = 0;
 
 const WASM_EXTERNAL_KIND_FUNCTION: u8 = 0;
 const WASM_EXTERNAL_KIND_TABLE: u8 = 1;
 const WASM_EXTERNAL_KIND_MEMORY: u8 = 2;
 const WASM_EXTERNAL_KIND_GLOBAL: u8 = 3;
-
-/// Append all the custom sections listed in `sections` to the wasm binary
-/// specified at `path`.
-///
-/// LLVM 6 which we're using right now doesn't have the ability to create custom
-/// sections in wasm files nor does LLD have the ability to merge these sections
-/// into one larger section when linking. It's expected that this will
-/// eventually get implemented, however!
-///
-/// Until that time though this is a custom implementation in rustc to append
-/// all sections to a wasm file to the finished product that LLD produces.
-///
-/// Support for this is landing in LLVM in https://reviews.llvm.org/D43097,
-/// although after that support will need to be in LLD as well.
-pub fn add_custom_sections(path: &Path, sections: &BTreeMap<String, Vec<u8>>) {
-    if sections.len() == 0 {
-        return
-    }
-
-    let wasm = fs::read(path).expect("failed to read wasm output");
-
-    // see https://webassembly.github.io/spec/core/binary/modules.html#custom-section
-    let mut wasm = WasmEncoder { data: wasm };
-    for (section, bytes) in sections {
-        // write the `id` identifier, 0 for a custom section
-        wasm.byte(0);
-
-        // figure out how long our name descriptor will be
-        let mut name = WasmEncoder::new();
-        name.str(section);
-
-        // write the length of the payload followed by all its contents
-        wasm.u32((bytes.len() + name.data.len()) as u32);
-        wasm.data.extend_from_slice(&name.data);
-        wasm.data.extend_from_slice(bytes);
-    }
-
-    fs::write(path, &wasm.data).expect("failed to write wasm output");
-}
 
 /// Rewrite the module imports are listed from in a wasm module given the field
 /// name to module name mapping in `import_map`.
@@ -74,15 +25,15 @@ pub fn add_custom_sections(path: &Path, sections: &BTreeMap<String, Vec<u8>>) {
 ///
 /// This function is intended as a hack for now where we manually rewrite the
 /// wasm output by LLVM to have the correct import modules listed. The
-/// `#[wasm_import_module]` attribute in Rust translates to the module that each
-/// symbol is imported from, so here we manually go through the wasm file,
-/// decode it, rewrite imports, and then rewrite the wasm module.
+/// `#[link(wasm_import_module = "...")]` attribute in Rust translates to the
+/// module that each symbol is imported from, so here we manually go through the
+/// wasm file, decode it, rewrite imports, and then rewrite the wasm module.
 ///
 /// Support for this was added to LLVM in
 /// https://github.com/llvm-mirror/llvm/commit/0f32e1365, although support still
-/// needs to be added (AFAIK at the time of this writing) to LLD
+/// needs to be added, tracked at https://bugs.llvm.org/show_bug.cgi?id=37168
 pub fn rewrite_imports(path: &Path, import_map: &FxHashMap<String, String>) {
-    if import_map.len() == 0 {
+    if import_map.is_empty() {
         return
     }
 
@@ -161,13 +112,119 @@ pub fn rewrite_imports(path: &Path, import_map: &FxHashMap<String, String>) {
     }
 }
 
+/// Add or augment the existing `producers` section to encode information about
+/// the Rust compiler used to produce the wasm file.
+pub fn add_producer_section(
+    path: &Path,
+    rust_version: &str,
+    rustc_version: &str,
+) {
+    struct Field<'a> {
+        name: &'a str,
+        values: Vec<FieldValue<'a>>,
+    }
+
+    #[derive(Copy, Clone)]
+    struct FieldValue<'a> {
+        name: &'a str,
+        version: &'a str,
+    }
+
+    let wasm = fs::read(path).expect("failed to read wasm output");
+    let mut ret = WasmEncoder::new();
+    ret.data.extend(&wasm[..8]);
+
+    // skip the 8 byte wasm/version header
+    let rustc_value = FieldValue {
+        name: "rustc",
+        version: rustc_version,
+    };
+    let rust_value = FieldValue {
+        name: "Rust",
+        version: rust_version,
+    };
+    let mut fields = Vec::new();
+    let mut wrote_rustc = false;
+    let mut wrote_rust = false;
+
+    // Move all sections from the original wasm file to our output, skipping
+    // everything except the producers section
+    for (id, raw) in WasmSections(WasmDecoder::new(&wasm[8..])) {
+        if id != WASM_CUSTOM_SECTION_ID {
+            ret.byte(id);
+            ret.bytes(raw);
+            continue
+        }
+        let mut decoder = WasmDecoder::new(raw);
+        if decoder.str() != "producers" {
+            ret.byte(id);
+            ret.bytes(raw);
+            continue
+        }
+
+        // Read off the producers section into our fields outside the loop,
+        // we'll re-encode the producers section when we're done (to handle an
+        // entirely missing producers section as well).
+        info!("rewriting existing producers section");
+
+        for _ in 0..decoder.u32() {
+            let name = decoder.str();
+            let mut values = Vec::new();
+            for _ in 0..decoder.u32() {
+                let name = decoder.str();
+                let version = decoder.str();
+                values.push(FieldValue { name, version });
+            }
+
+            if name == "language" {
+                values.push(rust_value);
+                wrote_rust = true;
+            } else if name == "processed-by" {
+                values.push(rustc_value);
+                wrote_rustc = true;
+            }
+            fields.push(Field { name, values });
+        }
+    }
+
+    if !wrote_rust {
+        fields.push(Field {
+            name: "language",
+            values: vec![rust_value],
+        });
+    }
+    if !wrote_rustc {
+        fields.push(Field {
+            name: "processed-by",
+            values: vec![rustc_value],
+        });
+    }
+
+    // Append the producers section to the end of the wasm file.
+    let mut section = WasmEncoder::new();
+    section.str("producers");
+    section.u32(fields.len() as u32);
+    for field in fields {
+        section.str(field.name);
+        section.u32(field.values.len() as u32);
+        for value in field.values {
+            section.str(value.name);
+            section.str(value.version);
+        }
+    }
+    ret.byte(WASM_CUSTOM_SECTION_ID);
+    ret.bytes(&section.data);
+
+    fs::write(path, &ret.data).expect("failed to write wasm output");
+}
+
 struct WasmSections<'a>(WasmDecoder<'a>);
 
 impl<'a> Iterator for WasmSections<'a> {
     type Item = (u8, &'a [u8]);
 
     fn next(&mut self) -> Option<(u8, &'a [u8])> {
-        if self.0.data.len() == 0 {
+        if self.0.data.is_empty() {
             return None
         }
 
@@ -230,8 +287,7 @@ impl WasmEncoder {
     }
 
     fn u32(&mut self, val: u32) {
-        let at = self.data.len();
-        leb128::write_u32_leb128(&mut self.data, at, val);
+        leb128::write_u32_leb128(&mut self.data, val);
     }
 
     fn byte(&mut self, val: u8) {

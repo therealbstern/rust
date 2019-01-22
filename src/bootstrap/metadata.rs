@@ -1,13 +1,3 @@
-// Copyright 2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use std::collections::HashMap;
 use std::process::Command;
 use std::path::PathBuf;
@@ -16,8 +6,8 @@ use std::collections::HashSet;
 use build_helper::output;
 use serde_json;
 
-use {Build, Crate};
-use cache::INTERNER;
+use crate::{Build, Crate};
+use crate::cache::INTERNER;
 
 #[derive(Deserialize)]
 struct Output {
@@ -51,7 +41,7 @@ pub fn build(build: &mut Build) {
     build_krate("", build, &mut resolves, "src/libtest");
     build_krate(&build.rustc_features(), build, &mut resolves, "src/rustc");
 
-    let mut id2name = HashMap::new();
+    let mut id2name = HashMap::with_capacity(build.crates.len());
     for (name, krate) in build.crates.iter() {
         id2name.insert(krate.id.clone(), name.clone());
     }

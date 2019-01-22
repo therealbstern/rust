@@ -1,13 +1,3 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // FIXME: This is a complete copy of `cargo/src/cargo/util/read2.rs`
 // Consider unify the read2() in libstd, cargo and this to prevent further code duplication.
 
@@ -21,7 +11,7 @@ mod imp {
     pub fn read2(
         out_pipe: ChildStdout,
         err_pipe: ChildStderr,
-        data: &mut FnMut(bool, &mut Vec<u8>, bool),
+        data: &mut dyn FnMut(bool, &mut Vec<u8>, bool),
     ) -> io::Result<()> {
         let mut buffer = Vec::new();
         out_pipe.read_to_end(&mut buffer)?;
@@ -45,7 +35,7 @@ mod imp {
     pub fn read2(
         mut out_pipe: ChildStdout,
         mut err_pipe: ChildStderr,
-        data: &mut FnMut(bool, &mut Vec<u8>, bool),
+        data: &mut dyn FnMut(bool, &mut Vec<u8>, bool),
     ) -> io::Result<()> {
         unsafe {
             libc::fcntl(out_pipe.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK);
@@ -133,7 +123,7 @@ mod imp {
     pub fn read2(
         out_pipe: ChildStdout,
         err_pipe: ChildStderr,
-        data: &mut FnMut(bool, &mut Vec<u8>, bool),
+        data: &mut dyn FnMut(bool, &mut Vec<u8>, bool),
     ) -> io::Result<()> {
         let mut out = Vec::new();
         let mut err = Vec::new();

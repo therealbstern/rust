@@ -10,11 +10,15 @@ standard library, and documentation.
 
 Read ["Installation"] from [The Book].
 
-["Installation"]: https://doc.rust-lang.org/book/second-edition/ch01-01-installation.html
+["Installation"]: https://doc.rust-lang.org/book/ch01-01-installation.html
 [The Book]: https://doc.rust-lang.org/book/index.html
 
-## Building from Source
+## Installing from Source
 [building-from-source]: #building-from-source
+
+_Note: If you wish to contribute to the compiler, you should read
+[this chapter](https://rust-lang.github.io/rustc-guide/how-to-build-and-run.html)
+of the rustc-guide instead._
 
 ### Building on *nix
 1. Make sure you have installed the dependencies:
@@ -38,7 +42,6 @@ Read ["Installation"] from [The Book].
 3. Build and install:
 
     ```sh
-    $ git submodule update --init --recursive --progress
     $ ./x.py build && sudo ./x.py install
     ```
 
@@ -125,9 +128,9 @@ you have a more recent version installed the build system doesn't understand
 then you may need to force rustbuild to use an older version. This can be done
 by manually calling the appropriate vcvars file before running the bootstrap.
 
-```
-CALL "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\bin\amd64\vcvars64.bat"
-python x.py build
+```batch
+> CALL "C:\Program Files (x86)\Microsoft Visual Studio 14.0\VC\bin\amd64\vcvars64.bat"
+> python x.py build
 ```
 
 #### Specifying an ABI
@@ -186,17 +189,14 @@ fetch snapshots, and an OS that can execute the available snapshot binaries.
 
 Snapshot binaries are currently built and tested on several platforms:
 
-| Platform / Architecture        | x86 | x86_64 |
-|--------------------------------|-----|--------|
-| Windows (7, 8, Server 2008 R2) | ✓   | ✓      |
-| Linux (2.6.18 or later)        | ✓   | ✓      |
-| OSX (10.7 Lion or later)       | ✓   | ✓      |
+| Platform / Architecture  | x86 | x86_64 |
+|--------------------------|-----|--------|
+| Windows (7, 8, 10, ...)  | ✓   | ✓      |
+| Linux (2.6.18 or later)  | ✓   | ✓      |
+| OSX (10.7 Lion or later) | ✓   | ✓      |
 
 You may find that other platforms work, but these are our officially
 supported build environments that are most likely to work.
-
-Rust currently needs between 600MiB and 1.5GiB of RAM to build, depending on platform.
-If it hits swap, it will take a very long time to build.
 
 There is more advice about hacking on Rust in [CONTRIBUTING.md].
 
@@ -225,13 +225,16 @@ variety of channels on Mozilla's IRC network, irc.mozilla.org. The
 most popular channel is [#rust], a venue for general discussion about
 Rust. And a good place to ask for help would be [#rust-beginners].
 
-Also, the [rustc guide] might be a good place to start if you want to
-find out how various parts of the compiler work.
+The [rustc guide] might be a good place to start if you want to find out how
+various parts of the compiler work.
+
+Also, you may find the [rustdocs for the compiler itself][rustdocs] useful.
 
 [IRC]: https://en.wikipedia.org/wiki/Internet_Relay_Chat
 [#rust]: irc://irc.mozilla.org/rust
 [#rust-beginners]: irc://irc.mozilla.org/rust-beginners
-[rustc guide]: https://rust-lang-nursery.github.io/rustc-guide/about-this-guide.html
+[rustc guide]: https://rust-lang.github.io/rustc-guide/about-this-guide.html
+[rustdocs]: https://doc.rust-lang.org/nightly/nightly-rustc/rustc/
 
 ## License
 [license]: #license

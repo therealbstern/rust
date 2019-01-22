@@ -1,15 +1,5 @@
 #!/bin/sh
 
-# Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-# file at the top-level directory of this distribution and at
-# http://rust-lang.org/COPYRIGHT.
-#
-# Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-# http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-# <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-# option. This file may not be copied, modified, or distributed
-# except according to those terms.
-
 set -eu
 
 X_PY="$1"
@@ -17,9 +7,11 @@ TOOLSTATE_FILE="$(realpath $2)"
 OS="$3"
 COMMIT="$(git rev-parse HEAD)"
 CHANGED_FILES="$(git diff --name-status HEAD HEAD^)"
-SIX_WEEK_CYCLE="$(( ($(date +%s) / 604800 - 3) % 6 ))"
-# ^ 1970 Jan 1st is a Thursday, and our release dates are also on Thursdays,
-#   thus we could divide by 604800 (7 days in seconds) directly.
+SIX_WEEK_CYCLE="$(( ($(date +%s) / 86400 - 20) % 42 ))"
+# ^ Number of days after the last promotion of beta.
+#   Its value is 41 on the Tuesday where "Promote master to beta (T-2)" happens.
+#   The Wednesday after this has value 0.
+#   We track this value to prevent regressing tools in the last week of the 6-week cycle.
 
 touch "$TOOLSTATE_FILE"
 
@@ -31,10 +23,11 @@ python2.7 "$X_PY" test --no-fail-fast \
     src/doc/nomicon \
     src/doc/reference \
     src/doc/rust-by-example \
+    src/tools/clippy \
     src/tools/rls \
     src/tools/rustfmt \
     src/tools/miri \
-    src/tools/clippy
+
 set -e
 
 cat "$TOOLSTATE_FILE"
@@ -79,11 +72,11 @@ status_check() {
     check_dispatch $1 beta nomicon src/doc/nomicon
     check_dispatch $1 beta reference src/doc/reference
     check_dispatch $1 beta rust-by-example src/doc/rust-by-example
-    check_dispatch $1 beta rls src/tool/rls
-    check_dispatch $1 beta rustfmt src/tool/rustfmt
+    check_dispatch $1 beta rls src/tools/rls
+    check_dispatch $1 beta rustfmt src/tools/rustfmt
+    check_dispatch $1 beta clippy-driver src/tools/clippy
     # these tools are not required for beta to successfully branch
-    check_dispatch $1 nightly clippy-driver src/tool/clippy
-    check_dispatch $1 nightly miri src/tool/miri
+    check_dispatch $1 nightly miri src/tools/miri
 }
 
 # If this PR is intended to update one of these tools, do not let the build pass
@@ -97,7 +90,7 @@ change_toolstate() {
     if python2.7 "$CHECK_NOT" "$OS" "$TOOLSTATE_FILE" "_data/latest.json" changed; then
         echo 'Toolstate is not changed. Not updating.'
     else
-        if [ $SIX_WEEK_CYCLE -eq 5 ]; then
+        if [ $SIX_WEEK_CYCLE -ge 35 ]; then
             python2.7 "$CHECK_NOT" "$OS" "$TOOLSTATE_FILE" "_data/latest.json" regressed
         fi
         sed -i "1 a\\
@@ -106,12 +99,14 @@ $COMMIT\t$(cat "$TOOLSTATE_FILE")
     fi
 }
 
-if [ "$RUST_RELEASE_CHANNEL" = nightly -a -n "${TOOLSTATE_REPO_ACCESS_TOKEN+is_set}" ]; then
-    . "$(dirname $0)/repo.sh"
-    MESSAGE_FILE=$(mktemp -t msg.XXXXXX)
-    echo "($OS CI update)" > "$MESSAGE_FILE"
-    commit_toolstate_change "$MESSAGE_FILE" change_toolstate
-    rm -f "$MESSAGE_FILE"
+if [ "$RUST_RELEASE_CHANNEL" = nightly ]; then
+    if [ -n "${TOOLSTATE_REPO_ACCESS_TOKEN+is_set}" ]; then
+        . "$(dirname $0)/repo.sh"
+        MESSAGE_FILE=$(mktemp -t msg.XXXXXX)
+        echo "($OS CI update)" > "$MESSAGE_FILE"
+        commit_toolstate_change "$MESSAGE_FILE" change_toolstate
+        rm -f "$MESSAGE_FILE"
+    fi
     exit 0
 fi
 

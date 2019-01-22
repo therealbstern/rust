@@ -1,13 +1,3 @@
-// Copyright 2014-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! The Rust compiler.
 //!
 //! # Note
@@ -20,17 +10,18 @@
 
 #![feature(box_syntax)]
 #![cfg_attr(unix, feature(libc))]
+#![feature(nll)]
 #![feature(quote)]
 #![feature(rustc_diagnostic_macros)]
 #![feature(slice_sort_by_cached_key)]
 #![feature(set_stdio)]
-#![feature(rustc_stack_internals)]
 #![feature(no_debug)]
+#![feature(integer_atomics)]
 
 #![recursion_limit="256"]
 
 extern crate arena;
-extern crate getopts;
+pub extern crate getopts;
 extern crate graphviz;
 extern crate env_logger;
 #[cfg(unix)]
@@ -56,6 +47,7 @@ extern crate rustc_codegen_utils;
 extern crate rustc_typeck;
 extern crate scoped_tls;
 extern crate serialize;
+extern crate smallvec;
 #[macro_use]
 extern crate log;
 extern crate syntax;
@@ -65,10 +57,9 @@ extern crate syntax_pos;
 use driver::CompileController;
 use pretty::{PpMode, UserIdentifiedItem};
 
-use rustc_resolve as resolve;
 use rustc_save_analysis as save;
 use rustc_save_analysis::DumpHandler;
-use rustc_data_structures::sync::{self, Lrc};
+use rustc_data_structures::sync::{self, Lrc, Ordering::SeqCst};
 use rustc_data_structures::OnDrop;
 use rustc::session::{self, config, Session, build_session, CompileResult};
 use rustc::session::CompileIncomplete;
@@ -78,7 +69,6 @@ use rustc::session::filesearch;
 use rustc::session::{early_error, early_warn};
 use rustc::lint::Lint;
 use rustc::lint;
-use rustc::middle::cstore::CrateStore;
 use rustc_metadata::locator;
 use rustc_metadata::cstore::CStore;
 use rustc_metadata::dynamic_lib::DynamicLibrary;
@@ -88,13 +78,15 @@ use rustc_codegen_utils::codegen_backend::CodegenBackend;
 use serialize::json::ToJson;
 
 use std::any::Any;
+use std::borrow::Cow;
 use std::cmp::max;
 use std::default::Default;
 use std::env::consts::{DLL_PREFIX, DLL_SUFFIX};
 use std::env;
+use std::error::Error;
 use std::ffi::OsString;
+use std::fmt::{self, Display};
 use std::io::{self, Read, Write};
-use std::iter::repeat;
 use std::mem;
 use std::panic;
 use std::path::{PathBuf, Path};
@@ -105,10 +97,10 @@ use std::sync::{Once, ONCE_INIT};
 use std::thread;
 
 use syntax::ast;
-use syntax::codemap::{CodeMap, FileLoader, RealFileLoader};
+use syntax::source_map::{SourceMap, FileLoader, RealFileLoader};
 use syntax::feature_gate::{GatedCfg, UnstableFeatures};
 use syntax::parse::{self, PResult};
-use syntax_pos::{hygiene, DUMMY_SP, MultiSpan, FileName};
+use syntax_pos::{DUMMY_SP, MultiSpan, FileName};
 
 #[cfg(test)]
 mod test;
@@ -116,7 +108,7 @@ mod test;
 pub mod profile;
 pub mod driver;
 pub mod pretty;
-mod derive_registrar;
+mod proc_macro_decls;
 
 pub mod target_features {
     use syntax::ast;
@@ -131,12 +123,10 @@ pub mod target_features {
     /// features is available on the target machine, by querying LLVM.
     pub fn add_configuration(cfg: &mut ast::CrateConfig,
                              sess: &Session,
-                             codegen_backend: &CodegenBackend) {
+                             codegen_backend: &dyn CodegenBackend) {
         let tf = Symbol::intern("target_feature");
 
-        for feat in codegen_backend.target_features(sess) {
-            cfg.insert((tf, Some(feat)));
-        }
+        cfg.extend(codegen_backend.target_features(sess).into_iter().map(|feat| (tf, Some(feat))));
 
         if sess.crt_static_feature() {
             cfg.insert((tf, Some(Symbol::intern("crt-static"))));
@@ -144,21 +134,20 @@ pub mod target_features {
     }
 }
 
-const BUG_REPORT_URL: &'static str = "https://github.com/rust-lang/rust/blob/master/CONTRIBUTING.\
-                                      md#bug-reports";
+/// Exit status code used for successful compilation and help output.
+pub const EXIT_SUCCESS: isize = 0;
 
-const ICE_REPORT_COMPILER_FLAGS: &'static [&'static str] = &[
-    "Z",
-    "C",
-    "crate-type",
-];
-const ICE_REPORT_COMPILER_FLAGS_EXCLUDE: &'static [&'static str] = &[
-    "metadata",
-    "extra-filename",
-];
-const ICE_REPORT_COMPILER_FLAGS_STRIP_VALUE: &'static [&'static str] = &[
-    "incremental",
-];
+/// Exit status code used for compilation failures and  invalid flags.
+pub const EXIT_FAILURE: isize = 1;
+
+const BUG_REPORT_URL: &str = "https://github.com/rust-lang/rust/blob/master/CONTRIBUTING.\
+                              md#bug-reports";
+
+const ICE_REPORT_COMPILER_FLAGS: &[&str] = &["Z", "C", "crate-type"];
+
+const ICE_REPORT_COMPILER_FLAGS_EXCLUDE: &[&str] = &["metadata", "extra-filename"];
+
+const ICE_REPORT_COMPILER_FLAGS_STRIP_VALUE: &[&str] = &["incremental"];
 
 pub fn abort_on_err<T>(result: Result<T, CompileIncomplete>, sess: &Session) -> T {
     match result {
@@ -176,49 +165,45 @@ pub fn abort_on_err<T>(result: Result<T, CompileIncomplete>, sess: &Session) -> 
 pub fn run<F>(run_compiler: F) -> isize
     where F: FnOnce() -> (CompileResult, Option<Session>) + Send + 'static
 {
-    monitor(move || {
-        let (result, session) = run_compiler();
-        if let Err(CompileIncomplete::Errored(_)) = result {
-            match session {
-                Some(sess) => {
-                    sess.abort_if_errors();
-                    panic!("error reported but abort_if_errors didn't abort???");
-                }
-                None => {
-                    let emitter =
-                        errors::emitter::EmitterWriter::stderr(errors::ColorConfig::Auto,
-                                                               None,
-                                                               true,
-                                                               false);
-                    let handler = errors::Handler::with_emitter(true, false, Box::new(emitter));
-                    handler.emit(&MultiSpan::new(),
-                                 "aborting due to previous error(s)",
-                                 errors::Level::Fatal);
-                    panic::resume_unwind(Box::new(errors::FatalErrorMarker));
+    let result = monitor(move || {
+        syntax::with_globals(|| {
+            let (result, session) = run_compiler();
+            if let Err(CompileIncomplete::Errored(_)) = result {
+                match session {
+                    Some(sess) => {
+                        sess.abort_if_errors();
+                        panic!("error reported but abort_if_errors didn't abort???");
+                    }
+                    None => {
+                        let emitter =
+                            errors::emitter::EmitterWriter::stderr(
+                                errors::ColorConfig::Auto,
+                                None,
+                                true,
+                                false
+                            );
+                        let handler = errors::Handler::with_emitter(true, false, Box::new(emitter));
+                        handler.emit(&MultiSpan::new(),
+                                     "aborting due to previous error(s)",
+                                     errors::Level::Fatal);
+                        panic::resume_unwind(Box::new(errors::FatalErrorMarker));
+                    }
                 }
             }
-        }
+        });
     });
-    0
+
+    match result {
+        Ok(()) => EXIT_SUCCESS,
+        Err(_) => EXIT_FAILURE,
+    }
 }
 
-fn load_backend_from_dylib(path: &Path) -> fn() -> Box<CodegenBackend> {
-    // Note that we're specifically using `open_global_now` here rather than
-    // `open`, namely we want the behavior on Unix of RTLD_GLOBAL and RTLD_NOW,
-    // where NOW means "bind everything right now" because we don't want
-    // surprises later on and RTLD_GLOBAL allows the symbols to be made
-    // available for future dynamic libraries opened. This is currently used by
-    // loading LLVM and then making its symbols available for other dynamic
-    // libraries.
-    let lib = match DynamicLibrary::open_global_now(path) {
-        Ok(lib) => lib,
-        Err(err) => {
-            let err = format!("couldn't load codegen backend {:?}: {:?}",
-                              path,
-                              err);
-            early_error(ErrorOutputType::default(), &err);
-        }
-    };
+fn load_backend_from_dylib(path: &Path) -> fn() -> Box<dyn CodegenBackend> {
+    let lib = DynamicLibrary::open(Some(path)).unwrap_or_else(|err| {
+        let err = format!("couldn't load codegen backend {:?}: {:?}", path, err);
+        early_error(ErrorOutputType::default(), &err);
+    });
     unsafe {
         match lib.symbol("__rustc_codegen_backend") {
             Ok(f) => {
@@ -235,19 +220,19 @@ fn load_backend_from_dylib(path: &Path) -> fn() -> Box<CodegenBackend> {
     }
 }
 
-pub fn get_codegen_backend(sess: &Session) -> Box<CodegenBackend> {
+pub fn get_codegen_backend(sess: &Session) -> Box<dyn CodegenBackend> {
     static INIT: Once = ONCE_INIT;
 
     #[allow(deprecated)]
     #[no_debug]
-    static mut LOAD: fn() -> Box<CodegenBackend> = || unreachable!();
+    static mut LOAD: fn() -> Box<dyn CodegenBackend> = || unreachable!();
 
     INIT.call_once(|| {
         let codegen_name = sess.opts.debugging_opts.codegen_backend.as_ref()
             .unwrap_or(&sess.target.target.options.codegen_backend);
         let backend = match &codegen_name[..] {
             "metadata_only" => {
-                rustc_codegen_utils::codegen_backend::MetadataOnlyCodegenBackend::new
+                rustc_codegen_utils::codegen_backend::MetadataOnlyCodegenBackend::boxed
             }
             filename if filename.contains(".") => {
                 load_backend_from_dylib(filename.as_ref())
@@ -264,7 +249,7 @@ pub fn get_codegen_backend(sess: &Session) -> Box<CodegenBackend> {
     backend
 }
 
-fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<CodegenBackend> {
+fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<dyn CodegenBackend> {
     // For now we only allow this function to be called once as it'll dlopen a
     // few things, which seems to work best if we only do that once. In
     // general this assertion never trips due to the once guard in `get_codegen_backend`,
@@ -280,7 +265,7 @@ fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<CodegenBackend> {
     // let's just return a dummy creation function which won't be used in
     // general anyway.
     if cfg!(test) {
-        return rustc_codegen_utils::codegen_backend::MetadataOnlyCodegenBackend::new
+        return rustc_codegen_utils::codegen_backend::MetadataOnlyCodegenBackend::boxed
     }
 
     let target = session::config::host_triple();
@@ -314,37 +299,30 @@ fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<CodegenBackend> {
     let sysroot = sysroot_candidates.iter()
         .map(|sysroot| {
             let libdir = filesearch::relative_target_lib_path(&sysroot, &target);
-            sysroot.join(libdir)
-                .with_file_name(option_env!("CFG_CODEGEN_BACKENDS_DIR")
-                                .unwrap_or("codegen-backends"))
+            sysroot.join(libdir).with_file_name(
+                option_env!("CFG_CODEGEN_BACKENDS_DIR").unwrap_or("codegen-backends"))
         })
         .filter(|f| {
             info!("codegen backend candidate: {}", f.display());
             f.exists()
         })
         .next();
-    let sysroot = match sysroot {
-        Some(path) => path,
-        None => {
-            let candidates = sysroot_candidates.iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join("\n* ");
-            let err = format!("failed to find a `codegen-backends` folder \
-                               in the sysroot candidates:\n* {}", candidates);
-            early_error(ErrorOutputType::default(), &err);
-        }
-    };
+    let sysroot = sysroot.unwrap_or_else(|| {
+        let candidates = sysroot_candidates.iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n* ");
+        let err = format!("failed to find a `codegen-backends` folder \
+                           in the sysroot candidates:\n* {}", candidates);
+        early_error(ErrorOutputType::default(), &err);
+    });
     info!("probing {} for a codegen backend", sysroot.display());
 
-    let d = match sysroot.read_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            let err = format!("failed to load default codegen backend, couldn't \
-                               read `{}`: {}", sysroot.display(), e);
-            early_error(ErrorOutputType::default(), &err);
-        }
-    };
+    let d = sysroot.read_dir().unwrap_or_else(|e| {
+        let err = format!("failed to load default codegen backend, couldn't \
+                           read `{}`: {}", sysroot.display(), e);
+        early_error(ErrorOutputType::default(), &err);
+    });
 
     let mut file: Option<PathBuf> = None;
 
@@ -364,8 +342,8 @@ fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<CodegenBackend> {
         }
         if let Some(ref prev) = file {
             let err = format!("duplicate codegen backends found\n\
-                first:  {}\n\
-                second: {}\n\
+                               first:  {}\n\
+                               second: {}\n\
             ", prev.display(), path.display());
             early_error(ErrorOutputType::default(), &err);
         }
@@ -377,7 +355,7 @@ fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<CodegenBackend> {
         None => {
             let err = format!("failed to load default codegen backend for `{}`, \
                                no appropriate codegen dylib found in `{}`",
-                               backend_name, sysroot.display());
+                              backend_name, sysroot.display());
             early_error(ErrorOutputType::default(), &err);
         }
     }
@@ -454,23 +432,20 @@ fn get_codegen_sysroot(backend_name: &str) -> fn() -> Box<CodegenBackend> {
 // See comments on CompilerCalls below for details about the callbacks argument.
 // The FileLoader provides a way to load files from sources other than the file system.
 pub fn run_compiler<'a>(args: &[String],
-                        callbacks: Box<CompilerCalls<'a> + sync::Send + 'a>,
-                        file_loader: Option<Box<FileLoader + Send + Sync + 'static>>,
-                        emitter_dest: Option<Box<Write + Send>>)
+                        callbacks: Box<dyn CompilerCalls<'a> + sync::Send + 'a>,
+                        file_loader: Option<Box<dyn FileLoader + Send + Sync + 'static>>,
+                        emitter_dest: Option<Box<dyn Write + Send>>)
                         -> (CompileResult, Option<Session>)
 {
-    syntax::with_globals(|| {
-        let matches = match handle_options(args) {
-            Some(matches) => matches,
-            None => return (Ok(()), None),
-        };
+    let matches = match handle_options(args) {
+        Some(matches) => matches,
+        None => return (Ok(()), None),
+    };
 
-        let (sopts, cfg) = config::build_session_options_and_crate_config(&matches);
-        hygiene::set_default_edition(sopts.edition);
+    let (sopts, cfg) = config::build_session_options_and_crate_config(&matches);
 
-        driver::spawn_thread_pool(sopts, |sopts| {
-            run_compiler_with_pool(matches, sopts, cfg, callbacks, file_loader, emitter_dest)
-        })
+    driver::spawn_thread_pool(sopts, |sopts| {
+        run_compiler_with_pool(matches, sopts, cfg, callbacks, file_loader, emitter_dest)
     })
 }
 
@@ -478,9 +453,9 @@ fn run_compiler_with_pool<'a>(
     matches: getopts::Matches,
     sopts: config::Options,
     cfg: ast::CrateConfig,
-    mut callbacks: Box<CompilerCalls<'a> + sync::Send + 'a>,
-    file_loader: Option<Box<FileLoader + Send + Sync + 'static>>,
-    emitter_dest: Option<Box<Write + Send>>
+    mut callbacks: Box<dyn CompilerCalls<'a> + sync::Send + 'a>,
+    file_loader: Option<Box<dyn FileLoader + Send + Sync + 'static>>,
+    emitter_dest: Option<Box<dyn Write + Send>>
 ) -> (CompileResult, Option<Session>) {
     macro_rules! do_or_return {($expr: expr, $sess: expr) => {
         match $expr {
@@ -511,15 +486,15 @@ fn run_compiler_with_pool<'a>(
     };
 
     let loader = file_loader.unwrap_or(box RealFileLoader);
-    let codemap = Lrc::new(CodeMap::with_file_loader(loader, sopts.file_path_mapping()));
-    let mut sess = session::build_session_with_codemap(
-        sopts, input_file_path.clone(), descriptions, codemap, emitter_dest,
+    let source_map = Lrc::new(SourceMap::with_file_loader(loader, sopts.file_path_mapping()));
+    let mut sess = session::build_session_with_source_map(
+        sopts, input_file_path.clone(), descriptions, source_map, emitter_dest,
     );
 
     if let Some(err) = input_err {
         // Immediately stop compilation if there was an issue reading
         // the input (for example if the input stream is not UTF-8).
-        sess.err(&format!("{}", err));
+        sess.err(&err.to_string());
         return (Err(CompileIncomplete::Stopped), Some(sess));
     }
 
@@ -567,7 +542,7 @@ pub fn set_sigpipe_handler() {
     unsafe {
         // Set the SIGPIPE signal handler, so that an EPIPE
         // will cause rustc to terminate, as expected.
-        assert!(libc::signal(libc::SIGPIPE, libc::SIG_DFL) != libc::SIG_ERR);
+        assert_ne!(libc::signal(libc::SIGPIPE, libc::SIG_DFL), libc::SIG_ERR);
     }
 }
 
@@ -593,7 +568,7 @@ fn make_input(free_matches: &[String]) -> Option<(Input, Option<PathBuf>, Option
             } else {
                 None
             };
-            Some((Input::Str { name: FileName::Anon, input: src },
+            Some((Input::Str { name: FileName::anon_source_code(&src), input: src },
                   None, err))
         } else {
             Some((Input::File(PathBuf::from(ifile)),
@@ -642,8 +617,8 @@ impl Compilation {
     }
 }
 
-/// A trait for customising the compilation process. Offers a number of hooks for
-/// executing custom code or customising input.
+/// A trait for customizing the compilation process. Offers a number of hooks for
+/// executing custom code or customizing input.
 pub trait CompilerCalls<'a> {
     /// Hook for a callback early in the process of handling arguments. This will
     /// be called straight after options have been parsed but before anything
@@ -662,10 +637,10 @@ pub trait CompilerCalls<'a> {
     /// be called just before actual compilation starts (and before build_controller
     /// is called), after all arguments etc. have been completely handled.
     fn late_callback(&mut self,
-                     _: &CodegenBackend,
+                     _: &dyn CodegenBackend,
                      _: &getopts::Matches,
                      _: &Session,
-                     _: &CrateStore,
+                     _: &CStore,
                      _: &Input,
                      _: &Option<PathBuf>,
                      _: &Option<PathBuf>)
@@ -870,10 +845,10 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
     }
 
     fn late_callback(&mut self,
-                     codegen_backend: &CodegenBackend,
+                     codegen_backend: &dyn CodegenBackend,
                      matches: &getopts::Matches,
                      sess: &Session,
-                     cstore: &CrateStore,
+                     cstore: &CStore,
                      input: &Input,
                      odir: &Option<PathBuf>,
                      ofile: &Option<PathBuf>)
@@ -904,13 +879,11 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
                     pretty::print_after_hir_lowering(state.session,
                                                      state.cstore.unwrap(),
                                                      state.hir_map.unwrap(),
-                                                     state.analysis.unwrap(),
                                                      state.resolutions.unwrap(),
                                                      state.input,
                                                      &state.expanded_crate.take().unwrap(),
                                                      state.crate_name.unwrap(),
                                                      ppm,
-                                                     state.arenas.unwrap(),
                                                      state.output_filenames.unwrap(),
                                                      opt_uii.clone(),
                                                      state.out_file);
@@ -951,9 +924,9 @@ impl<'a> CompilerCalls<'a> for RustcDefaultCalls {
             control.compilation_done.callback = box move |state| {
                 old_callback(state);
                 let sess = state.session;
-                println!("Fuel used by {}: {}",
+                eprintln!("Fuel used by {}: {}",
                     sess.print_fuel_crate.as_ref().unwrap(),
-                    sess.print_fuel.get());
+                    sess.print_fuel.load(SeqCst));
             }
         }
         control
@@ -966,32 +939,31 @@ pub fn enable_save_analysis(control: &mut CompileController) {
         time(state.session, "save analysis", || {
             save::process_crate(state.tcx.unwrap(),
                                 state.expanded_crate.unwrap(),
-                                state.analysis.unwrap(),
                                 state.crate_name.unwrap(),
+                                state.input,
                                 None,
                                 DumpHandler::new(state.out_dir,
                                                  state.crate_name.unwrap()))
         });
     };
     control.after_analysis.run_callback_on_error = true;
-    control.make_glob_map = resolve::MakeGlobMap::Yes;
 }
 
 impl RustcDefaultCalls {
     pub fn list_metadata(sess: &Session,
-                         cstore: &CrateStore,
+                         cstore: &CStore,
                          matches: &getopts::Matches,
                          input: &Input)
                          -> Compilation {
         let r = matches.opt_strs("Z");
-        if r.contains(&("ls".to_string())) {
+        if r.iter().any(|s| *s == "ls") {
             match input {
                 &Input::File(ref ifile) => {
                     let path = &(*ifile);
                     let mut v = Vec::new();
                     locator::list_file_metadata(&sess.target.target,
                                                 path,
-                                                cstore.metadata_loader(),
+                                                &*cstore.metadata_loader,
                                                 &mut v)
                             .unwrap();
                     println!("{}", String::from_utf8(v).unwrap());
@@ -1003,11 +975,11 @@ impl RustcDefaultCalls {
             return Compilation::Stop;
         }
 
-        return Compilation::Continue;
+        Compilation::Continue
     }
 
 
-    fn print_crate_info(codegen_backend: &CodegenBackend,
+    fn print_crate_info(codegen_backend: &dyn CodegenBackend,
                         sess: &Session,
                         input: Option<&Input>,
                         odir: &Option<PathBuf>,
@@ -1016,7 +988,7 @@ impl RustcDefaultCalls {
         use rustc::session::config::PrintRequest::*;
         // PrintRequest::NativeStaticLibs is special - printed during linking
         // (empty iterator returns true)
-        if sess.opts.prints.iter().all(|&p| p==PrintRequest::NativeStaticLibs) {
+        if sess.opts.prints.iter().all(|&p| p == PrintRequest::NativeStaticLibs) {
             return Compilation::Continue;
         }
 
@@ -1040,13 +1012,11 @@ impl RustcDefaultCalls {
                     targets.sort();
                     println!("{}", targets.join("\n"));
                 },
-                Sysroot => println!("{}", sess.sysroot().display()),
+                Sysroot => println!("{}", sess.sysroot.display()),
                 TargetSpec => println!("{}", sess.target.target.to_json().pretty()),
                 FileNames | CrateName => {
-                    let input = match input {
-                        Some(input) => input,
-                        None => early_error(ErrorOutputType::default(), "no input file provided"),
-                    };
+                    let input = input.unwrap_or_else(||
+                        early_error(ErrorOutputType::default(), "no input file provided"));
                     let attrs = attrs.as_ref().unwrap();
                     let t_outputs = driver::build_output_filenames(input, odir, ofile, attrs, sess);
                     let id = rustc_codegen_utils::link::find_crate_name(Some(sess), attrs, input);
@@ -1062,20 +1032,16 @@ impl RustcDefaultCalls {
                             &id,
                             &t_outputs
                         );
-                        println!("{}",
-                                 fname.file_name()
-                                      .unwrap()
-                                      .to_string_lossy());
+                        println!("{}", fname.file_name().unwrap().to_string_lossy());
                     }
                 }
                 Cfg => {
                     let allow_unstable_cfg = UnstableFeatures::from_environment()
                         .is_nightly_build();
 
-                    let mut cfgs = Vec::new();
-                    for &(name, ref value) in sess.parse_sess.config.iter() {
+                    let mut cfgs = sess.parse_sess.config.iter().filter_map(|&(name, ref value)| {
                         let gated_cfg = GatedCfg::gate(&ast::MetaItem {
-                            ident: ast::Path::from_ident(name.to_ident()),
+                            ident: ast::Path::from_ident(ast::Ident::with_empty_ctxt(name)),
                             node: ast::MetaItemKind::Word,
                             span: DUMMY_SP,
                         });
@@ -1092,16 +1058,16 @@ impl RustcDefaultCalls {
                         let value = value.as_ref().map(|s| s.as_ref());
                         if name != "target_feature" || value != Some("crt-static") {
                             if !allow_unstable_cfg && gated_cfg.is_some() {
-                                continue;
+                                return None
                             }
                         }
 
-                        cfgs.push(if let Some(value) = value {
-                            format!("{}=\"{}\"", name, value)
+                        if let Some(value) = value {
+                            Some(format!("{}=\"{}\"", name, value))
                         } else {
-                            format!("{}", name)
-                        });
-                    }
+                            Some(name.to_string())
+                        }
+                    }).collect::<Vec<String>>();
 
                     cfgs.sort();
                     for cfg in cfgs {
@@ -1138,9 +1104,8 @@ fn commit_date_str() -> Option<&'static str> {
 pub fn version(binary: &str, matches: &getopts::Matches) {
     let verbose = matches.opt_present("verbose");
 
-    println!("{} {}",
-             binary,
-             option_env!("CFG_VERSION").unwrap_or("unknown version"));
+    println!("{} {}", binary, option_env!("CFG_VERSION").unwrap_or("unknown version"));
+
     if verbose {
         fn unw(x: Option<&str>) -> &str {
             x.unwrap_or("unknown")
@@ -1164,7 +1129,7 @@ fn usage(verbose: bool, include_unstable_options: bool) {
     for option in groups.iter().filter(|x| include_unstable_options || x.is_stable()) {
         (option.apply)(&mut options);
     }
-    let message = format!("Usage: rustc [OPTIONS] INPUT");
+    let message = "Usage: rustc [OPTIONS] INPUT";
     let nightly_help = if nightly_options::is_nightly_build() {
         "\n    -Z help             Print internal options for debugging rustc"
     } else {
@@ -1179,7 +1144,7 @@ fn usage(verbose: bool, include_unstable_options: bool) {
     -C help             Print codegen options
     -W help             \
               Print 'lint' options and default settings{}{}\n",
-             options.usage(&message),
+             options.usage(message),
              nightly_help,
              verbose_help);
 }
@@ -1215,10 +1180,7 @@ Available lint options:
     fn sort_lint_groups(lints: Vec<(&'static str, Vec<lint::LintId>, bool)>)
                         -> Vec<(&'static str, Vec<lint::LintId>)> {
         let mut lints: Vec<_> = lints.into_iter().map(|(x, y, _)| (x, y)).collect();
-        lints.sort_by(|&(x, _): &(&'static str, Vec<lint::LintId>),
-                       &(y, _): &(&'static str, Vec<lint::LintId>)| {
-            x.cmp(y)
-        });
+        lints.sort_by_key(|l| l.0);
         lints
     }
 
@@ -1242,9 +1204,7 @@ Available lint options:
                              .max()
                              .unwrap_or(0);
     let padded = |x: &str| {
-        let mut s = repeat(" ")
-                        .take(max_name_len - x.chars().count())
-                        .collect::<String>();
+        let mut s = " ".repeat(max_name_len - x.chars().count());
         s.push_str(x);
         s
     };
@@ -1266,8 +1226,6 @@ Available lint options:
 
     print_lints(builtin);
 
-
-
     let max_name_len = max("warnings".len(),
                            plugin_groups.iter()
                                         .chain(&builtin_groups)
@@ -1276,9 +1234,7 @@ Available lint options:
                                         .unwrap_or(0));
 
     let padded = |x: &str| {
-        let mut s = repeat(" ")
-                        .take(max_name_len - x.chars().count())
-                        .collect::<String>();
+        let mut s = " ".repeat(max_name_len - x.chars().count());
         s.push_str(x);
         s
     };
@@ -1402,10 +1358,8 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
     for option in config::rustc_optgroups() {
         (option.apply)(&mut options);
     }
-    let matches = match options.parse(args) {
-        Ok(m) => m,
-        Err(f) => early_error(ErrorOutputType::default(), &f.to_string()),
-    };
+    let matches = options.parse(args).unwrap_or_else(|f|
+        early_error(ErrorOutputType::default(), &f.to_string()));
 
     // For all options we just parsed, we check a few aspects:
     //
@@ -1447,6 +1401,7 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
     }
 
     let cg_flags = matches.opt_strs("C");
+
     if cg_flags.iter().any(|x| *x == "help") {
         describe_codegen_flags();
         return None;
@@ -1457,7 +1412,7 @@ pub fn handle_options(args: &[String]) -> Option<getopts::Matches> {
                    "the --no-stack-check flag is deprecated and does nothing");
     }
 
-    if cg_flags.contains(&"passes=list".to_string()) {
+    if cg_flags.iter().any(|x| *x == "passes=list") {
         get_codegen_sysroot("llvm")().print_passes();
         return None;
     }
@@ -1483,57 +1438,27 @@ fn parse_crate_attrs<'a>(sess: &'a Session, input: &Input) -> PResult<'a, Vec<as
     }
 }
 
-/// Runs `f` in a suitable thread for running `rustc`; returns a
-/// `Result` with either the return value of `f` or -- if a panic
-/// occurs -- the panic value.
-pub fn in_rustc_thread<F, R>(f: F) -> Result<R, Box<Any + Send>>
+// Temporarily have stack size set to 32MB to deal with various crates with long method
+// chains or deep syntax trees.
+// FIXME(oli-obk): get https://github.com/rust-lang/rust/pull/55617 the finish line
+const STACK_SIZE: usize = 32 * 1024 * 1024; // 32MB
+
+/// Runs `f` in a suitable thread for running `rustc`; returns a `Result` with either the return
+/// value of `f` or -- if a panic occurs -- the panic value.
+///
+/// This version applies the given name to the thread. This is used by rustdoc to ensure consistent
+/// doctest output across platforms and executions.
+pub fn in_named_rustc_thread<F, R>(name: String, f: F) -> Result<R, Box<dyn Any + Send>>
     where F: FnOnce() -> R + Send + 'static,
           R: Send + 'static,
 {
-    // Temporarily have stack size set to 16MB to deal with nom-using crates failing
-    const STACK_SIZE: usize = 16 * 1024 * 1024; // 16MB
+    // We need a thread for soundness of thread local storage in rustc. For debugging purposes
+    // we allow an escape hatch where everything runs on the main thread.
+    if env::var_os("RUSTC_UNSTABLE_NO_MAIN_THREAD").is_none() {
+        let mut cfg = thread::Builder::new().name(name);
 
-    #[cfg(unix)]
-    let spawn_thread = unsafe {
-        // Fetch the current resource limits
-        let mut rlim = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
-        if libc::getrlimit(libc::RLIMIT_STACK, &mut rlim) != 0 {
-            let err = io::Error::last_os_error();
-            error!("in_rustc_thread: error calling getrlimit: {}", err);
-            true
-        } else if rlim.rlim_max < STACK_SIZE as libc::rlim_t {
-            true
-        } else {
-            std::rt::deinit_stack_guard();
-            rlim.rlim_cur = STACK_SIZE as libc::rlim_t;
-            if libc::setrlimit(libc::RLIMIT_STACK, &mut rlim) != 0 {
-                let err = io::Error::last_os_error();
-                error!("in_rustc_thread: error calling setrlimit: {}", err);
-                std::rt::update_stack_guard();
-                true
-            } else {
-                std::rt::update_stack_guard();
-                false
-            }
-        }
-    };
-
-    // We set the stack size at link time. See src/rustc/rustc.rs.
-    #[cfg(windows)]
-    let spawn_thread = false;
-
-    #[cfg(not(any(windows,unix)))]
-    let spawn_thread = true;
-
-    // The or condition is added from backward compatibility.
-    if spawn_thread || env::var_os("RUST_MIN_STACK").is_some() {
-        let mut cfg = thread::Builder::new().name("rustc".to_string());
-
-        // FIXME: Hacks on hacks. If the env is trying to override the stack size
-        // then *don't* set it explicitly.
+        // If the env is trying to override the stack size then *don't* set it explicitly.
+        // The libstd thread impl will fetch the `RUST_MIN_STACK` env var itself.
         if env::var_os("RUST_MIN_STACK").is_none() {
             cfg = cfg.stack_size(STACK_SIZE);
         }
@@ -1546,16 +1471,23 @@ pub fn in_rustc_thread<F, R>(f: F) -> Result<R, Box<Any + Send>>
     }
 }
 
+/// Runs `f` in a suitable thread for running `rustc`; returns a
+/// `Result` with either the return value of `f` or -- if a panic
+/// occurs -- the panic value.
+pub fn in_rustc_thread<F, R>(f: F) -> Result<R, Box<dyn Any + Send>>
+    where F: FnOnce() -> R + Send + 'static,
+          R: Send + 'static,
+{
+    in_named_rustc_thread("rustc".to_string(), f)
+}
+
 /// Get a list of extra command-line flags provided by the user, as strings.
 ///
 /// This function is used during ICEs to show more information useful for
 /// debugging, since some ICEs only happens with non-default compiler flags
 /// (and the users don't always report them).
 fn extra_compiler_flags() -> Option<(Vec<String>, bool)> {
-    let mut args = Vec::new();
-    for arg in env::args_os() {
-        args.push(arg.to_string_lossy().to_string());
-    }
+    let args = env::args_os().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
 
     // Avoid printing help because of empty args. This can suggest the compiler
     // itself is not the program root (consider RLS).
@@ -1596,10 +1528,21 @@ fn extra_compiler_flags() -> Option<(Vec<String>, bool)> {
         }
     }
 
-    if result.len() > 0 {
+    if !result.is_empty() {
         Some((result, excluded_cargo_defaults))
     } else {
         None
+    }
+}
+
+#[derive(Debug)]
+pub struct CompilationFailure;
+
+impl Error for CompilationFailure {}
+
+impl Display for CompilationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "compilation had errors")
     }
 }
 
@@ -1608,15 +1551,14 @@ fn extra_compiler_flags() -> Option<(Vec<String>, bool)> {
 ///
 /// The diagnostic emitter yielded to the procedure should be used for reporting
 /// errors of the compiler.
-pub fn monitor<F: FnOnce() + Send + 'static>(f: F) {
-    let result = in_rustc_thread(move || {
+pub fn monitor<F: FnOnce() + Send + 'static>(f: F) -> Result<(), CompilationFailure> {
+    in_rustc_thread(move || {
         f()
-    });
-
-    if let Err(value) = result {
-        // Thread panicked without emitting a fatal diagnostic
-        if !value.is::<errors::FatalErrorMarker>() {
-            // Emit a newline
+    }).map_err(|value| {
+        if value.is::<errors::FatalErrorMarker>() {
+            CompilationFailure
+        } else {
+            // Thread panicked without emitting a fatal diagnostic
             eprintln!("");
 
             let emitter =
@@ -1634,31 +1576,31 @@ pub fn monitor<F: FnOnce() + Send + 'static>(f: F) {
                              errors::Level::Bug);
             }
 
-            let mut xs = vec![
-                "the compiler unexpectedly panicked. this is a bug.".to_string(),
-                format!("we would appreciate a bug report: {}", BUG_REPORT_URL),
+            let mut xs: Vec<Cow<'static, str>> = vec![
+                "the compiler unexpectedly panicked. this is a bug.".into(),
+                format!("we would appreciate a bug report: {}", BUG_REPORT_URL).into(),
                 format!("rustc {} running on {}",
                         option_env!("CFG_VERSION").unwrap_or("unknown_version"),
-                        config::host_triple()),
+                        config::host_triple()).into(),
             ];
 
             if let Some((flags, excluded_cargo_defaults)) = extra_compiler_flags() {
-                xs.push(format!("compiler flags: {}", flags.join(" ")));
+                xs.push(format!("compiler flags: {}", flags.join(" ")).into());
 
                 if excluded_cargo_defaults {
-                    xs.push("some of the compiler flags provided by cargo are hidden".to_string());
+                    xs.push("some of the compiler flags provided by cargo are hidden".into());
                 }
             }
 
             for note in &xs {
                 handler.emit(&MultiSpan::new(),
-                             &note,
+                             note,
                              errors::Level::Note);
             }
-        }
 
-        panic::resume_unwind(Box::new(errors::FatalErrorMarker));
-    }
+            panic::resume_unwind(Box::new(errors::FatalErrorMarker));
+        }
+    })
 }
 
 pub fn diagnostics_registry() -> errors::registry::Registry {
@@ -1671,7 +1613,6 @@ pub fn diagnostics_registry() -> errors::registry::Registry {
     all_errors.extend_from_slice(&rustc_privacy::DIAGNOSTICS);
     // FIXME: need to figure out a way to get these back in here
     // all_errors.extend_from_slice(get_codegen_backend(sess).diagnostics());
-    all_errors.extend_from_slice(&rustc_codegen_utils::DIAGNOSTICS);
     all_errors.extend_from_slice(&rustc_metadata::DIAGNOSTICS);
     all_errors.extend_from_slice(&rustc_passes::DIAGNOSTICS);
     all_errors.extend_from_slice(&rustc_plugin::DIAGNOSTICS);

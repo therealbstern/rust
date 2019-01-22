@@ -1,27 +1,17 @@
-// Copyright 2018 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Types and Traits for working with asynchronous tasks.
 
 pub use core::task::*;
 
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
 pub use self::if_arc::*;
 
-#[cfg(target_has_atomic = "ptr")]
+#[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
 mod if_arc {
     use super::*;
-    use arc::Arc;
     use core::marker::PhantomData;
     use core::mem;
     use core::ptr::{self, NonNull};
+    use sync::Arc;
 
     /// A way of waking up a specific task.
     ///
@@ -47,7 +37,7 @@ mod if_arc {
         }
     }
 
-    #[cfg(target_has_atomic = "ptr")]
+    #[cfg(all(target_has_atomic = "ptr", target_has_atomic = "cas"))]
     struct ArcWrapped<T>(PhantomData<T>);
 
     unsafe impl<T: Wake + 'static> UnsafeWake for ArcWrapped<T> {

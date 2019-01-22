@@ -1,18 +1,8 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use borrow_check::location::{LocationIndex, LocationTable};
 use dataflow::indexes::BorrowIndex;
 use polonius_engine::AllFacts as PoloniusAllFacts;
 use polonius_engine::Atom;
-use rustc::ty::RegionVid;
+use rustc::ty::{RegionVid, TyCtxt};
 use rustc_data_structures::indexed_vec::Idx;
 use std::error::Error;
 use std::fmt::Debug;
@@ -23,6 +13,10 @@ use std::path::Path;
 crate type AllFacts = PoloniusAllFacts<RegionVid, BorrowIndex, LocationIndex>;
 
 crate trait AllFactsExt {
+    /// Returns true if there is a need to gather `AllFacts` given the
+    /// current `-Z` flags.
+    fn enabled(tcx: TyCtxt<'_, '_, '_>) -> bool;
+
     fn write_to_dir(
         &self,
         dir: impl AsRef<Path>,
@@ -31,6 +25,12 @@ crate trait AllFactsExt {
 }
 
 impl AllFactsExt for AllFacts {
+    /// Return
+    fn enabled(tcx: TyCtxt<'_, '_, '_>) -> bool {
+        tcx.sess.opts.debugging_opts.nll_facts
+            || tcx.sess.opts.debugging_opts.polonius
+    }
+
     fn write_to_dir(
         &self,
         dir: impl AsRef<Path>,
@@ -90,18 +90,6 @@ impl Atom for LocationIndex {
     }
 }
 
-impl From<usize> for LocationIndex {
-    fn from(i: usize) -> LocationIndex {
-        LocationIndex::new(i)
-    }
-}
-
-impl From<LocationIndex> for usize {
-    fn from(vid: LocationIndex) -> usize {
-        Idx::index(vid)
-    }
-}
-
 struct FactWriter<'w> {
     location_table: &'w LocationTable,
     dir: &'w Path,
@@ -110,7 +98,7 @@ struct FactWriter<'w> {
 impl<'w> FactWriter<'w> {
     fn write_facts_to_path<T>(
         &self,
-        rows: &Vec<T>,
+        rows: &[T],
         file_name: &str,
     ) -> Result<(), Box<dyn Error>>
     where

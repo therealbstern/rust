@@ -1,13 +1,3 @@
-// Copyright 2013-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use os::unix::prelude::*;
 
 use ffi::{CString, CStr, OsString, OsStr};
@@ -59,7 +49,10 @@ struct InnerReadDir {
 }
 
 #[derive(Clone)]
-pub struct ReadDir(Arc<InnerReadDir>);
+pub struct ReadDir {
+    inner: Arc<InnerReadDir>,
+    end_of_stream: bool,
+}
 
 struct Dir(*mut libc::DIR);
 
@@ -215,7 +208,7 @@ impl fmt::Debug for ReadDir {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         // This will only be called from std::fs::ReadDir, which will add a "ReadDir()" frame.
         // Thus the result will be e g 'ReadDir("/home")'
-        fmt::Debug::fmt(&*self.0.root, f)
+        fmt::Debug::fmt(&*self.inner.root, f)
     }
 }
 
@@ -231,7 +224,7 @@ impl Iterator for ReadDir {
                 // is safe to use in threaded applications and it is generally preferred
                 // over the readdir_r(3C) function.
                 super::os::set_errno(0);
-                let entry_ptr = libc::readdir(self.0.dirp.0);
+                let entry_ptr = libc::readdir(self.inner.dirp.0);
                 if entry_ptr.is_null() {
                     // NULL can mean either the end is reached or an error occurred.
                     // So we had to clear errno beforehand to check for an error now.
@@ -259,6 +252,10 @@ impl Iterator for ReadDir {
 
     #[cfg(not(any(target_os = "solaris", target_os = "fuchsia")))]
     fn next(&mut self) -> Option<io::Result<DirEntry>> {
+        if self.end_of_stream {
+            return None;
+        }
+
         unsafe {
             let mut ret = DirEntry {
                 entry: mem::zeroed(),
@@ -266,7 +263,14 @@ impl Iterator for ReadDir {
             };
             let mut entry_ptr = ptr::null_mut();
             loop {
-                if readdir64_r(self.0.dirp.0, &mut ret.entry, &mut entry_ptr) != 0 {
+                if readdir64_r(self.inner.dirp.0, &mut ret.entry, &mut entry_ptr) != 0 {
+                    if entry_ptr.is_null() {
+                        // We encountered an error (which will be returned in this iteration), but
+                        // we also reached the end of the directory stream. The `end_of_stream`
+                        // flag is enabled to make sure that we return `None` in the next iteration
+                        // (instead of looping forever)
+                        self.end_of_stream = true;
+                    }
                     return Some(Err(Error::last_os_error()))
                 }
                 if entry_ptr.is_null() {
@@ -289,7 +293,7 @@ impl Drop for Dir {
 
 impl DirEntry {
     pub fn path(&self) -> PathBuf {
-        self.dir.0.root.join(OsStr::from_bytes(self.name_bytes()))
+        self.dir.inner.root.join(OsStr::from_bytes(self.name_bytes()))
     }
 
     pub fn file_name(&self) -> OsString {
@@ -298,12 +302,12 @@ impl DirEntry {
 
     #[cfg(any(target_os = "linux", target_os = "emscripten", target_os = "android"))]
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        let fd = cvt(unsafe {dirfd(self.dir.0.dirp.0)})?;
+        let fd = cvt(unsafe {dirfd(self.dir.inner.dirp.0)})?;
         let mut stat: stat64 = unsafe { mem::zeroed() };
         cvt(unsafe {
             fstatat64(fd, self.entry.d_name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
         })?;
-        Ok(FileAttr { stat: stat })
+        Ok(FileAttr { stat })
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "emscripten", target_os = "android")))]
@@ -311,12 +315,12 @@ impl DirEntry {
         lstat(&self.path())
     }
 
-    #[cfg(any(target_os = "solaris", target_os = "haiku"))]
+    #[cfg(any(target_os = "solaris", target_os = "haiku", target_os = "hermit"))]
     pub fn file_type(&self) -> io::Result<FileType> {
         lstat(&self.path()).map(|m| m.file_type())
     }
 
-    #[cfg(not(any(target_os = "solaris", target_os = "haiku")))]
+    #[cfg(not(any(target_os = "solaris", target_os = "haiku", target_os = "hermit")))]
     pub fn file_type(&self) -> io::Result<FileType> {
         match self.entry.d_type {
             libc::DT_CHR => Ok(FileType { mode: libc::S_IFCHR }),
@@ -338,7 +342,8 @@ impl DirEntry {
               target_os = "solaris",
               target_os = "haiku",
               target_os = "l4re",
-              target_os = "fuchsia"))]
+              target_os = "fuchsia",
+              target_os = "hermit"))]
     pub fn ino(&self) -> u64 {
         self.entry.d_ino as u64
     }
@@ -369,7 +374,8 @@ impl DirEntry {
               target_os = "linux",
               target_os = "emscripten",
               target_os = "l4re",
-              target_os = "haiku"))]
+              target_os = "haiku",
+              target_os = "hermit"))]
     fn name_bytes(&self) -> &[u8] {
         unsafe {
             CStr::from_ptr(self.entry.d_name.as_ptr()).to_bytes()
@@ -510,7 +516,7 @@ impl File {
         cvt(unsafe {
             fstat64(self.0.raw(), &mut stat)
         })?;
-        Ok(FileAttr { stat: stat })
+        Ok(FileAttr { stat })
     }
 
     pub fn fsync(&self) -> io::Result<()> {
@@ -691,7 +697,10 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
             Err(Error::last_os_error())
         } else {
             let inner = InnerReadDir { dirp: Dir(ptr), root };
-            Ok(ReadDir(Arc::new(inner)))
+            Ok(ReadDir{
+                inner: Arc::new(inner),
+                end_of_stream: false,
+            })
         }
     }
 }
@@ -786,18 +795,18 @@ pub fn stat(p: &Path) -> io::Result<FileAttr> {
     let p = cstr(p)?;
     let mut stat: stat64 = unsafe { mem::zeroed() };
     cvt(unsafe {
-        stat64(p.as_ptr(), &mut stat as *mut _ as *mut _)
+        stat64(p.as_ptr(), &mut stat)
     })?;
-    Ok(FileAttr { stat: stat })
+    Ok(FileAttr { stat })
 }
 
 pub fn lstat(p: &Path) -> io::Result<FileAttr> {
     let p = cstr(p)?;
     let mut stat: stat64 = unsafe { mem::zeroed() };
     cvt(unsafe {
-        lstat64(p.as_ptr(), &mut stat as *mut _ as *mut _)
+        lstat64(p.as_ptr(), &mut stat)
     })?;
-    Ok(FileAttr { stat: stat })
+    Ok(FileAttr { stat })
 }
 
 pub fn canonicalize(p: &Path) -> io::Result<PathBuf> {
@@ -838,7 +847,7 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     use sync::atomic::{AtomicBool, Ordering};
 
     // Kernel prior to 4.5 don't have copy_file_range
-    // We store the availability in a global to avoid unneccessary syscalls
+    // We store the availability in a global to avoid unnecessary syscalls
     static HAS_COPY_FILE_RANGE: AtomicBool = AtomicBool::new(true);
 
     unsafe fn copy_file_range(

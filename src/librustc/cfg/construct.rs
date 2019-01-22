@@ -1,18 +1,8 @@
-// Copyright 2012-2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
-use rustc_data_structures::graph;
 use cfg::*;
 use middle::region;
-use ty::{self, TyCtxt};
+use rustc_data_structures::graph::implementation as graph;
 use syntax::ptr::P;
+use ty::{self, TyCtxt};
 
 use hir::{self, PatKind};
 use hir::def_id::DefId;
@@ -53,7 +43,7 @@ pub fn construct<'a, 'tcx>(tcx: TyCtxt<'a, 'tcx, 'tcx>,
     let body_exit;
 
     // Find the tables for this body.
-    let owner_def_id = tcx.hir.local_def_id(tcx.hir.body_owner(body.id()));
+    let owner_def_id = tcx.hir().local_def_id(tcx.hir().body_owner(body.id()));
     let tables = tcx.typeck_tables_of(owner_def_id);
 
     let mut cfg_builder = CFGBuilder {
@@ -109,30 +99,21 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     }
 
     fn stmt(&mut self, stmt: &hir::Stmt, pred: CFGIndex) -> CFGIndex {
-        let hir_id = self.tcx.hir.node_to_hir_id(stmt.node.id());
-        match stmt.node {
-            hir::StmtDecl(ref decl, _) => {
-                let exit = self.decl(&decl, pred);
-                self.add_ast_node(hir_id.local_id, &[exit])
-            }
-
-            hir::StmtExpr(ref expr, _) |
-            hir::StmtSemi(ref expr, _) => {
-                let exit = self.expr(&expr, pred);
-                self.add_ast_node(hir_id.local_id, &[exit])
-            }
-        }
-    }
-
-    fn decl(&mut self, decl: &hir::Decl, pred: CFGIndex) -> CFGIndex {
-        match decl.node {
-            hir::DeclLocal(ref local) => {
+        let hir_id = self.tcx.hir().node_to_hir_id(stmt.id);
+        let exit = match stmt.node {
+            hir::StmtKind::Local(ref local) => {
                 let init_exit = self.opt_expr(&local.init, pred);
                 self.pat(&local.pat, init_exit)
             }
-
-            hir::DeclItem(_) => pred,
-        }
+            hir::StmtKind::Item(_) => {
+                pred
+            }
+            hir::StmtKind::Expr(ref expr) |
+            hir::StmtKind::Semi(ref expr) => {
+                self.expr(&expr, pred)
+            }
+        };
+        self.add_ast_node(hir_id.local_id, &[exit])
     }
 
     fn pat(&mut self, pat: &hir::Pat, pred: CFGIndex) -> CFGIndex {
@@ -179,12 +160,12 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
 
     fn expr(&mut self, expr: &hir::Expr, pred: CFGIndex) -> CFGIndex {
         match expr.node {
-            hir::ExprBlock(ref blk, _) => {
+            hir::ExprKind::Block(ref blk, _) => {
                 let blk_exit = self.block(&blk, pred);
                 self.add_ast_node(expr.hir_id.local_id, &[blk_exit])
             }
 
-            hir::ExprIf(ref cond, ref then, None) => {
+            hir::ExprKind::If(ref cond, ref then, None) => {
                 //
                 //     [pred]
                 //       |
@@ -204,7 +185,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_ast_node(expr.hir_id.local_id, &[cond_exit, then_exit])      // 3,4
             }
 
-            hir::ExprIf(ref cond, ref then, Some(ref otherwise)) => {
+            hir::ExprKind::If(ref cond, ref then, Some(ref otherwise)) => {
                 //
                 //     [pred]
                 //       |
@@ -225,7 +206,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_ast_node(expr.hir_id.local_id, &[then_exit, else_exit])      // 4, 5
             }
 
-            hir::ExprWhile(ref cond, ref body, _) => {
+            hir::ExprKind::While(ref cond, ref body, _) => {
                 //
                 //         [pred]
                 //           |
@@ -267,7 +248,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 expr_exit
             }
 
-            hir::ExprLoop(ref body, _, _) => {
+            hir::ExprKind::Loop(ref body, _, _) => {
                 //
                 //     [pred]
                 //       |
@@ -295,11 +276,11 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 expr_exit
             }
 
-            hir::ExprMatch(ref discr, ref arms, _) => {
+            hir::ExprKind::Match(ref discr, ref arms, _) => {
                 self.match_(expr.hir_id.local_id, &discr, &arms, pred)
             }
 
-            hir::ExprBinary(op, ref l, ref r) if op.node.is_lazy() => {
+            hir::ExprKind::Binary(op, ref l, ref r) if op.node.is_lazy() => {
                 //
                 //     [pred]
                 //       |
@@ -319,14 +300,14 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_ast_node(expr.hir_id.local_id, &[l_exit, r_exit])            // 3,4
             }
 
-            hir::ExprRet(ref v) => {
+            hir::ExprKind::Ret(ref v) => {
                 let v_exit = self.opt_expr(v, pred);
                 let b = self.add_ast_node(expr.hir_id.local_id, &[v_exit]);
                 self.add_returning_edge(expr, b);
                 self.add_unreachable_node()
             }
 
-            hir::ExprBreak(destination, ref opt_expr) => {
+            hir::ExprKind::Break(destination, ref opt_expr) => {
                 let v = self.opt_expr(opt_expr, pred);
                 let (target_scope, break_dest) =
                     self.find_scope_edge(expr, destination, ScopeCfKind::Break);
@@ -335,7 +316,7 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_unreachable_node()
             }
 
-            hir::ExprContinue(destination) => {
+            hir::ExprKind::Continue(destination) => {
                 let (target_scope, cont_dest) =
                     self.find_scope_edge(expr, destination, ScopeCfKind::Continue);
                 let a = self.add_ast_node(expr.hir_id.local_id, &[pred]);
@@ -343,66 +324,67 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                 self.add_unreachable_node()
             }
 
-            hir::ExprArray(ref elems) => {
+            hir::ExprKind::Array(ref elems) => {
                 self.straightline(expr, pred, elems.iter().map(|e| &*e))
             }
 
-            hir::ExprCall(ref func, ref args) => {
+            hir::ExprKind::Call(ref func, ref args) => {
                 self.call(expr, pred, &func, args.iter().map(|e| &*e))
             }
 
-            hir::ExprMethodCall(.., ref args) => {
+            hir::ExprKind::MethodCall(.., ref args) => {
                 self.call(expr, pred, &args[0], args[1..].iter().map(|e| &*e))
             }
 
-            hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) if self.tables.is_method_call(expr) => {
+            hir::ExprKind::Index(ref l, ref r) |
+            hir::ExprKind::Binary(_, ref l, ref r) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &l, Some(&**r).into_iter())
             }
 
-            hir::ExprUnary(_, ref e) if self.tables.is_method_call(expr) => {
+            hir::ExprKind::Unary(_, ref e) if self.tables.is_method_call(expr) => {
                 self.call(expr, pred, &e, None::<hir::Expr>.iter())
             }
 
-            hir::ExprTup(ref exprs) => {
+            hir::ExprKind::Tup(ref exprs) => {
                 self.straightline(expr, pred, exprs.iter().map(|e| &*e))
             }
 
-            hir::ExprStruct(_, ref fields, ref base) => {
+            hir::ExprKind::Struct(_, ref fields, ref base) => {
                 let field_cfg = self.straightline(expr, pred, fields.iter().map(|f| &*f.expr));
                 self.opt_expr(base, field_cfg)
             }
 
-            hir::ExprAssign(ref l, ref r) |
-            hir::ExprAssignOp(_, ref l, ref r) => {
+            hir::ExprKind::Assign(ref l, ref r) |
+            hir::ExprKind::AssignOp(_, ref l, ref r) => {
                 self.straightline(expr, pred, [r, l].iter().map(|&e| &**e))
             }
 
-            hir::ExprIndex(ref l, ref r) |
-            hir::ExprBinary(_, ref l, ref r) => { // NB: && and || handled earlier
+            hir::ExprKind::Index(ref l, ref r) |
+            hir::ExprKind::Binary(_, ref l, ref r) => { // N.B., && and || handled earlier
                 self.straightline(expr, pred, [l, r].iter().map(|&e| &**e))
             }
 
-            hir::ExprBox(ref e) |
-            hir::ExprAddrOf(_, ref e) |
-            hir::ExprCast(ref e, _) |
-            hir::ExprType(ref e, _) |
-            hir::ExprUnary(_, ref e) |
-            hir::ExprField(ref e, _) |
-            hir::ExprYield(ref e) |
-            hir::ExprRepeat(ref e, _) => {
+            hir::ExprKind::Box(ref e) |
+            hir::ExprKind::AddrOf(_, ref e) |
+            hir::ExprKind::Cast(ref e, _) |
+            hir::ExprKind::Type(ref e, _) |
+            hir::ExprKind::Unary(_, ref e) |
+            hir::ExprKind::Field(ref e, _) |
+            hir::ExprKind::Yield(ref e) |
+            hir::ExprKind::Repeat(ref e, _) => {
                 self.straightline(expr, pred, Some(&**e).into_iter())
             }
 
-            hir::ExprInlineAsm(_, ref outputs, ref inputs) => {
+            hir::ExprKind::InlineAsm(_, ref outputs, ref inputs) => {
                 let post_outputs = self.exprs(outputs.iter().map(|e| &*e), pred);
                 let post_inputs = self.exprs(inputs.iter().map(|e| &*e), post_outputs);
                 self.add_ast_node(expr.hir_id.local_id, &[post_inputs])
             }
 
-            hir::ExprClosure(..) |
-            hir::ExprLit(..) |
-            hir::ExprPath(_) => {
+            hir::ExprKind::Closure(..) |
+            hir::ExprKind::Lit(..) |
+            hir::ExprKind::Path(_) |
+            hir::ExprKind::Err => {
                 self.straightline(expr, pred, None::<hir::Expr>.iter())
             }
         }
@@ -415,8 +397,8 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
             args: I) -> CFGIndex {
         let func_or_rcvr_exit = self.expr(func_or_rcvr, pred);
         let ret = self.straightline(call_expr, func_or_rcvr_exit, args);
-        // FIXME(canndrew): This is_never should probably be an is_uninhabited.
-        if self.tables.expr_ty(call_expr).is_never() {
+        let m = self.tcx.hir().get_module_parent(call_expr.id);
+        if self.tcx.is_ty_uninhabited_from(m, self.tables.expr_ty(call_expr)) {
             self.add_unreachable_node()
         } else {
             ret
@@ -488,8 +470,9 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                     // expression to target
                     let guard_start = self.add_dummy_node(&[pat_exit]);
                     // Visit the guard expression
-                    let guard_exit = self.expr(&guard, guard_start);
-
+                    let guard_exit = match guard {
+                        hir::Guard::If(ref e) => self.expr(e, guard_start),
+                    };
                     // #47295: We used to have very special case code
                     // here for when a pair of arms are both formed
                     // solely from constants, and if so, not add these
@@ -555,7 +538,10 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
                         target_scope: region::Scope,
                         to_index: CFGIndex) {
         let mut data = CFGEdgeData { exiting_scopes: vec![] };
-        let mut scope = region::Scope::Node(from_expr.hir_id.local_id);
+        let mut scope = region::Scope {
+            id: from_expr.hir_id.local_id,
+            data: region::ScopeData::Node
+        };
         let region_scope_tree = self.tcx.region_scope_tree(self.owner_def_id);
         while scope != target_scope {
             data.exiting_scopes.push(scope.item_local_id());
@@ -567,12 +553,12 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
     fn add_returning_edge(&mut self,
                           _from_expr: &hir::Expr,
                           from_index: CFGIndex) {
-        let mut data = CFGEdgeData {
-            exiting_scopes: vec![],
+        let data = CFGEdgeData {
+            exiting_scopes: self.loop_scopes.iter()
+                                            .rev()
+                                            .map(|&LoopScope { loop_id: id, .. }| id)
+                                            .collect()
         };
-        for &LoopScope { loop_id: id, .. } in self.loop_scopes.iter().rev() {
-            data.exiting_scopes.push(id);
-        }
         self.graph.add_edge(from_index, self.fn_exit, data);
     }
 
@@ -584,18 +570,24 @@ impl<'a, 'tcx> CFGBuilder<'a, 'tcx> {
         match destination.target_id {
             Ok(loop_id) => {
                 for b in &self.breakable_block_scopes {
-                    if b.block_expr_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
-                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
-                        return (region::Scope::Node(scope_id), match scope_cf_kind {
+                    if b.block_expr_id == self.tcx.hir().node_to_hir_id(loop_id).local_id {
+                        let scope = region::Scope {
+                            id: self.tcx.hir().node_to_hir_id(loop_id).local_id,
+                            data: region::ScopeData::Node
+                        };
+                        return (scope, match scope_cf_kind {
                             ScopeCfKind::Break => b.break_index,
                             ScopeCfKind::Continue => bug!("can't continue to block"),
                         });
                     }
                 }
                 for l in &self.loop_scopes {
-                    if l.loop_id == self.tcx.hir.node_to_hir_id(loop_id).local_id {
-                        let scope_id = self.tcx.hir.node_to_hir_id(loop_id).local_id;
-                        return (region::Scope::Node(scope_id), match scope_cf_kind {
+                    if l.loop_id == self.tcx.hir().node_to_hir_id(loop_id).local_id {
+                        let scope = region::Scope {
+                            id: self.tcx.hir().node_to_hir_id(loop_id).local_id,
+                            data: region::ScopeData::Node
+                        };
+                        return (scope, match scope_cf_kind {
                             ScopeCfKind::Break => l.break_index,
                             ScopeCfKind::Continue => l.continue_index,
                         });

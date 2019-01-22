@@ -1,13 +1,3 @@
-// Copyright 2018 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use core::time::Duration;
 
 #[test]
@@ -159,6 +149,20 @@ fn checked_div() {
     assert_eq!(Duration::new(2, 0).checked_div(2), Some(Duration::new(1, 0)));
     assert_eq!(Duration::new(1, 0).checked_div(2), Some(Duration::new(0, 500_000_000)));
     assert_eq!(Duration::new(2, 0).checked_div(0), None);
+}
+
+#[test]
+fn correct_sum() {
+    let durations = [
+        Duration::new(1, 999_999_999),
+        Duration::new(2, 999_999_999),
+        Duration::new(0, 999_999_999),
+        Duration::new(0, 999_999_999),
+        Duration::new(0, 999_999_999),
+        Duration::new(5, 0),
+    ];
+    let sum = durations.iter().sum::<Duration>();
+    assert_eq!(sum, Duration::new(1+2+5+4, 1_000_000_000 - 5));
 }
 
 #[test]

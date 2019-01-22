@@ -1,13 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use rustc::dep_graph::{DepGraph, DepKind, WorkProduct, WorkProductId};
 use rustc::session::Session;
 use rustc::ty::TyCtxt;
@@ -16,7 +6,6 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::sync::join;
 use rustc_serialize::Encodable as RustcEncodable;
 use rustc_serialize::opaque::Encoder;
-use std::io::{self, Cursor};
 use std::fs;
 use std::path::PathBuf;
 
@@ -98,7 +87,7 @@ pub fn save_work_product_index(sess: &Session,
 }
 
 fn save_in<F>(sess: &Session, path_buf: PathBuf, encode: F)
-    where F: FnOnce(&mut Encoder) -> io::Result<()>
+    where F: FnOnce(&mut Encoder)
 {
     debug!("save: storing data in {}", path_buf.display());
 
@@ -121,20 +110,12 @@ fn save_in<F>(sess: &Session, path_buf: PathBuf, encode: F)
     }
 
     // generate the data in a memory buffer
-    let mut wr = Cursor::new(Vec::new());
-    file_format::write_file_header(&mut wr).unwrap();
-    match encode(&mut Encoder::new(&mut wr)) {
-        Ok(()) => {}
-        Err(err) => {
-            sess.err(&format!("could not encode dep-graph to `{}`: {}",
-                              path_buf.display(),
-                              err));
-            return;
-        }
-    }
+    let mut encoder = Encoder::new(Vec::new());
+    file_format::write_file_header(&mut encoder);
+    encode(&mut encoder);
 
     // write the data out
-    let data = wr.into_inner();
+    let data = encoder.into_inner();
     match fs::write(&path_buf, data) {
         Ok(_) => {
             debug!("save: data written to disk successfully");
@@ -149,10 +130,9 @@ fn save_in<F>(sess: &Session, path_buf: PathBuf, encode: F)
 }
 
 fn encode_dep_graph(tcx: TyCtxt,
-                    encoder: &mut Encoder)
-                    -> io::Result<()> {
+                    encoder: &mut Encoder) {
     // First encode the commandline arguments hash
-    tcx.sess.opts.dep_tracking_hash().encode(encoder)?;
+    tcx.sess.opts.dep_tracking_hash().encode(encoder).unwrap();
 
     // Encode the graph data.
     let serialized_graph = time(tcx.sess, "getting serialized graph", || {
@@ -169,10 +149,8 @@ fn encode_dep_graph(tcx: TyCtxt,
 
         let total_node_count = serialized_graph.nodes.len();
         let total_edge_count = serialized_graph.edge_list_data.len();
-        let (total_edge_reads, total_duplicate_edge_reads) =
-            tcx.dep_graph.edge_deduplication_data();
 
-        let mut counts: FxHashMap<_, Stat> = FxHashMap();
+        let mut counts: FxHashMap<_, Stat> = FxHashMap::default();
 
         for (i, &node) in serialized_graph.nodes.iter_enumerated() {
             let stat = counts.entry(node.kind).or_insert(Stat {
@@ -208,8 +186,11 @@ fn encode_dep_graph(tcx: TyCtxt,
         println!("[incremental]");
         println!("[incremental] Total Node Count: {}", total_node_count);
         println!("[incremental] Total Edge Count: {}", total_edge_count);
-        println!("[incremental] Total Edge Reads: {}", total_edge_reads);
-        println!("[incremental] Total Duplicate Edge Reads: {}", total_duplicate_edge_reads);
+        if let Some((total_edge_reads,
+                     total_duplicate_edge_reads)) = tcx.dep_graph.edge_deduplication_data() {
+            println!("[incremental] Total Edge Reads: {}", total_edge_reads);
+            println!("[incremental] Total Duplicate Edge Reads: {}", total_duplicate_edge_reads);
+        }
         println!("[incremental]");
         println!("[incremental]  {:<36}| {:<17}| {:<12}| {:<17}|",
                  "Node Kind",
@@ -234,14 +215,12 @@ fn encode_dep_graph(tcx: TyCtxt,
     }
 
     time(tcx.sess, "encoding serialized graph", || {
-        serialized_graph.encode(encoder)
-    })?;
-
-    Ok(())
+        serialized_graph.encode(encoder).unwrap();
+    });
 }
 
 fn encode_work_product_index(work_products: &FxHashMap<WorkProductId, WorkProduct>,
-                             encoder: &mut Encoder) -> io::Result<()> {
+                             encoder: &mut Encoder) {
     let serialized_products: Vec<_> = work_products
         .iter()
         .map(|(id, work_product)| {
@@ -252,13 +231,12 @@ fn encode_work_product_index(work_products: &FxHashMap<WorkProductId, WorkProduc
         })
         .collect();
 
-    serialized_products.encode(encoder)
+    serialized_products.encode(encoder).unwrap();
 }
 
 fn encode_query_cache(tcx: TyCtxt,
-                      encoder: &mut Encoder)
-                      -> io::Result<()> {
+                      encoder: &mut Encoder) {
     time(tcx.sess, "serialize query result cache", || {
-        tcx.serialize_query_result_cache(encoder)
+        tcx.serialize_query_result_cache(encoder).unwrap();
     })
 }

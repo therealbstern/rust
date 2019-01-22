@@ -1,13 +1,3 @@
-// Copyright 2013-2016 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Composable external iteration.
 //!
 //! If you've found yourself with a collection of some kind, and needed to
@@ -112,10 +102,10 @@
 //!
 //!     // next() is the only required method
 //!     fn next(&mut self) -> Option<usize> {
-//!         // increment our count. This is why we started at zero.
+//!         // Increment our count. This is why we started at zero.
 //!         self.count += 1;
 //!
-//!         // check to see if we've finished counting or not.
+//!         // Check to see if we've finished counting or not.
 //!         if self.count < 6 {
 //!             Some(self.count)
 //!         } else {
@@ -253,7 +243,7 @@
 //! using it. The compiler will warn us about this kind of behavior:
 //!
 //! ```text
-//! warning: unused result which must be used: iterator adaptors are lazy and
+//! warning: unused result that must be used: iterators are lazy and
 //! do nothing unless consumed
 //! ```
 //!
@@ -319,10 +309,9 @@
 use cmp;
 use fmt;
 use iter_private::TrustedRandomAccess;
-use ops::{self, Try};
+use ops::Try;
 use usize;
 use intrinsics;
-use mem;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::iterator::Iterator;
@@ -340,6 +329,10 @@ pub use self::sources::{RepeatWith, repeat_with};
 pub use self::sources::{Empty, empty};
 #[stable(feature = "iter_once", since = "1.2.0")]
 pub use self::sources::{Once, once};
+#[unstable(feature = "iter_once_with", issue = "57581")]
+pub use self::sources::{OnceWith, once_with};
+#[unstable(feature = "iter_unfold", issue = "55977")]
+pub use self::sources::{Unfold, unfold, Successors, successors};
 
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use self::traits::{FromIterator, IntoIterator, DoubleEndedIterator, Extend};
@@ -413,7 +406,7 @@ impl<R: Try> LoopState<R::Ok, R> {
 /// [`rev`]: trait.Iterator.html#method.rev
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Rev<T> {
     iter: T
@@ -427,6 +420,9 @@ impl<I> Iterator for Rev<I> where I: DoubleEndedIterator {
     fn next(&mut self) -> Option<<I as Iterator>::Item> { self.iter.next_back() }
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) { self.iter.size_hint() }
+
+    #[inline]
+    fn nth(&mut self, n: usize) -> Option<<I as Iterator>::Item> { self.iter.nth_back(n) }
 
     fn try_fold<B, F, R>(&mut self, init: B, f: F) -> R where
         Self: Sized, F: FnMut(B, Self::Item) -> R, R: Try<Ok=B>
@@ -459,6 +455,9 @@ impl<I> Iterator for Rev<I> where I: DoubleEndedIterator {
 impl<I> DoubleEndedIterator for Rev<I> where I: DoubleEndedIterator {
     #[inline]
     fn next_back(&mut self) -> Option<<I as Iterator>::Item> { self.iter.next() }
+
+    #[inline]
+    fn nth_back(&mut self, n: usize) -> Option<<I as Iterator>::Item> { self.iter.nth(n) }
 
     fn try_rfold<B, F, R>(&mut self, init: B, f: F) -> R where
         Self: Sized, F: FnMut(B, Self::Item) -> R, R: Try<Ok=B>
@@ -500,6 +499,106 @@ impl<I> FusedIterator for Rev<I>
 unsafe impl<I> TrustedLen for Rev<I>
     where I: TrustedLen + DoubleEndedIterator {}
 
+/// An iterator that copies the elements of an underlying iterator.
+///
+/// This `struct` is created by the [`copied`] method on [`Iterator`]. See its
+/// documentation for more.
+///
+/// [`copied`]: trait.Iterator.html#method.copied
+/// [`Iterator`]: trait.Iterator.html
+#[unstable(feature = "iter_copied", issue = "57127")]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+#[derive(Clone, Debug)]
+pub struct Copied<I> {
+    it: I,
+}
+
+#[unstable(feature = "iter_copied", issue = "57127")]
+impl<'a, I, T: 'a> Iterator for Copied<I>
+    where I: Iterator<Item=&'a T>, T: Copy
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<T> {
+        self.it.next().copied()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.it.size_hint()
+    }
+
+    fn try_fold<B, F, R>(&mut self, init: B, mut f: F) -> R where
+        Self: Sized, F: FnMut(B, Self::Item) -> R, R: Try<Ok=B>
+    {
+        self.it.try_fold(init, move |acc, &elt| f(acc, elt))
+    }
+
+    fn fold<Acc, F>(self, init: Acc, mut f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.it.fold(init, move |acc, &elt| f(acc, elt))
+    }
+}
+
+#[unstable(feature = "iter_copied", issue = "57127")]
+impl<'a, I, T: 'a> DoubleEndedIterator for Copied<I>
+    where I: DoubleEndedIterator<Item=&'a T>, T: Copy
+{
+    fn next_back(&mut self) -> Option<T> {
+        self.it.next_back().copied()
+    }
+
+    fn try_rfold<B, F, R>(&mut self, init: B, mut f: F) -> R where
+        Self: Sized, F: FnMut(B, Self::Item) -> R, R: Try<Ok=B>
+    {
+        self.it.try_rfold(init, move |acc, &elt| f(acc, elt))
+    }
+
+    fn rfold<Acc, F>(self, init: Acc, mut f: F) -> Acc
+        where F: FnMut(Acc, Self::Item) -> Acc,
+    {
+        self.it.rfold(init, move |acc, &elt| f(acc, elt))
+    }
+}
+
+#[unstable(feature = "iter_copied", issue = "57127")]
+impl<'a, I, T: 'a> ExactSizeIterator for Copied<I>
+    where I: ExactSizeIterator<Item=&'a T>, T: Copy
+{
+    fn len(&self) -> usize {
+        self.it.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.it.is_empty()
+    }
+}
+
+#[unstable(feature = "iter_copied", issue = "57127")]
+impl<'a, I, T: 'a> FusedIterator for Copied<I>
+    where I: FusedIterator<Item=&'a T>, T: Copy
+{}
+
+#[doc(hidden)]
+unsafe impl<'a, I, T: 'a> TrustedRandomAccess for Copied<I>
+    where I: TrustedRandomAccess<Item=&'a T>, T: Copy
+{
+    unsafe fn get_unchecked(&mut self, i: usize) -> Self::Item {
+        *self.it.get_unchecked(i)
+    }
+
+    #[inline]
+    fn may_have_side_effect() -> bool {
+        I::may_have_side_effect()
+    }
+}
+
+#[unstable(feature = "iter_copied", issue = "57127")]
+unsafe impl<'a, I, T: 'a> TrustedLen for Copied<I>
+    where I: TrustedLen<Item=&'a T>,
+          T: Copy
+{}
+
 /// An iterator that clones the elements of an underlying iterator.
 ///
 /// This `struct` is created by the [`cloned`] method on [`Iterator`]. See its
@@ -508,7 +607,7 @@ unsafe impl<I> TrustedLen for Rev<I>
 /// [`cloned`]: trait.Iterator.html#method.cloned
 /// [`Iterator`]: trait.Iterator.html
 #[stable(feature = "iter_cloned", since = "1.1.0")]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[derive(Clone, Debug)]
 pub struct Cloned<I> {
     it: I,
@@ -601,7 +700,9 @@ unsafe impl<'a, I, T: 'a> TrustedRandomAccess for Cloned<I>
     }
 
     #[inline]
-    fn may_have_side_effect() -> bool { false }
+    fn may_have_side_effect() -> bool {
+        I::may_have_side_effect()
+    }
 }
 
 #[unstable(feature = "trusted_len", issue = "37572")]
@@ -618,7 +719,7 @@ unsafe impl<'a, I, T: 'a> TrustedLen for Cloned<I>
 /// [`cycle`]: trait.Iterator.html#method.cycle
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Cycle<I> {
     orig: I,
@@ -658,7 +759,7 @@ impl<I> FusedIterator for Cycle<I> where I: Clone + Iterator {}
 ///
 /// [`step_by`]: trait.Iterator.html#method.step_by
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "iterator_step_by", since = "1.28.0")]
 #[derive(Clone, Debug)]
 pub struct StepBy<I> {
@@ -673,7 +774,12 @@ impl<I> Iterator for StepBy<I> where I: Iterator {
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        <Self as StepBySpecIterator>::spec_next(self)
+        if self.first_take {
+            self.first_take = false;
+            self.iter.next()
+        } else {
+            self.iter.nth(self.step)
+        }
     }
 
     #[inline]
@@ -733,76 +839,6 @@ impl<I> Iterator for StepBy<I> where I: Iterator {
     }
 }
 
-// hidden trait for specializing iterator methods
-// could be generalized but is currently only used for StepBy
-trait StepBySpecIterator {
-    type Item;
-    fn spec_next(&mut self) -> Option<Self::Item>;
-}
-
-impl<I> StepBySpecIterator for StepBy<I>
-where
-    I: Iterator,
-{
-    type Item = I::Item;
-
-    #[inline]
-    default fn spec_next(&mut self) -> Option<I::Item> {
-        if self.first_take {
-            self.first_take = false;
-            self.iter.next()
-        } else {
-            self.iter.nth(self.step)
-        }
-    }
-}
-
-impl<T> StepBySpecIterator for StepBy<ops::Range<T>>
-where
-    T: Step,
-{
-    #[inline]
-    fn spec_next(&mut self) -> Option<Self::Item> {
-        self.first_take = false;
-        if !(self.iter.start < self.iter.end) {
-            return None;
-        }
-        // add 1 to self.step to get original step size back
-        // it was decremented for the general case on construction
-        if let Some(n) = self.iter.start.add_usize(self.step+1) {
-            let next = mem::replace(&mut self.iter.start, n);
-            Some(next)
-        } else {
-            let last = self.iter.start.clone();
-            self.iter.start = self.iter.end.clone();
-            Some(last)
-        }
-    }
-}
-
-impl<T> StepBySpecIterator for StepBy<ops::RangeInclusive<T>>
-where
-    T: Step,
-{
-    #[inline]
-    fn spec_next(&mut self) -> Option<Self::Item> {
-        self.first_take = false;
-        if !(self.iter.start <= self.iter.end) {
-            return None;
-        }
-        // add 1 to self.step to get original step size back
-        // it was decremented for the general case on construction
-        if let Some(n) = self.iter.start.add_usize(self.step+1) {
-            let next = mem::replace(&mut self.iter.start, n);
-            Some(next)
-        } else {
-            let last = self.iter.start.replace_one();
-            self.iter.end.replace_zero();
-            Some(last)
-        }
-    }
-}
-
 // StepBy can only make the iterator shorter, so the len will still fit.
 #[stable(feature = "iterator_step_by", since = "1.28.0")]
 impl<I> ExactSizeIterator for StepBy<I> where I: ExactSizeIterator {}
@@ -815,7 +851,7 @@ impl<I> ExactSizeIterator for StepBy<I> where I: ExactSizeIterator {}
 /// [`chain`]: trait.Iterator.html#method.chain
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Chain<A, B> {
     a: A,
@@ -1066,7 +1102,7 @@ unsafe impl<A, B> TrustedLen for Chain<A, B>
 /// [`zip`]: trait.Iterator.html#method.zip
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Zip<A, B> {
     a: A,
@@ -1366,7 +1402,7 @@ unsafe impl<A, B> TrustedLen for Zip<A, B>
 ///     println!("{:?}", pair);
 /// }
 /// ```
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct Map<I, F> {
@@ -1477,7 +1513,7 @@ unsafe impl<B, I, F> TrustedRandomAccess for Map<I, F>
 ///
 /// [`filter`]: trait.Iterator.html#method.filter
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct Filter<I, P> {
@@ -1609,7 +1645,7 @@ impl<I: FusedIterator, P> FusedIterator for Filter<I, P>
 ///
 /// [`filter_map`]: trait.Iterator.html#method.filter_map
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct FilterMap<I, F> {
@@ -1720,7 +1756,7 @@ impl<B, I: FusedIterator, F> FusedIterator for FilterMap<I, F>
 /// [`enumerate`]: trait.Iterator.html#method.enumerate
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Enumerate<I> {
     iter: I,
@@ -1881,7 +1917,7 @@ unsafe impl<I> TrustedLen for Enumerate<I>
 /// [`peekable`]: trait.Iterator.html#method.peekable
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Peekable<I: Iterator> {
     iter: I,
@@ -1917,18 +1953,11 @@ impl<I: Iterator> Iterator for Peekable<I> {
 
     #[inline]
     fn nth(&mut self, n: usize) -> Option<I::Item> {
-        // FIXME(#43234): merge these when borrow-checking gets better.
-        if n == 0 {
-            match self.peeked.take() {
-                Some(v) => v,
-                None => self.iter.nth(n),
-            }
-        } else {
-            match self.peeked.take() {
-                Some(None) => None,
-                Some(Some(_)) => self.iter.nth(n - 1),
-                None => self.iter.nth(n),
-            }
+        match self.peeked.take() {
+            Some(None) => None,
+            Some(v @ Some(_)) if n == 0 => v,
+            Some(Some(_)) => self.iter.nth(n - 1),
+            None => self.iter.nth(n),
         }
     }
 
@@ -2027,14 +2056,8 @@ impl<I: Iterator> Peekable<I> {
     #[inline]
     #[stable(feature = "rust1", since = "1.0.0")]
     pub fn peek(&mut self) -> Option<&I::Item> {
-        if self.peeked.is_none() {
-            self.peeked = Some(self.iter.next());
-        }
-        match self.peeked {
-            Some(Some(ref value)) => Some(value),
-            Some(None) => None,
-            _ => unreachable!(),
-        }
+        let iter = &mut self.iter;
+        self.peeked.get_or_insert_with(|| iter.next()).as_ref()
     }
 }
 
@@ -2045,7 +2068,7 @@ impl<I: Iterator> Peekable<I> {
 ///
 /// [`skip_while`]: trait.Iterator.html#method.skip_while
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct SkipWhile<I, P> {
@@ -2128,7 +2151,7 @@ impl<I, P> FusedIterator for SkipWhile<I, P>
 ///
 /// [`take_while`]: trait.Iterator.html#method.take_while
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct TakeWhile<I, P> {
@@ -2171,8 +2194,12 @@ impl<I: Iterator, P> Iterator for TakeWhile<I, P>
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let (_, upper) = self.iter.size_hint();
-        (0, upper) // can't know a lower bound, due to the predicate
+        if self.flag {
+            (0, Some(0))
+        } else {
+            let (_, upper) = self.iter.size_hint();
+            (0, upper) // can't know a lower bound, due to the predicate
+        }
     }
 
     #[inline]
@@ -2208,7 +2235,7 @@ impl<I, P> FusedIterator for TakeWhile<I, P>
 /// [`skip`]: trait.Iterator.html#method.skip
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Skip<I> {
     iter: I,
@@ -2346,7 +2373,7 @@ impl<I> FusedIterator for Skip<I> where I: FusedIterator {}
 /// [`take`]: trait.Iterator.html#method.take
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Take<I> {
     iter: I,
@@ -2383,6 +2410,10 @@ impl<I> Iterator for Take<I> where I: Iterator{
 
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
+        if self.n == 0 {
+            return (0, Some(0));
+        }
+
         let (lower, upper) = self.iter.size_hint();
 
         let lower = cmp::min(lower, self.n);
@@ -2429,7 +2460,7 @@ unsafe impl<I: TrustedLen> TrustedLen for Take<I> {}
 ///
 /// [`scan`]: trait.Iterator.html#method.scan
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct Scan<I, St, F> {
@@ -2489,7 +2520,7 @@ impl<B, I, St, F> Iterator for Scan<I, St, F> where
 ///
 /// [`flat_map`]: trait.Iterator.html#method.flat_map
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct FlatMap<I, U: IntoIterator, F> {
     inner: FlattenCompat<Map<I, F>, <U as IntoIterator>::IntoIter>
@@ -2574,14 +2605,14 @@ impl<I, U, F> FusedIterator for FlatMap<I, U, F>
 ///
 /// [`flatten`]: trait.Iterator.html#method.flatten
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
-#[unstable(feature = "iterator_flatten", issue = "48213")]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+#[stable(feature = "iterator_flatten", since = "1.29.0")]
 pub struct Flatten<I: Iterator>
 where I::Item: IntoIterator {
     inner: FlattenCompat<I, <I::Item as IntoIterator>::IntoIter>,
 }
 
-#[unstable(feature = "iterator_flatten", issue = "48213")]
+#[stable(feature = "iterator_flatten", since = "1.29.0")]
 impl<I, U> fmt::Debug for Flatten<I>
     where I: Iterator + fmt::Debug, U: Iterator + fmt::Debug,
           I::Item: IntoIterator<IntoIter = U, Item = U::Item>,
@@ -2591,7 +2622,7 @@ impl<I, U> fmt::Debug for Flatten<I>
     }
 }
 
-#[unstable(feature = "iterator_flatten", issue = "48213")]
+#[stable(feature = "iterator_flatten", since = "1.29.0")]
 impl<I, U> Clone for Flatten<I>
     where I: Iterator + Clone, U: Iterator + Clone,
           I::Item: IntoIterator<IntoIter = U, Item = U::Item>,
@@ -2599,7 +2630,7 @@ impl<I, U> Clone for Flatten<I>
     fn clone(&self) -> Self { Flatten { inner: self.inner.clone() } }
 }
 
-#[unstable(feature = "iterator_flatten", issue = "48213")]
+#[stable(feature = "iterator_flatten", since = "1.29.0")]
 impl<I, U> Iterator for Flatten<I>
     where I: Iterator, U: Iterator,
           I::Item: IntoIterator<IntoIter = U, Item = U::Item>
@@ -2627,7 +2658,7 @@ impl<I, U> Iterator for Flatten<I>
     }
 }
 
-#[unstable(feature = "iterator_flatten", issue = "48213")]
+#[stable(feature = "iterator_flatten", since = "1.29.0")]
 impl<I, U> DoubleEndedIterator for Flatten<I>
     where I: DoubleEndedIterator, U: DoubleEndedIterator,
           I::Item: IntoIterator<IntoIter = U, Item = U::Item>
@@ -2650,7 +2681,7 @@ impl<I, U> DoubleEndedIterator for Flatten<I>
     }
 }
 
-#[unstable(feature = "iterator_flatten", issue = "48213")]
+#[stable(feature = "iterator_flatten", since = "1.29.0")]
 impl<I, U> FusedIterator for Flatten<I>
     where I: FusedIterator, U: Iterator,
           I::Item: IntoIterator<IntoIter = U, Item = U::Item> {}
@@ -2803,7 +2834,7 @@ impl<I, U> DoubleEndedIterator for FlattenCompat<I, U>
 /// [`fuse`]: trait.Iterator.html#method.fuse
 /// [`Iterator`]: trait.Iterator.html
 #[derive(Clone, Debug)]
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 pub struct Fuse<I> {
     iter: I,
@@ -3027,7 +3058,7 @@ impl<I> ExactSizeIterator for Fuse<I> where I: ExactSizeIterator {
 ///
 /// [`inspect`]: trait.Iterator.html#method.inspect
 /// [`Iterator`]: trait.Iterator.html
-#[must_use = "iterator adaptors are lazy and do nothing unless consumed"]
+#[must_use = "iterators are lazy and do nothing unless consumed"]
 #[stable(feature = "rust1", since = "1.0.0")]
 #[derive(Clone)]
 pub struct Inspect<I, F> {

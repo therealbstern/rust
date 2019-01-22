@@ -1,13 +1,3 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 //! Builds MIR from expressions. As a caller into this module, you
 //! have many options, but the first thing you have to decide is
 //! whether you are evaluating this expression for its *value*, its
@@ -65,15 +55,15 @@
 //! which can fallback to `into`. So if one of the `ExprKind` variants is not, in fact,
 //! implemented in the category where it is supposed to be, there will be a problem.
 //!
-//! Of those fallbacks, the most interesting one is `as_temp`, because
+//! Of those fallbacks, the most interesting one is `into`, because
 //! it discriminates based on the category of the expression. This is
 //! basically the point where the "by value" operations are bridged
 //! over to the "by reference" mode (`as_place`).
 
 mod as_constant;
+mod as_operand;
 mod as_place;
 mod as_rvalue;
-mod as_operand;
 mod as_temp;
 mod category;
 mod into;

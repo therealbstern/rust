@@ -1,13 +1,3 @@
-// Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use errors::{Error, ErrorKind};
 use runtest::ProcRes;
 use serde_json;
@@ -40,6 +30,21 @@ struct DiagnosticSpan {
     expansion: Option<Box<DiagnosticSpanMacroExpansion>>,
 }
 
+impl DiagnosticSpan {
+    /// Returns the deepest source span in the macro call stack with a given file name.
+    /// This is either the supplied span, or the span for some macro callsite that expanded to it.
+    fn first_callsite_in_file(&self, file_name: &str) -> &DiagnosticSpan {
+        if self.file_name == file_name {
+            self
+        } else {
+            self.expansion
+                .as_ref()
+                .map(|origin| origin.span.first_callsite_in_file(file_name))
+                .unwrap_or(self)
+        }
+    }
+}
+
 #[derive(Deserialize, Clone)]
 struct DiagnosticSpanMacroExpansion {
     /// span where macro was applied to generate this code
@@ -67,7 +72,7 @@ pub fn extract_rendered(output: &str, proc_res: &ProcRes) -> String {
                     Err(error) => {
                         proc_res.fatal(Some(&format!(
                             "failed to decode compiler output as json: \
-                             `{}`\noutput: {}\nline: {}",
+                             `{}`\nline: {}\noutput: {}",
                             error, line, output
                         )));
                     }
@@ -99,7 +104,7 @@ fn parse_line(file_name: &str, line: &str, output: &str, proc_res: &ProcRes) -> 
             Err(error) => {
                 proc_res.fatal(Some(&format!(
                     "failed to decode compiler output as json: \
-                     `{}`\noutput: {}\nline: {}",
+                     `{}`\nline: {}\noutput: {}",
                     error, line, output
                 )));
             }
@@ -115,16 +120,23 @@ fn push_expected_errors(
     default_spans: &[&DiagnosticSpan],
     file_name: &str,
 ) {
-    let spans_in_this_file: Vec<_> = diagnostic
+    // In case of macro expansions, we need to get the span of the callsite
+    let spans_info_in_this_file: Vec<_> = diagnostic
         .spans
         .iter()
-        .filter(|span| Path::new(&span.file_name) == Path::new(&file_name))
+        .map(|span| (span.is_primary, span.first_callsite_in_file(file_name)))
+        .filter(|(_, span)| Path::new(&span.file_name) == Path::new(&file_name))
         .collect();
 
-    let primary_spans: Vec<_> = spans_in_this_file.iter()
-        .cloned()
-        .filter(|span| span.is_primary)
+    let spans_in_this_file: Vec<_> = spans_info_in_this_file.iter()
+        .map(|(_, span)| span)
+        .collect();
+
+    let primary_spans: Vec<_> = spans_info_in_this_file.iter()
+        .filter(|(is_primary, _)| *is_primary)
+        .map(|(_, span)| span)
         .take(1) // sometimes we have more than one showing up in the json; pick first
+        .cloned()
         .collect();
     let primary_spans = if primary_spans.is_empty() {
         // subdiagnostics often don't have a span of their own;

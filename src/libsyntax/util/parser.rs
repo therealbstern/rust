@@ -1,22 +1,11 @@
-// Copyright 2015 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
 use parse::token::{Token, BinOpToken};
 use symbol::keywords;
 use ast::{self, BinOpKind};
 
-use std::cmp::Ordering;
-
 /// Associative operator with precedence.
 ///
 /// This is the enum which specifies operator precedence and fixity to the parser.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Debug)]
 pub enum AssocOp {
     /// `+`
     Add,
@@ -70,7 +59,7 @@ pub enum AssocOp {
     Colon,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Debug)]
 pub enum Fixity {
     /// The operator is left-associative
     Left,
@@ -230,7 +219,7 @@ pub const PREC_POSTFIX: i8 = 60;
 pub const PREC_PAREN: i8 = 99;
 pub const PREC_FORCE_PAREN: i8 = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum ExprPrecedence {
     Closure,
     Break,
@@ -275,21 +264,10 @@ pub enum ExprPrecedence {
     Loop,
     Match,
     Block,
-    Catch,
+    TryBlock,
     Struct,
     Async,
-}
-
-impl PartialOrd for ExprPrecedence {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.order().cmp(&other.order()))
-    }
-}
-
-impl Ord for ExprPrecedence {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.order().cmp(&other.order())
-    }
+    Err,
 }
 
 impl ExprPrecedence {
@@ -346,16 +324,17 @@ impl ExprPrecedence {
             ExprPrecedence::Loop |
             ExprPrecedence::Match |
             ExprPrecedence::Block |
-            ExprPrecedence::Catch |
+            ExprPrecedence::TryBlock |
             ExprPrecedence::Async |
-            ExprPrecedence::Struct => PREC_PAREN,
+            ExprPrecedence::Struct |
+            ExprPrecedence::Err => PREC_PAREN,
         }
     }
 }
 
 
-/// Expressions that syntactically contain an "exterior" struct literal i.e. not surrounded by any
-/// parens or other delimiters, e.g. `X { y: 1 }`, `X { y: 1 }.method()`, `foo == X { y: 1 }` and
+/// Expressions that syntactically contain an "exterior" struct literal i.e., not surrounded by any
+/// parens or other delimiters, e.g., `X { y: 1 }`, `X { y: 1 }.method()`, `foo == X { y: 1 }` and
 /// `X { y: 1 } == foo` all do, but `(X { y: 1 }) == foo` does not.
 pub fn contains_exterior_struct_lit(value: &ast::Expr) -> bool {
     match value.node {

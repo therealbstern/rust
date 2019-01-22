@@ -1,13 +1,3 @@
-// Copyright 2017 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 // A signature is a string representation of an item's type signature, excluding
 // any body. It also includes ids for any defs or refs in the signature. For
 // example:
@@ -306,7 +296,7 @@ impl Sig for ast::Ty {
                 let nested = pprust::bounds_to_string(bounds);
                 Ok(text_sig(nested))
             }
-            ast::TyKind::ImplTrait(ref bounds) => {
+            ast::TyKind::ImplTrait(_, ref bounds) => {
                 // FIXME recurse into bounds
                 let nested = pprust::bounds_to_string(bounds);
                 Ok(text_sig(format!("impl {}", nested)))
@@ -435,7 +425,7 @@ impl Sig for ast::Item {
                     },
                 ];
                 text.push_str(&name);
-                // Could be either `mod foo;` or `mod foo { ... }`, but we'll just puck one.
+                // Could be either `mod foo;` or `mod foo { ... }`, but we'll just pick one.
                 text.push(';');
 
                 Ok(Signature {
@@ -443,6 +433,18 @@ impl Sig for ast::Item {
                     defs,
                     refs: vec![],
                 })
+            }
+            ast::ItemKind::Existential(ref bounds, ref generics) => {
+                let text = "existential type ".to_owned();
+                let mut sig = name_and_generics(text, offset, generics, self.id, self.ident, scx)?;
+
+                if !bounds.is_empty() {
+                    sig.text.push_str(": ");
+                    sig.text.push_str(&pprust::bounds_to_string(bounds));
+                }
+                sig.text.push(';');
+
+                Ok(sig)
             }
             ast::ItemKind::Ty(ref ty, ref generics) => {
                 let text = "type ".to_owned();
@@ -618,7 +620,7 @@ impl Sig for ast::Generics {
 
         let mut text = "<".to_owned();
 
-        let mut defs = vec![];
+        let mut defs = Vec::with_capacity(self.params.len());
         for param in &self.params {
             let mut param_text = param.ident.to_string();
             defs.push(SigElement {

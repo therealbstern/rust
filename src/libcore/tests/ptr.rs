@@ -1,13 +1,3 @@
-// Copyright 2014 The Rust Project Developers. See the COPYRIGHT
-// file at the top-level directory of this distribution and at
-// http://rust-lang.org/COPYRIGHT.
-//
-// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
-// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
-// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
-// option. This file may not be copied, modified, or distributed
-// except according to those terms.
-
 use core::ptr::*;
 use core::cell::RefCell;
 
@@ -84,16 +74,16 @@ fn test_is_null() {
     assert!(nms.is_null());
 
     // Pointers to unsized types -- trait objects
-    let ci: *const ToString = &3;
+    let ci: *const dyn ToString = &3;
     assert!(!ci.is_null());
 
-    let mi: *mut ToString = &mut 3;
+    let mi: *mut dyn ToString = &mut 3;
     assert!(!mi.is_null());
 
-    let nci: *const ToString = null::<isize>();
+    let nci: *const dyn ToString = null::<isize>();
     assert!(nci.is_null());
 
-    let nmi: *mut ToString = null_mut::<isize>();
+    let nmi: *mut dyn ToString = null_mut::<isize>();
     assert!(nmi.is_null());
 }
 
@@ -140,16 +130,16 @@ fn test_as_ref() {
         assert_eq!(nms.as_ref(), None);
 
         // Pointers to unsized types -- trait objects
-        let ci: *const ToString = &3;
+        let ci: *const dyn ToString = &3;
         assert!(ci.as_ref().is_some());
 
-        let mi: *mut ToString = &mut 3;
+        let mi: *mut dyn ToString = &mut 3;
         assert!(mi.as_ref().is_some());
 
-        let nci: *const ToString = null::<isize>();
+        let nci: *const dyn ToString = null::<isize>();
         assert!(nci.as_ref().is_none());
 
-        let nmi: *mut ToString = null_mut::<isize>();
+        let nmi: *mut dyn ToString = null_mut::<isize>();
         assert!(nmi.as_ref().is_none());
     }
 }
@@ -182,10 +172,10 @@ fn test_as_mut() {
         assert_eq!(nms.as_mut(), None);
 
         // Pointers to unsized types -- trait objects
-        let mi: *mut ToString = &mut 3;
+        let mi: *mut dyn ToString = &mut 3;
         assert!(mi.as_mut().is_some());
 
-        let nmi: *mut ToString = null_mut::<isize>();
+        let nmi: *mut dyn ToString = null_mut::<isize>();
         assert!(nmi.as_mut().is_none());
     }
 }
